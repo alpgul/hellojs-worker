@@ -47,22 +47,37 @@ console.log(`  akamai    ${expected.akamai}`)
 	// profile object and pass it as opts.headers so their HTTP layer matches Chrome too.
 	const profile = profiles.registerFromPeet('parrot-fixture', fixture)
 
-	// Force a fresh connection AND clear the session cache so a stale PSK doesn't add a
-	// pre_shared_key extension that bumps the JA4 extension count.
+	// If the fixture was captured on a warm (resumed) connection it will include
+	// pre_shared_key (extension 41). We can't replay a captured PSK body — the ticket is
+	// one-shot and bound to the issuer — but we CAN reproduce the warm JA4 by making a
+	// cold priming request first so the server issues us a NewSessionTicket. The second
+	// request then resumes via hellojs's session-cache path and emits PSK semantically.
+	const WARM = (fixture.tls?.extensions || []).some(e =>
+		/\((?:41|0x29)\)\s*$/i.test(String(e.name)) || String(e.name).toLowerCase().includes('pre_shared_key'))
 	request.pool.closeAll()
 	require('../../lib/tls/session-cache').clear()
 
-	const res = await request({
+	const sendOpts = {
 		url: 'https://tls.peet.ws/api/all',
 		json: true,
 		profile: 'parrot-fixture',
-		// Explicit header block from the parrot capture. The builder now emits caller headers
-		// verbatim; nothing else gets injected. This is how you get full Chrome HTTP mimicry.
 		headers: profile.headers ? { ...profile.headers } : undefined,
 		forever: false,
 		resolveWithFullResponse: true,
 		timeouts: { tlsHandshake: 15_000, response: 15_000 },
-	})
+	}
+
+	if (WARM) {
+		console.log('(fixture captured warm — making a cold priming request to populate the session ticket cache)')
+		try { await request({ ...sendOpts, forever: true }) } catch (e) {
+			console.log(`  prime failed: ${e.message} — continuing anyway`)
+		}
+		// Keep the ticket cache intact; just force a NEW connection so the next handshake
+		// is a resumed one rather than reusing the warm socket.
+		request.pool.closeAll()
+	}
+
+	const res = await request(sendOpts)
 
 	const got = {
 		ja4:       res.body.tls?.ja4,
