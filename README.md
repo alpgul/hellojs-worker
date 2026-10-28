@@ -154,10 +154,11 @@ await request({
 Every request carries the resolved profile's header set automatically, in the profile's
 order (`sec-ch-ua*`, `user-agent`, `accept`, `sec-fetch-*`, …). Your `headers` entries
 override non-identity values without moving them; new names append after the profile
-block. `user-agent` and the `sec-ch-ua*` client hints are fixed by the profile — a
+block. Identity headers are fixed by the profile — `user-agent` and the `sec-ch-ua*`
+client hints for Chrome profiles, `user-agent` alone for `firefox147` — and a
 conflicting value is rejected with `EHEADERFIXED`. Custom profiles can extend the fixed
 set with a `fixedHeaders` array of lowercase names. Cookie-jar `Cookie` is inserted just
-before `priority`, matching Chrome.
+before `priority`, matching the browser header order.
 
 ---
 
@@ -363,6 +364,11 @@ back-to-back handshakes from the same Chrome instance — the JA4 will match, th
 
 The default profile, `chrome147-mac`, was captured from a real Chrome 147 install
 on macOS and lives at [`lib/profiles/chrome147-mac.js`](lib/profiles/chrome147-mac.js).
+A `firefox147` profile (macOS) ships alongside it in
+[`lib/profiles/firefox147.js`](lib/profiles/firefox147.js): fixed 17-cipher /
+17-extension order, X25519MLKEM768 + X25519 key shares, no GREASE, HTTP/2
+`1:65536;2:0;4:131072;5:16384|12517377|0|m,p,a,s`, and the Firefox navigation
+header set.
 To clone any other fingerprint, see [Parrot](#parrot-clone-any-fingerprint-from-a-tlspeetws-response).
 The profile defines:
 
@@ -834,6 +840,7 @@ lib/
 ├── profiles/
 │   ├── index.js               registry (get/register/registerFromPeet)
 │   ├── chrome147-mac.js       canonical Chrome 147 profile
+│   ├── firefox147.js          Firefox 147 (macOS) profile
 │   └── from-peet.js           paste a tls.peet.ws response → profile object
 ├── utils/
 │   ├── config.js              MESSAGE_TYPES, CIPHERS, HASHES tables
