@@ -417,6 +417,33 @@ conn.on('ready', async () => {
 await conn.connect()
 ```
 
+### UDP transport
+
+QUIC is the only part of hellojs that needs a datagram socket, and `node:dgram` is
+reached exclusively through the seam at `lib/h3/udp.js` (`request.udp`). It exports the
+same `createSocket(type)` surface as `node:dgram`, so the QUIC code never notices the
+swap. Runtimes without a UDP API — worker/edge sandboxes — can take HTTP/3 out of reach
+without deleting the QUIC code:
+
+```js
+const request = require('@unreleased/hellojs')
+
+request.udp.setUdpProvider(null)          // h3 becomes unavailable
+await request({ url: 'https://…', h3: true })   // → TCP + TLS fallback, still 200
+```
+
+`setUdpProvider(null)` makes `createSocket()` throw `EUDPUNAVAILABLE`, which the h3
+fallback path turns into a plain TCP request. A runtime that *does* expose datagram
+sockets installs its own provider instead — any object with `on('message'|'error')`,
+`bind(port, cb)`, `send(buf, port, host[, cb])`, `close()` and a `destroyed` flag
+(the subset of `dgram.Socket` we use):
+
+```js
+request.udp.setUdpProvider((type) => myRuntimeUdpSocket(type))
+```
+
+With no provider configured the seam resolves to `dgram`, so Node needs no setup.
+
 ### What's implemented
 
 - **QUIC v1 packet protection** (Initial / Handshake / 1-RTT) — AEAD payload + header protection. RFC 9001 Appendix A test vectors pass byte-perfect.
@@ -783,6 +810,7 @@ lib/
 │                              with CONTINUATION + per-stream flow control)
 ├── h3/
 │   ├── connection.js          QUIC v1 connection + NewReno + key updates + NCID
+│   ├── udp.js                 UDP transport seam (dgram by default, swappable/off)
 │   ├── h3.js                  HTTP/3 layer (control + encoder + decoder streams)
 │   ├── packet.js              QUIC packet build/parse + frame codec
 │   ├── keys.js                Initial + traffic key derivation + AEAD helpers

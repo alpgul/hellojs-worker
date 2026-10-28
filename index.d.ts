@@ -105,6 +105,9 @@ export interface RequestFn {
 
 	/** Exported for advanced users. */
 	TLS: typeof TLS
+
+	/** QUIC's UDP seam — see [UDP transport](README.md#udp-transport). */
+	udp: UdpTransport
 }
 
 declare const request: RequestFn
@@ -113,6 +116,24 @@ export = request
 
 export interface TLSOptions {
 	verifyTLS?: boolean
+}
+
+/** The subset of `node:dgram.Socket` that the QUIC client depends on. */
+export interface UdpSocket {
+	on(event: 'message', listener: (buf: Buffer, rinfo: { address: string; family: string; port: number }) => void): unknown
+	on(event: 'error', listener: (err: Error) => void): unknown
+	bind(port: number, callback: () => void): unknown
+	send(buf: Buffer, port: number, host: string, callback?: () => void): unknown
+	close(): unknown
+	readonly destroyed: boolean
+}
+
+export interface UdpTransport {
+	/** Open a datagram socket; throws `code === 'EUDPUNAVAILABLE'` when no provider is set. */
+	createSocket(type?: 'udp4' | 'udp6'): UdpSocket
+	/** Install a provider, or pass `null` to take HTTP/3 out of reach (requests fall back to TCP). */
+	setUdpProvider(factory: ((type: 'udp4' | 'udp6') => UdpSocket) | null): void
+	udpAvailable(): boolean
 }
 
 export class TLS extends EventEmitter {
