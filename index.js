@@ -3,3 +3,4 @@ module.exports.TLS = require('./lib/tls/tls').TLS
 module.exports.observability = require('./lib/observability').observability
 module.exports.profiles = require('./lib/profiles')
 module.exports.udp = require('./lib/h3/udp')
+module.exports.setTrustedRoots = require('./lib/tls/cert-validate').setTrustedRoots

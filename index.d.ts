@@ -106,6 +106,9 @@ export interface RequestFn {
 	/** Exported for advanced users. */
 	TLS: typeof TLS
 
+	/** Install a Mozilla/NSS PEM bundle when the runtime has no built-in roots. */
+	setTrustedRoots(pems: string[]): void
+
 	/** QUIC's UDP seam — see [UDP transport](README.md#udp-transport). */
 	udp: UdpTransport
 }
