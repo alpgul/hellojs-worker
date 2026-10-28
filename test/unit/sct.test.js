@@ -28,7 +28,7 @@ test('parseSctList handles a synthetic 2-SCT list', () => {
 		buf.writeBigUInt64BE(BigInt(ts), o); o += 8
 		buf.writeUInt16BE(0, o); o += 2   // extensions empty
 		buf[o++] = 4; buf[o++] = 1        // sha256, RSA
-		buf.writeUInt16BE(16, o); o += 2  // signature length
+		buf.writeUInt16BE(16, o)          // signature length
 		// 16 zero bytes
 		return buf
 	}

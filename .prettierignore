@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+package-lock.json
+test/fixtures/
+*.pem
+*.der
+chrome-response-*.json
