@@ -881,7 +881,6 @@ lib/
 ├── connect.js                 per-request TLS/QUIC connection factory (h2/h1/h3),
 │                              per-phase timeouts
 ├── alt-svc.js                 Alt-Svc cache for automatic h3 upgrade
-├── happy-eyeballs.js          RFC 8305 IPv4/IPv6 race for TCP connect
 ├── socks5.js                  SOCKS5 client (RFC 1928 + RFC 1929 user/pass)
 ├── cookies.js                 RFC 6265 cookie jar (Domain/Path/Secure/SameSite/Expires)
 ├── headers.js                 Chrome 147 default header set + ordering
