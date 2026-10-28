@@ -36,7 +36,7 @@ test('oversized HPACK on a stream fails the request instead of crashing', () => 
 	assert.doesNotThrow(() => session._onData(frame.build(frame.TYPE.HEADERS, frame.FLAG.END_HEADERS, 1, Buffer.alloc(7000, 0x82))))
 	assert.ok(err && /h2 connection error/.test(err.message), `stream should receive a connection error, got ${err && err.message}`)
 	assert.strictEqual(err.code, 'EH2COMPRESS')
-	assert.ok(closed, 'session should emit close so the pool evicts it')
+	assert.ok(closed, 'session should emit close so the transport is torn down')
 })
 
 test('CONTINUATION flood is bounded (no unbounded fragment growth)', () => {

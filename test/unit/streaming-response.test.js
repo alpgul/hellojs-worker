@@ -9,9 +9,6 @@ const os = require('node:os')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const { execSync } = require('node:child_process')
-const { after } = require('node:test')
-
-after(() => { require('../../').pool.closeAll() })
 
 function genServerCert() {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hjsrv-'))

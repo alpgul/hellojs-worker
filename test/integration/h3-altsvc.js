@@ -2,7 +2,7 @@
 // second request auto-upgrades to h3 transparently.
 
 const request = require('../../')
-const { lookupAltSvc } = require('../../lib/pool')
+const { lookupAltSvc } = require('../../lib/alt-svc')
 
 ;(async () => {
 	let pass = 0, fail = 0
@@ -21,7 +21,7 @@ const { lookupAltSvc } = require('../../lib/pool')
 
 	// 2) First h2 request captures Alt-Svc (homepage includes alt-svc header)
 	try {
-		const r = await request({ url: `https://${HOST}/`, resolveWithFullResponse: true, simple: false, forever: false })
+		const r = await request({ url: `https://${HOST}/`, resolveWithFullResponse: true, simple: false })
 		const alt = lookupAltSvc(HOST)
 		log('h2 response captures Alt-Svc', !!alt, alt ? `port=${alt.port}` : 'no alt-svc seen')
 	} catch (e) { log('h2 captures Alt-Svc', false, e.message) }
@@ -33,6 +33,5 @@ const { lookupAltSvc } = require('../../lib/pool')
 	} catch (e) { log('auto-upgrade', false, e.message) }
 
 	console.log(`\n${pass}/${pass + fail} passed`)
-	request.pool.closeAll()
 	process.exit(fail ? 1 : 0)
 })()

@@ -35,6 +35,5 @@ const URL = 'https://www.cloudflare.com/cdn-cgi/trace'
 		console.log(`  ${label.padEnd(20)} total=${stats(times).total}ms  ${fmt(stats(times))}`)
 	}
 
-	request.pool.closeAll()
 	process.exit(0)
 })().catch(e => { console.error('ERR:', e.message); process.exit(1) })

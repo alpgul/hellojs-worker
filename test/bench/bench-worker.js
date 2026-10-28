@@ -20,7 +20,7 @@ async function makeAdapter(name) {
 				const r = await request({ url, verifyTLS: false, resolveWithFullResponse: true })
 				return r.body.length || r.rawBody?.length || 0
 			},
-			cleanup: () => request.pool.closeAll(),
+			cleanup: () => {},
 		}
 	}
 	if (name === 'node-https') {

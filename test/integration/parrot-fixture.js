@@ -54,7 +54,6 @@ console.log(`  akamai    ${expected.akamai}`)
 	// request then resumes via hellojs's session-cache path and emits PSK semantically.
 	const WARM = (fixture.tls?.extensions || []).some(e =>
 		/\((?:41|0x29)\)\s*$/i.test(String(e.name)) || String(e.name).toLowerCase().includes('pre_shared_key'))
-	request.pool.closeAll()
 	require('../../lib/tls/session-cache').clear()
 
 	const sendOpts = {
@@ -62,19 +61,15 @@ console.log(`  akamai    ${expected.akamai}`)
 		json: true,
 		profile: 'parrot-fixture',
 		headers: profile.headers ? { ...profile.headers } : undefined,
-		forever: false,
 		resolveWithFullResponse: true,
 		timeouts: { tlsHandshake: 15_000, response: 15_000 },
 	}
 
 	if (WARM) {
 		console.log('(fixture captured warm — making a cold priming request to populate the session ticket cache)')
-		try { await request({ ...sendOpts, forever: true }) } catch (e) {
+		try { await request(sendOpts) } catch (e) {
 			console.log(`  prime failed: ${e.message} — continuing anyway`)
 		}
-		// Keep the ticket cache intact; just force a NEW connection so the next handshake
-		// is a resumed one rather than reusing the warm socket.
-		request.pool.closeAll()
 	}
 
 	const res = await request(sendOpts)
@@ -125,10 +120,8 @@ console.log(`  akamai    ${expected.akamai}`)
 	}
 
 	console.log(`\n${fail === 0 ? '\x1b[32mALL PASS\x1b[0m' : `\x1b[31m${fail} FAILURE(S)\x1b[0m`}`)
-	request.pool.closeAll()
 	process.exit(fail ? 1 : 0)
 })().catch((e) => {
 	console.error('\nRequest failed:', e.code || '', e.message)
-	request.pool.closeAll()
 	process.exit(1)
 })

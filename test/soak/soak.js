@@ -79,8 +79,6 @@ server.listen(0, '127.0.0.1', async () => {
 
 	function finish() {
 		if (inFlight > 0) return
-		// Force-close pooled connections so the post-load snapshot is honest.
-		request.pool.closeAll()
 		// Give Node a tick to drain.
 		setImmediate(() => {
 			if (global.gc) global.gc()
@@ -91,7 +89,7 @@ server.listen(0, '127.0.0.1', async () => {
 
 			// Heap growth check. We compare the LAST checkpoint to the FIRST checkpoint (not the
 			// process baseline — there's always startup allocation). A leak shows up as monotonic
-			// growth that doesn't reset after pool.closeAll().
+			// growth that doesn't reset after the load ends.
 			const firstCheckpoint = samples.find((s) => s.stage === 'checkpoint') || samples[0]
 			const postClose       = samples.find((s) => s.stage === 'post-close')
 			const heapGrowth = postClose.heapUsedMB - firstCheckpoint.heapUsedMB
@@ -107,7 +105,7 @@ server.listen(0, '127.0.0.1', async () => {
 			// Handle count should drop to roughly the server-listen handle + stdio + (a few internal Node handles).
 			// We're permissive: budget 20 active handles. A true leak shows hundreds.
 			if (postClose.handles > 30) {
-				console.error(`FAIL ${postClose.handles} active handles after pool.closeAll() — possible socket leak`)
+				console.error(`FAIL ${postClose.handles} active handles after load — possible socket leak`)
 				failed = true
 			}
 			server.close(() => process.exit(failed ? 1 : 0))

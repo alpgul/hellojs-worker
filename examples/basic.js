@@ -94,17 +94,7 @@ const step = async (label, fn) => {
 		log('Cookie jar persists', body.cookies?.session === 'hellojs-rocks', `cookies=${JSON.stringify(body.cookies)}`)
 	})
 
-	// 11. Connection pool reuses one TLS handshake across many requests
-	await step('Pool reuse', async () => {
-		let handshakes = 0
-		const orig = request.pool._create.bind(request.pool)
-		request.pool._create = (...a) => { handshakes++; return orig(...a) }
-		for (let i = 0; i < 10; i++) await request({ url: 'https://httpbingo.org/get', json: true })
-		request.pool._create = orig
-		log('Pool: 10 requests share 1 handshake', handshakes <= 1, `handshakes=${handshakes}`)
-	})
-
-	// 12. defaults() instance — bind common opts
+	// 11. defaults() instance — bind common opts
 	await step('defaults() instance', async () => {
 		const api = request.defaults({ headers: { 'x-app': 'hellojs-demo', 'x-env': 'example' }, json: true, resolveWithFullResponse: true, simple: false })
 		const r = await api({ url: 'https://httpbingo.org/headers' })
@@ -120,16 +110,14 @@ const step = async (label, fn) => {
 
 	// 14. h3 auto-upgrade via Alt-Svc
 	await step('h3 auto-upgrade', async () => {
-		const r1 = await request({ url: 'https://www.cloudflare.com/', simple: false, resolveWithFullResponse: true, forever: false })
+		const r1 = await request({ url: 'https://www.cloudflare.com/', simple: false, resolveWithFullResponse: true })
 		const r2 = await request({ url: 'https://www.cloudflare.com/cdn-cgi/trace', simple: false, resolveWithFullResponse: true })
 		log('h3 auto-upgrade via Alt-Svc', r1.status === 200 && r2.status === 200, 'both 200, second went h3')
 	})
 
 	console.log('\n=== done ===\n')
-	request.pool.closeAll()
 	process.exit(0)
 })().catch((e) => {
 	console.error('\n\x1b[31m✗  FATAL\x1b[0m', e)
-	request.pool.closeAll()
 	process.exit(1)
 })

@@ -31,15 +31,13 @@ const profiles = require('../../lib/profiles')
 	// 2. Build a parrot profile from the same JSON.
 	profiles.registerFromPeet('peet-parrot', baseline.body)
 
-	// 3. Force a fresh connection AND clear the session cache, so the second handshake also
-	// doesn't include a pre_shared_key extension (which would bump the JA4 extension count).
-	request.pool.closeAll()
+	// 3. Clear the session cache so the second handshake also doesn't include a
+	// pre_shared_key extension (which would bump the JA4 extension count).
 	require('../../lib/tls/session-cache').clear()
 	const after = await request({
 		url: 'https://tls.peet.ws/api/all',
 		json: true,
 		profile: 'peet-parrot',
-		forever: false,
 		resolveWithFullResponse: true,
 	})
 	const got = {
@@ -69,6 +67,5 @@ const profiles = require('../../lib/profiles')
 	}
 
 	console.log(`\n${pass}/${pass + fail} fingerprints match`)
-	request.pool.closeAll()
 	process.exit(fail ? 1 : 0)
 })()

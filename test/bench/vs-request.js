@@ -38,7 +38,7 @@ async function timeOne(fn) {
 
 // hellojs runner
 const helloAgent = hello.defaults({ resolveWithFullResponse: true, simple: false })
-const helloFresh = (forever = true) => helloAgent({ url: URL, forever })
+const helloFresh = () => helloAgent({ url: URL })
 
 // request-promise with a keep-alive https.Agent
 const rpAgent = new https.Agent({ keepAlive: true, maxSockets: 30 })
@@ -87,12 +87,12 @@ const concurrent = async (label, run) => {
 	console.log()
 
 	console.log('--- COLD SINGLE (full handshake + 1 request) ---')
-	await cold('hellojs',          () => helloFresh(false))   // forever:false to force fresh
+	await cold('hellojs',          helloFresh)
 	await cold('request-promise',  () => rp({ ...rpRunOpts, forever: false, agent: undefined }))
 	await cold('node https',       nodeHttpsGet)
 	console.log()
 
-	console.log('--- SERIAL ' + N + ' (keep-alive / connection reuse) ---')
+	console.log('--- SERIAL ' + N + ' (steady state) ---')
 	// Warm one connection first to be fair (so we measure steady-state, not handshake)
 	await helloFresh()
 	await rpRun()
@@ -103,7 +103,7 @@ const concurrent = async (label, run) => {
 	const httpsSerial = await serial('node https',      nodeHttpsGet)
 	console.log()
 
-	console.log('--- CONCURRENT ' + N + ' (multiplexing / pool fanout) ---')
+	console.log('--- CONCURRENT ' + N + ' ---')
 	const helloConc = await concurrent('hellojs',         helloFresh)
 	const rpConc    = await concurrent('request-promise', rpRun)
 	const httpsConc = await concurrent('node https',      nodeHttpsGet)
@@ -121,7 +121,6 @@ const concurrent = async (label, run) => {
 		console.log(r.map((x, i) => i === 4 && typeof x === 'number' ? ['hellojs','request-promise','node https'][x] : String(x).padEnd(18)).join(''))
 	}
 
-	hello.pool.closeAll()
 	rpAgent.destroy()
 	process.exit(0)
 })().catch(e => { console.error(e); process.exit(1) })

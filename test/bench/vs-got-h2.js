@@ -109,7 +109,6 @@ async function timeOne(fn) {
 	row('concurrent wall (ms)', [hCon.wall, g2Con.wall, g1Con.wall, rpCon.wall])
 	row('throughput (req/s)',   [(N*1000/hCon.wall).toFixed(0), (N*1000/g2Con.wall).toFixed(0), (N*1000/g1Con.wall).toFixed(0), (N*1000/rpCon.wall).toFixed(0)])
 
-	hello.pool.closeAll()
 	rpAgent.destroy()
 	process.exit(0)
 })().catch(e => { console.error(e); process.exit(1) })

@@ -11,7 +11,6 @@ import request, {
 	Response,
 	RequestOptions,
 	TLS,
-	Pool,
 	PerPhaseTimeouts,
 	encodeH2EarlyData,
 } from '../../index'
@@ -64,13 +63,10 @@ async function smoke(): Promise<void> {
 		}
 	}
 
-	// TLS / Pool low-level surface.
+	// TLS low-level surface.
 	const t = new TLS('example.com', 443, null, { verifyTLS: true })
 	t.on('ready', () => {})
 	t.on('error', (_err: Error) => {})
-
-	const pool = new Pool({ idleTimeoutMs: 60_000, maxPerHost: 12 })
-	void pool
 
 	// 0-RTT helper.
 	const blob: Buffer = encodeH2EarlyData({

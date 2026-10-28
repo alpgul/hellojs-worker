@@ -61,6 +61,5 @@ const log = (label, ok, detail) => {
 	} catch (e) { log('JA4 still matches via request() API', false, e.message) }
 
 	console.log(`\n${pass}/${pass + fail} passed`)
-	request.pool.closeAll()
 	process.exit(fail ? 1 : 0)
 })()

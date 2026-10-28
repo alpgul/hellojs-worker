@@ -32,7 +32,7 @@ const res = await request({
 - [Request options](#request-options)
 - [Method shortcuts and defaults](#method-shortcuts-and-defaults)
 - [Cookie jar](#cookie-jar)
-- [Connection pool](#connection-pool)
+- [Per-phase timeouts](#per-phase-timeouts)
 - [Proxies](#proxies)
 - [Observability hooks](#observability-hooks)
 - [Parrot: clone any fingerprint](#parrot-clone-any-fingerprint-from-a-tlspeetws-response)
@@ -141,9 +141,8 @@ await request({
 | `followRedirect` | bool | `true` | up to `maxRedirects` |
 | `maxRedirects` | number | `10` | |
 | `timeout` | ms | — | aborts request after N ms (legacy single-phase timer; applies to the response phase). Overrides the 60s response default. |
-| `timeouts` | object | — | per-phase timeouts: `{ connect, tlsHandshake, response, idle }`, all in ms. Response phase defaults to **60_000ms** (60s) when neither `timeouts.response` nor `timeout` is set; pass `timeouts: { response: 0 }` to disable. Overrides `timeout` for the response phase. |
+| `timeouts` | object | — | per-phase timeouts: `{ connect, tlsHandshake, response }`, all in ms. Response phase defaults to **60_000ms** (60s) when neither `timeouts.response` nor `timeout` is set; pass `timeouts: { response: 0 }` to disable. Overrides `timeout` for the response phase. |
 | `proxy` | URL string | — | HTTP CONNECT proxy: `http://user:pass@host:port` |
-| `forever` | bool | `true` | reuse pooled TLS connections; `false` forces fresh handshake |
 | `simple` | bool | `true` | reject 4xx/5xx as errors (set `false` to resolve them as responses) |
 | `resolveWithFullResponse` | bool | `false` | resolve to `{status, headers, body}` instead of just body |
 | `retry` | object | none | `{ limit, methods, statusCodes, baseDelayMs }` |
@@ -210,58 +209,7 @@ under high churn.
 
 ---
 
-## Connection pool
-
-By default `request()` reuses pooled TLS+H2 connections to the same origin:
-
-```js
-// First call opens a TLS handshake → H2 session
-await request({ url: 'https://example.com/a' })
-
-// Second call to the same origin reuses the same H2 session (no handshake)
-await request({ url: 'https://example.com/b' })
-
-// Force a fresh handshake
-await request({ url: 'https://example.com/a', forever: false })
-```
-
-Pool internals:
-
-- Keyed by `(transport, host:port, profile, proxy)`
-- 5-minute idle timeout (evicts inactive connections)
-- 6 simultaneous fresh-handshake connections per host (matches Chrome). Pooled
-  multiplexed connections are not capped by this.
-- H2 connections multiplex; H1 connections are single-use, kept warm via TCP keep-alive
-- Per-origin in-flight handshake deduplication: concurrent first requests to a new host share one handshake
-- Happy Eyeballs v2 (RFC 8305) — races IPv4 + IPv6 with a 250ms head start for v6;
-  broken-IPv6 networks no longer pay full SYN timeouts
-
-```js
-// Tune limits per Pool instance:
-const { Pool } = require('@unreleased/hellojs')
-const myPool = new Pool({ idleTimeoutMs: 60_000, maxPerHost: 12 })
-```
-
-### Graceful shutdown
-
-`pool.shutdown(timeoutMs)` waits for in-flight requests to settle before closing the
-sockets. New `request()` calls are rejected with `EPROTO` during the drain. After the
-deadline, any remaining in-flight is forcefully closed.
-
-```js
-process.on('SIGTERM', async () => {
-  await request.pool.shutdown(30_000)
-  process.exit(0)
-})
-```
-
-For abrupt shutdown:
-
-```js
-request.pool.closeAll()
-```
-
-### Per-phase timeouts
+## Per-phase timeouts
 
 ```js
 await request({
@@ -270,7 +218,6 @@ await request({
     connect:      2_000,   // TCP connect must complete within 2s
     tlsHandshake: 5_000,   // TLS 1.2/1.3 handshake completion deadline
     response:    10_000,   // First byte / full response deadline
-    idle:        60_000,   // How long the pooled connection sits idle before close
   },
 })
 ```
@@ -542,10 +489,10 @@ offer the cached PSK on ClientHello — handshake skips the cert chain and the
 
 ```js
 // Pass 1: cold connect; server sends NewSessionTickets, cached automatically
-await request({ url: 'https://www.cloudflare.com/', forever: false })
+await request({ url: 'https://www.cloudflare.com/' })
 
 // Pass 2: auto-uses the cached PSK. Smaller CH, no cert chain.
-await request({ url: 'https://www.cloudflare.com/', forever: false })
+await request({ url: 'https://www.cloudflare.com/' })
 ```
 
 ### Real 0-RTT (early data)
@@ -559,7 +506,6 @@ completes:
 await request({
   url: 'https://example.com/api/foo',
   earlyData: Buffer.from('GET /api/foo HTTP/1.1\r\nHost: example.com\r\n\r\n'),
-  forever: false,
 })
 ```
 
@@ -719,6 +665,9 @@ try {
 
 ## Performance
 
+> The numbers below were captured with an earlier connection-pooled build. The current
+> tree opens a fresh connection per request, so warm-serial and concurrent timings differ.
+
 Benchmarked on macOS / Node 22.11 against a local HTTP/2 server (127.0.0.1, 1 KB
 fixed-size response). Each client runs as a fresh subprocess: 1 cold request
 (includes TLS handshake), then 30 warm-serial requests on the same connection,
@@ -792,7 +741,7 @@ baseline:
 ```
 200,000 requests in 13s (~15,000 rps)
 Heap growth: -5.93 MB (negative — GC reclaimed more than was held)
-Active handles after pool.closeAll(): 3
+Active handles after load: 3
 ```
 
 Knobs: `SOAK_REQUESTS=1000000 SOAK_CONCURRENCY=200 SOAK_HEAP_BUDGET_MB=128 npm run test:soak`.
@@ -898,9 +847,6 @@ request.head(...)
 request.options(...)
 request.defaults(defaultOpts)    // bound instance
 request.jar()                    // new RFC 6265 cookie jar
-request.pool                     // the default connection Pool
-request.pool.closeAll()
-await request.pool.shutdown(timeoutMs)   // graceful drain
 request.HellojsError             // error class
 request.observability            // EventEmitter — see Observability hooks
 
@@ -915,7 +861,6 @@ request.profiles.list()
 
 // Low-level for advanced use
 request.TLS                      // class TLS(host, port, proxy?, opts?)
-request.Pool                     // class Pool({ idleTimeoutMs, maxPerHost })
 
 // HTTP/3 stand-alone
 const { QuicConnection } = require('@unreleased/hellojs/lib/h3/connection')
@@ -933,8 +878,9 @@ lib/
 ├── client.js                  request()-shape API (URL parsing, redirects,
 │                              cookie jar integration, body codec, retry policy,
 │                              streaming response, observability hooks)
-├── pool.js                    connection pool — h2 multiplexing + h1 keep-alive,
-│                              per-host slot semaphore, graceful drain, happy-eyeballs
+├── connect.js                 per-request TLS/QUIC connection factory (h2/h1/h3),
+│                              per-phase timeouts
+├── alt-svc.js                 Alt-Svc cache for automatic h3 upgrade
 ├── happy-eyeballs.js          RFC 8305 IPv4/IPv6 race for TCP connect
 ├── socks5.js                  SOCKS5 client (RFC 1928 + RFC 1929 user/pass)
 ├── cookies.js                 RFC 6265 cookie jar (Domain/Path/Secure/SameSite/Expires)

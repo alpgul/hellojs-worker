@@ -1,7 +1,7 @@
 // TypeScript declarations for @unreleased/hellojs.
 //
 // Public surface: a request.js-shape `request()` function plus the lower-level
-// `TLS`, `Pool`, and `encodeH2EarlyData` exports.
+// `TLS` and `encodeH2EarlyData` exports.
 
 /// <reference types="node" />
 
@@ -24,7 +24,6 @@ export interface PerPhaseTimeouts {
 	connect?: number
 	tlsHandshake?: number
 	response?: number
-	idle?: number
 }
 
 export interface RequestOptions {
@@ -43,7 +42,6 @@ export interface RequestOptions {
 	timeout?: number
 	timeouts?: PerPhaseTimeouts
 	proxy?: string
-	forever?: boolean
 	resolveWithFullResponse?: boolean
 	simple?: boolean
 	retry?: RetryPolicy
@@ -104,11 +102,9 @@ export interface RequestFn {
 	defaults(defaults: Partial<RequestOptions>): RequestFn
 	jar(): CookieJar
 	HellojsError: typeof HellojsError
-	pool: Pool
 
 	/** Exported for advanced users. */
 	TLS: typeof TLS
-	Pool: typeof Pool
 	encodeH2EarlyData: typeof encodeH2EarlyData
 }
 
@@ -141,13 +137,6 @@ export class TLS extends EventEmitter {
 	on(event: 'ready', listener: () => void): this
 	on(event: 'ready-http1', listener: () => void): this
 	on(event: 'error', listener: (err: Error) => void): this
-}
-
-export class Pool {
-	constructor(opts?: { idleTimeoutMs?: number; maxPerHost?: number })
-	acquire(host: string, port?: number, opts?: RequestOptions & TLSOptions): Promise<unknown>
-	closeAll(): void
-	readonly idleTimeoutMs: number
 }
 
 /** Build an HPACK-encoded HEADERS+DATA blob suitable for embedding in TLS 1.3 0-RTT. */

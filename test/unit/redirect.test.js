@@ -3,7 +3,6 @@
 
 const test = require('node:test')
 const assert = require('node:assert')
-const { after } = require('node:test')
 const http2 = require('node:http2')
 const fs = require('node:fs')
 const os = require('node:os')
@@ -11,7 +10,6 @@ const path = require('node:path')
 const { execSync } = require('node:child_process')
 
 const request = require('../../')
-after(() => request.pool.closeAll())
 
 function genServerCert() {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hjrd-'))
@@ -49,7 +47,7 @@ test('cross-origin redirect strips Authorization and Cookie', { timeout: 10000 }
 		assert.strictEqual(recv.authorization, undefined, 'Authorization must not cross origins')
 		assert.strictEqual(recv.cookie, undefined, 'Cookie must not cross origins')
 	} finally {
-		request.pool.closeAll(); origin.server.close(); target.server.close()
+		origin.server.close(); target.server.close()
 	}
 })
 
@@ -63,7 +61,7 @@ test('same-origin redirect keeps Authorization', { timeout: 10000 }, async () =>
 		await request({ url: `https://127.0.0.1:${s.port}/start`, headers: { authorization: 'Bearer secret' }, verifyTLS: false, timeout: 5000 })
 		assert.strictEqual(recvNext.authorization, 'Bearer secret', 'Authorization should follow a same-origin redirect')
 	} finally {
-		request.pool.closeAll(); s.server.close()
+		s.server.close()
 	}
 })
 
@@ -79,6 +77,6 @@ test('303 downgrades POST to a bodyless GET', { timeout: 10000 }, async () => {
 		assert.strictEqual(recvBody, '', 'redirected GET must carry no body')
 		assert.strictEqual(recv['content-type'], undefined, 'body-framing headers should be dropped')
 	} finally {
-		request.pool.closeAll(); s.server.close()
+		s.server.close()
 	}
 })

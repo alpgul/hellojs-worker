@@ -4,7 +4,7 @@
 // httpbin.org is TLS 1.2 only and we don't support that. Same endpoints, same response shape.
 
 const request = require('../../')
-const { clearAltSvc } = require('../../lib/pool')
+const { clearAltSvc } = require('../../lib/alt-svc')
 
 const BASE = 'https://httpbingo.org'
 let pass = 0, fail = 0
@@ -111,17 +111,6 @@ const opts = (overrides = {}) => ({ simple: false, ...overrides })
 		log('default UA is Chrome 147', typeof ua === 'string' && ua.includes('Chrome/147'), `ua=${ua?.slice(0, 60)}`)
 	} catch (e) { log('user-agent', false, e.message) }
 
-	// 13. Pool reuse — 5 sequential requests should reuse one connection
-	try {
-		let handshakes = 0
-		const orig = request.pool._create.bind(request.pool)
-		request.pool._create = (...args) => { handshakes++; return orig(...args) }
-		for (let i = 0; i < 5; i++) await request({ ...opts(), url: `${BASE}/get`, json: true })
-		request.pool._create = orig
-		log('pool reuses connection across 5 reqs', handshakes <= 1, `handshakes=${handshakes}`)
-	} catch (e) { log('pool reuse', false, e.message) }
-
 	console.log(`\n${pass}/${pass + fail} passed`)
-	request.pool.closeAll()
 	process.exit(fail ? 1 : 0)
 })()

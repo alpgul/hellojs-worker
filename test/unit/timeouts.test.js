@@ -3,14 +3,13 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const net = require('node:net')
-const { Pool } = require('../../lib/pool')
+const { connect } = require('../../lib/connect')
 
 test('connect timeout fires when TCP connect hangs (route to a sinkhole IP)', async () => {
 	// 240.0.0.1 is in TEST-NET-3 / reserved; routers drop the SYN, so connect hangs forever.
-	const pool = new Pool()
 	const t0 = Date.now()
 	await assert.rejects(
-		pool.acquire({ host: '240.0.0.1', port: 443, timeouts: { connect: 200 } }),
+		connect({ host: '240.0.0.1', port: 443, timeouts: { connect: 200 } }),
 		(e) => e.code === 'ETIMEDOUT' && /TCP connect timed out/.test(e.message),
 	)
 	const dt = Date.now() - t0
@@ -23,11 +22,10 @@ test('handshake timeout fires when peer accepts TCP but never speaks TLS', async
 	await new Promise((r) => server.listen(0, '127.0.0.1', r))
 	const port = server.address().port
 
-	const pool = new Pool()
 	try {
 		const t0 = Date.now()
 		await assert.rejects(
-			pool.acquire({ host: '127.0.0.1', port, timeouts: { tlsHandshake: 200 }, verifyTLS: false }),
+			connect({ host: '127.0.0.1', port, timeouts: { tlsHandshake: 200 }, verifyTLS: false }),
 			(e) => e.code === 'ETIMEDOUT' && /TLS handshake timed out/.test(e.message),
 		)
 		const dt = Date.now() - t0

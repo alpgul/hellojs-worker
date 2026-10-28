@@ -70,6 +70,5 @@ async function probe(target) {
 	}
 
 	console.log(`\n${ok}/${results.length} probes OK; ${tls12Hits} negotiated TLS 1.2`)
-	request.pool.closeAll()
 	process.exit(0)
 })()
