@@ -12,7 +12,6 @@ import request, {
 	RequestOptions,
 	TLS,
 	PerPhaseTimeouts,
-	encodeH2EarlyData,
 } from '../../index'
 import type { Readable, Writable } from 'node:stream'
 
@@ -67,14 +66,6 @@ async function smoke(): Promise<void> {
 	const t = new TLS('example.com', 443, null, { verifyTLS: true })
 	t.on('ready', () => {})
 	t.on('error', (_err: Error) => {})
-
-	// 0-RTT helper.
-	const blob: Buffer = encodeH2EarlyData({
-		method: 'GET',
-		path: '/',
-		host: 'example.com',
-	})
-	void blob
 
 	// Streaming response: when stream:true, body is a Readable.
 	const stream = await request({ url: 'https://example.com', stream: true }) as Readable

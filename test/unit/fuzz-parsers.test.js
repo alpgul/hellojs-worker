@@ -144,9 +144,3 @@ fuzz('QUIC transport params on random bytes', () => {
 	const tp = require('../../lib/h3/transport-params')
 	try { tp.parse?.(randomBuf(128)) } catch (_) {}
 })
-
-// -------- NewSessionTicket parser --------
-fuzz('NewSessionTicket parser on random bytes', () => {
-	const sc = require('../../lib/tls/session-cache')
-	try { sc.parseNewSessionTicket(randomBuf(256)) } catch (_) {}
-})

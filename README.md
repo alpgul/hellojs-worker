@@ -38,7 +38,6 @@ const res = await request({
 - [Parrot: clone any fingerprint](#parrot-clone-any-fingerprint-from-a-tlspeetws-response)
 - [Fingerprint](#fingerprint)
 - [HTTP/3](#http3)
-- [Session resumption and 0-RTT](#session-resumption-and-0-rtt)
 - [Certificate validation](#certificate-validation)
 - [TypeScript](#typescript)
 - [Performance](#performance)
@@ -148,7 +147,6 @@ await request({
 | `retry` | object | none | `{ limit, methods, statusCodes, baseDelayMs }` |
 | `profile` | string | `'chrome147-mac'` | which fingerprint profile to emit |
 | `h3` | bool | — | force HTTP/3 (`true`) or disable auto-upgrade (`false`); unset = auto via Alt-Svc |
-| `earlyData` | Buffer \| string | — | TLS 1.3 0-RTT bytes — see [Session resumption and 0-RTT](#session-resumption-and-0-rtt) |
 | `verifyTLS` | bool | `true` | Validate the server certificate chain (RFC 5280) + hostname (RFC 6125 SubjectAltName). On by default. Set `false` to skip validation (self-signed dev servers, intentional MITM proxies). Applies to both TLS 1.3 and TLS 1.2 paths. See [Certificate validation](#certificate-validation). |
 
 ---
@@ -266,29 +264,6 @@ await request({
   headers: { 'content-type': 'application/octet-stream' },
 })
 ```
-
-### Persistent session cache
-
-By default the TLS session cache (used to enable PSK resumption and 0-RTT) is
-in-memory and reset on process exit. Point it at a file to persist across
-restarts:
-
-```bash
-HELLOJS_SESSION_CACHE=/var/cache/hellojs-sessions.json node my-script.js
-```
-
-Or in JS:
-
-```js
-require('@unreleased/hellojs/lib/tls/session-cache').enablePersistence({
-  path: '/var/cache/hellojs-sessions.json',
-})
-```
-
-The file holds NewSessionTicket material, is written with mode `0600`, and uses an
-`O_EXCL` lock so two processes pointed at the same file merge their tickets instead
-of clobbering. Stale locks (older than 30s, e.g. from a crashed writer) are reclaimed
-automatically. Expired tickets are filtered out on load.
 
 ---
 
@@ -466,7 +441,7 @@ await conn.connect()
 - **CUBIC / BBR congestion control** — NewReno only.
 - **QPACK encoder-side dynamic table** — our outbound encoder is static-only (slightly larger request headers).
 - **Full connection migration** — path validation works, but we don't rebind the UDP socket to a new local 4-tuple.
-- **0-RTT over QUIC** — TLS-over-TCP 0-RTT is implemented end-to-end (see below); QUIC 0-RTT-Protected packets aren't yet wired.
+- **0-RTT over QUIC** — QUIC 0-RTT-Protected packets aren't implemented.
 
 ### Server compatibility
 
@@ -477,89 +452,6 @@ await conn.connect()
 | `quic.aiortc.org` | ✅ |
 | `www.google.com` | timeout (likely MTU/firewall on test network) |
 | `cloud.google.com` | timeout |
-
----
-
-## Session resumption and 0-RTT
-
-`NewSessionTicket` frames the server sends post-handshake are parsed and
-cached in-memory (keyed by host). Subsequent `request()` calls automatically
-offer the cached PSK on ClientHello — handshake skips the cert chain and the
-`pre_shared_key` echo confirms resumption:
-
-```js
-// Pass 1: cold connect; server sends NewSessionTickets, cached automatically
-await request({ url: 'https://www.cloudflare.com/' })
-
-// Pass 2: auto-uses the cached PSK. Smaller CH, no cert chain.
-await request({ url: 'https://www.cloudflare.com/' })
-```
-
-### Real 0-RTT (early data)
-
-Bytes encrypted under the 0-RTT traffic keys and sent in the same flight
-as ClientHello — server can start processing **before** the handshake
-completes:
-
-```js
-// ONLY safe for idempotent / replay-tolerant operations (RFC 8470)
-await request({
-  url: 'https://example.com/api/foo',
-  earlyData: Buffer.from('GET /api/foo HTTP/1.1\r\nHost: example.com\r\n\r\n'),
-})
-```
-
-The implementation covers:
-
-- PSK extension with binder HMAC over the partial-CH transcript hash
-- `client_early_traffic_secret` derivation
-- 0-RTT `application_data` records sent right after the dummy CCS
-- `EndOfEarlyData` handshake message when the server accepts
-- Replay-over-1-RTT when the server rejects (no `early_data` echo in EE)
-
-### h2 0-RTT encoder helper
-
-Most servers negotiate h2, so raw bytes need to be h2-framed, not h1.
-`request.encodeH2EarlyData()` produces the byte sequence Chrome would send:
-
-```js
-const earlyData = request.encodeH2EarlyData({
-  method: 'GET',
-  path: '/api/foo',
-  host: 'example.com',
-  headers: { 'user-agent': 'my-app/1.0' },
-})
-
-// What it returns (126 B for a typical GET):
-//   PREFACE (24 B)
-//   SETTINGS frame on stream 0
-//   WINDOW_UPDATE +15663105 on stream 0
-//   HEADERS frame on stream 1 with END_HEADERS | END_STREAM, HPACK-encoded
-//   (static-table indexed + Huffman string literals)
-```
-
-The helper **refuses non-idempotent methods** (POST/PUT/PATCH/DELETE) — see
-RFC 8470 for why.
-
-> **Caveat on reading the response:** `request()` uses its own H/2 session
-> for the 1-RTT path and that session sends its own preface after the
-> handshake. If you pass real h2 early-data, the server has already started
-> processing your request on stream 1 — but the subsequent `request()` GET
-> opens stream 3, not stream 1, so the 0-RTT response is unread. To consume
-> the 0-RTT response, drop down to `TLS` + your own frame parser:
->
-> ```js
-> const { TLS } = require('@unreleased/hellojs')
-> const sessionCache = require('@unreleased/hellojs/lib/tls/session-cache')
->
-> const session = sessionCache.peek('example.com')
-> const tls = new TLS('example.com', 443, null, { session, earlyData })
-> tls.on('ready', () => {
->   // tls.h2Transport is a Duplex of decrypted h2 frames — feed it into
->   // your own h2 parser (e.g. lib/h2/frame.js + lib/h2/hpack.js).
-> })
-> tls.connect()
-> ```
 
 ---
 
@@ -812,9 +704,6 @@ ingesting into structured-log pipelines).
 Sample lines:
 
 ```
-[tls] [nst] cached ticket: lifetime=64800s nonce=1B ticket=192B maxEarlyData=14336
-[tls] [0rtt] server accepted PSK (identity=0)
-[tls] [0rtt] sent EndOfEarlyData (earlySeq=1)
 [h3] [cc] recovery cwnd=10000 ssthresh=10000 ev=1
 [h3] [cid] +seq=2 (pool size=3)
 ```
@@ -850,9 +739,6 @@ request.jar()                    // new RFC 6265 cookie jar
 request.HellojsError             // error class
 request.observability            // EventEmitter — see Observability hooks
 
-// 0-RTT helper
-request.encodeH2EarlyData({ method, path, host, headers })  // Buffer
-
 // Profile registry — clone fingerprints from peet.ws JSON
 request.profiles.registerFromPeet(name, peetJson)
 request.profiles.register(name, profileObject)
@@ -886,7 +772,6 @@ lib/
 ├── headers.js                 Chrome 147 default header set + ordering
 ├── errors.js                  HellojsError + closed-set codes + wrap() promotion
 ├── observability.js           EventEmitter for request lifecycle
-├── h2-earlydata.js            HPACK+h2 frame builder for 0-RTT (encoder only)
 ├── tls/
 │   ├── tls.js                 TLS 1.3 state machine + AEAD + HKDF key schedule
 │   ├── tls12.js               TLS 1.2 handshake + 12-suite cipher catalog + EMS
@@ -895,8 +780,7 @@ lib/
 │   ├── cert-validate.js       Chain validation (path + SAN + dates + intermediate trust)
 │   ├── ocsp.js                OCSP response parser + signature verifier (RFC 6960)
 │   ├── sct.js                 Signed Certificate Timestamp parser (RFC 6962)
-│   ├── mlkem.js               X25519MLKEM768 hybrid key exchange + keypair pool
-│   └── session-cache.js       NewSessionTicket cache + persistent file (O_EXCL lock)
+│   └── mlkem.js               X25519MLKEM768 hybrid key exchange + keypair pool
 ├── h2/
 │   ├── frame.js               9-byte frame header codec + type/flag constants
 │   ├── hpack.js               full HPACK (static + dynamic tables, Huffman)
@@ -946,9 +830,6 @@ cold-connect gains and ~45% of the concurrent-throughput gains came from.
 - **HTTP/3:** see [HTTP/3 → What's not implemented](#whats-not-implemented).
   Missing: client-initiated key updates, CUBIC/BBR, QPACK encoder dynamic table, full
   connection migration (socket rebind), 0-RTT-Protected packets.
-- **h2 0-RTT response reading through `request()`:** the encoder helper
-  (`encodeH2EarlyData`) is exposed and works at the TLS layer, but `request()` itself
-  can't return the 0-RTT response — see the [caveat](#h2-0-rtt-encoder-helper) above.
 - **Common HTTP features not yet implemented:** WebSocket (`Upgrade: ws`),
   multipart/form-data builder, `Expect: 100-continue`, response Cache-Control/ETag
   semantics, `Retry-After` honoring on 429/503, DNS caching, `Content-Range` resumable

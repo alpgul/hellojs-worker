@@ -1,7 +1,7 @@
 // TypeScript declarations for @unreleased/hellojs.
 //
 // Public surface: a request.js-shape `request()` function plus the lower-level
-// `TLS` and `encodeH2EarlyData` exports.
+// `TLS` export.
 
 /// <reference types="node" />
 
@@ -48,8 +48,6 @@ export interface RequestOptions {
 
 	/** TLS-only: turn on cert chain validation (default `true`). */
 	verifyTLS?: boolean
-	/** TLS 1.3 0-RTT early data to bundle with the PSK. */
-	earlyData?: Buffer | Uint8Array
 	/** When true, resolve as soon as headers arrive and expose the body as a Node Readable. */
 	stream?: boolean
 }
@@ -105,7 +103,6 @@ export interface RequestFn {
 
 	/** Exported for advanced users. */
 	TLS: typeof TLS
-	encodeH2EarlyData: typeof encodeH2EarlyData
 }
 
 declare const request: RequestFn
@@ -114,8 +111,6 @@ export = request
 
 export interface TLSOptions {
 	verifyTLS?: boolean
-	earlyData?: Buffer | Uint8Array
-	session?: Buffer
 }
 
 export class TLS extends EventEmitter {
@@ -138,12 +133,3 @@ export class TLS extends EventEmitter {
 	on(event: 'ready-http1', listener: () => void): this
 	on(event: 'error', listener: (err: Error) => void): this
 }
-
-/** Build an HPACK-encoded HEADERS+DATA blob suitable for embedding in TLS 1.3 0-RTT. */
-export function encodeH2EarlyData(req: {
-	method: string
-	path: string
-	host: string
-	headers?: Record<string, string>
-	body?: Buffer | Uint8Array
-}): Buffer

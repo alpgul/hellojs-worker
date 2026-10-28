@@ -47,15 +47,6 @@ console.log(`  akamai    ${expected.akamai}`)
 	// profile object and pass it as opts.headers so their HTTP layer matches Chrome too.
 	const profile = profiles.registerFromPeet('parrot-fixture', fixture)
 
-	// If the fixture was captured on a warm (resumed) connection it will include
-	// pre_shared_key (extension 41). We can't replay a captured PSK body — the ticket is
-	// one-shot and bound to the issuer — but we CAN reproduce the warm JA4 by making a
-	// cold priming request first so the server issues us a NewSessionTicket. The second
-	// request then resumes via hellojs's session-cache path and emits PSK semantically.
-	const WARM = (fixture.tls?.extensions || []).some(e =>
-		/\((?:41|0x29)\)\s*$/i.test(String(e.name)) || String(e.name).toLowerCase().includes('pre_shared_key'))
-	require('../../lib/tls/session-cache').clear()
-
 	const sendOpts = {
 		url: 'https://tls.peet.ws/api/all',
 		json: true,
@@ -63,13 +54,6 @@ console.log(`  akamai    ${expected.akamai}`)
 		headers: profile.headers ? { ...profile.headers } : undefined,
 		resolveWithFullResponse: true,
 		timeouts: { tlsHandshake: 15_000, response: 15_000 },
-	}
-
-	if (WARM) {
-		console.log('(fixture captured warm — making a cold priming request to populate the session ticket cache)')
-		try { await request(sendOpts) } catch (e) {
-			console.log(`  prime failed: ${e.message} — continuing anyway`)
-		}
 	}
 
 	const res = await request(sendOpts)

@@ -51,11 +51,11 @@ const log = (label, ok, detail) => {
 
 	// 6. JA4 still matches Chrome 147 via the API path.
 	// We only assert the JA4_b component (cipher truncated-SHA256) since extension count
-	// legitimately bumps by 1 (16 → 17) when a cached TLS session triggers pre_shared_key.
+	// is the profile's own (16) — no PSK extension is ever added.
 	try {
 		const body = await request({ url: 'https://tls.peet.ws/api/all', json: true })
 		const j = body?.tls?.ja4 || ''
-		const okPrefix = j.startsWith('t13d1516h2_') || j.startsWith('t13d1517h2_')
+		const okPrefix = j.startsWith('t13d1516h2_')
 		const okCipher = j.includes('_8daaf6152771_')
 		log('JA4 still matches via request() API', okPrefix && okCipher, `ja4=${j}`)
 	} catch (e) { log('JA4 still matches via request() API', false, e.message) }
