@@ -4,7 +4,6 @@
 // httpbin.org is TLS 1.2 only and we don't support that. Same endpoints, same response shape.
 
 const request = require('../../')
-const { clearAltSvc } = require('../../lib/alt-svc')
 
 const BASE = 'https://httpbingo.org'
 let pass = 0, fail = 0
@@ -16,7 +15,6 @@ const log = (label, ok, detail) => {
 const opts = (overrides = {}) => ({ simple: false, ...overrides })
 
 ;(async () => {
-	clearAltSvc()
 	console.log(`Target: ${BASE}\n`)
 
 	// 1. Simple GET, JSON response

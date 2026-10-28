@@ -146,7 +146,7 @@ await request({
 | `resolveWithFullResponse` | bool | `false` | resolve to `{status, headers, body}` instead of just body |
 | `retry` | object | none | `{ limit, methods, statusCodes, baseDelayMs }` |
 | `profile` | string | `'chrome147-mac'` | which fingerprint profile to emit |
-| `h3` | bool | — | force HTTP/3 (`true`) or disable auto-upgrade (`false`); unset = auto via Alt-Svc |
+| `h3` | bool | `false` | opt in to HTTP/3 for this request; off unless `h3: true` is passed |
 | `verifyTLS` | bool | `true` | Validate the server certificate chain (RFC 5280) + hostname (RFC 6125 SubjectAltName). On by default. Set `false` to skip validation (self-signed dev servers, intentional MITM proxies). Applies to both TLS 1.3 and TLS 1.2 paths. See [Certificate validation](#certificate-validation). |
 
 ---
@@ -385,20 +385,17 @@ Expected output: `11/11 checks passed` and
 
 ## HTTP/3
 
-Pure-JS QUIC + HTTP/3 client at `lib/h3/`, integrated into `request()`:
+Pure-JS QUIC + HTTP/3 client at `lib/h3/`, integrated into `request()`.
+HTTP/3 is **off by default** — a request uses h3 only when `h3: true` is passed:
 
 ```js
-// Explicit h3
+// Explicit h3 — opt in per request. If the QUIC handshake fails, the request
+// transparently falls back to TCP + TLS instead of erroring.
 await request({ url: 'https://www.cloudflare.com/', h3: true })
 
-// Automatic upgrade via Alt-Svc — first request goes h2, captures
-// `alt-svc: h3=":443"`, subsequent same-host requests transparently use h3
-// (Chrome behaviour)
-await request({ url: 'https://www.cloudflare.com/' })          // h2
-await request({ url: 'https://www.cloudflare.com/api/foo' })   // h3 (auto)
-
-// Disable h3 explicitly
-await request({ url: '...', h3: false })
+// Without the flag every request stays on TCP + TLS, even if the server
+// advertises `alt-svc: h3=":443"`
+await request({ url: 'https://www.cloudflare.com/api/foo' })   // h2
 ```
 
 Or use the lower-level QUIC + H3 layer directly:
@@ -432,7 +429,6 @@ await conn.connect()
 - **NEW_CONNECTION_ID rotation** (RFC 9000 §5.1) — parse + stash + retire_prior_to semantics, `conn.rotateConnectionId()`.
 - **Path validation** (RFC 9000 §8.2) — auto-respond to PATH_CHALLENGE, `conn.validatePath()` round-trips.
 - **QPACK static table + dynamic-table decode** — server's encoder stream is consumed into a local replica; HEADERS decode against both.
-- **Alt-Svc auto-upgrade** — h2 responses' `alt-svc: h3=":443"; ma=N` cached, subsequent same-host requests transparently use h3.
 - **Graceful CONNECTION_CLOSE** on close.
 
 ### What's not implemented
@@ -766,7 +762,6 @@ lib/
 │                              streaming response, observability hooks)
 ├── connect.js                 per-request TLS/QUIC connection factory (h2/h1/h3),
 │                              per-phase timeouts
-├── alt-svc.js                 Alt-Svc cache for automatic h3 upgrade
 ├── socks5.js                  SOCKS5 client (RFC 1928 + RFC 1929 user/pass)
 ├── cookies.js                 RFC 6265 cookie jar (Domain/Path/Secure/SameSite/Expires)
 ├── headers.js                 Chrome 147 default header set + ordering
