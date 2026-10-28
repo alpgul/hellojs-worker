@@ -101,18 +101,17 @@ const step = async (label, fn) => {
 		log('request.defaults() instance applies defaults', r.status === 200 && !!r.body.headers['X-App'], 'x-app + x-env present')
 	})
 
-	// 13. HTTP/3 (QUIC) — Chrome's default for sites that advertise Alt-Svc
+	// 13. HTTP/3 (QUIC) — opt in per request; falls back to TCP if QUIC fails
 	await step('HTTP/3 explicit', async () => {
 		const t0 = Date.now()
 		const r = await request({ url: 'https://www.cloudflare.com/cdn-cgi/trace', h3: true, simple: false, resolveWithFullResponse: true })
 		log('HTTP/3 explicit', r.status === 200, `${Date.now() - t0}ms via h3`)
 	})
 
-	// 14. h3 auto-upgrade via Alt-Svc
-	await step('h3 auto-upgrade', async () => {
-		const r1 = await request({ url: 'https://www.cloudflare.com/', simple: false, resolveWithFullResponse: true })
-		const r2 = await request({ url: 'https://www.cloudflare.com/cdn-cgi/trace', simple: false, resolveWithFullResponse: true })
-		log('h3 auto-upgrade via Alt-Svc', r1.status === 200 && r2.status === 200, 'both 200, second went h3')
+	// 14. h2 by default — no Alt-Svc upgrade happens without h3: true
+	await step('h3 off by default', async () => {
+		const r = await request({ url: 'https://www.cloudflare.com/cdn-cgi/trace', simple: false, resolveWithFullResponse: true })
+		log('request without h3 stays on TCP', r.status === 200, `status=${r.status}`)
 	})
 
 	console.log('\n=== done ===\n')
