@@ -130,7 +130,7 @@ await request({
 |---|---|---|---|
 | `url` / `uri` | string | required | |
 | `method` | string | `'GET'` | |
-| `headers` | object | `{}` | merged into the Chrome 147 default header set; user-supplied keys win on conflict |
+| `headers` | object | `{}` | merged into the profile's header set; non-identity keys override in place, new keys append. Identity headers (`user-agent`, `sec-ch-ua*`) are fixed by the profile — a different value throws `EHEADERFIXED`. |
 | `body` | string \| Buffer \| object \| Readable | `null` | object → JSON when `json: true`. A Node `Readable` is sent as a streaming request body (chunked h2 DATA frames or h1 `Transfer-Encoding: chunked`). |
 | `json` | bool \| object | `false` | parses response as JSON; if object, used as the request body with `content-type: application/json` |
 | `form` | object | — | `application/x-www-form-urlencoded` body |
@@ -148,6 +148,16 @@ await request({
 | `profile` | string | `'chrome147-mac'` | which fingerprint profile to emit |
 | `h3` | bool | `false` | opt in to HTTP/3 for this request; off unless `h3: true` is passed |
 | `verifyTLS` | bool | `true` | Validate the server certificate chain (RFC 5280) + hostname (RFC 6125 SubjectAltName). On by default. Set `false` to skip validation (self-signed dev servers, intentional MITM proxies). Applies to both TLS 1.3 and TLS 1.2 paths. See [Certificate validation](#certificate-validation). |
+
+### Headers and profiles
+
+Every request carries the resolved profile's header set automatically, in the profile's
+order (`sec-ch-ua*`, `user-agent`, `accept`, `sec-fetch-*`, …). Your `headers` entries
+override non-identity values without moving them; new names append after the profile
+block. `user-agent` and the `sec-ch-ua*` client hints are fixed by the profile — a
+conflicting value is rejected with `EHEADERFIXED`. Custom profiles can extend the fixed
+set with a `fixedHeaders` array of lowercase names. Cookie-jar `Cookie` is inserted just
+before `priority`, matching Chrome.
 
 ---
 
