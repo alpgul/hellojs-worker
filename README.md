@@ -802,7 +802,8 @@ lib/
 │   ├── cert-validate.js       Chain validation (path + SAN + dates + intermediate trust)
 │   ├── ocsp.js                OCSP response parser + signature verifier (RFC 6960)
 │   ├── sct.js                 Signed Certificate Timestamp parser (RFC 6962)
-│   └── mlkem.js               X25519MLKEM768 hybrid key exchange (Web Crypto ML-KEM-768)
+│   ├── mlkem.js               X25519MLKEM768 hybrid key exchange (Web Crypto ML-KEM-768)
+│   └── x25519.js              X25519 shared secret via Web Crypto (workerd-safe)
 ├── h2/
 │   ├── frame.js               9-byte frame header codec + type/flag constants
 │   ├── hpack.js               full HPACK (static + dynamic tables, Huffman)
