@@ -230,7 +230,7 @@ explicitly (long-poll, SSE, download of unknown duration), pass `timeouts: { res
 
 Pass `stream: true` and the promise resolves as soon as headers arrive, with the
 response body as a Node `Readable`. The body auto-decompresses (gzip / brotli /
-deflate; zstd requires Node 23.8+ for streaming).
+deflate / zstd — all through `node:zlib`, so Node ≥ 24).
 
 ```js
 const { createWriteStream } = require('node:fs')

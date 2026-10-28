@@ -54,12 +54,9 @@
   },
   "homepage": "https://github.com/unreleased/hellojs#readme",
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "publishConfig": {
     "access": "public"
-  },
-  "dependencies": {
-    "fzstd": "^0.1.1"
   }
 }
