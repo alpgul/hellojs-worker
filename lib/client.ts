@@ -101,23 +101,32 @@ export type Callback<TBody = unknown> = (
 
 type MethodFn = (urlOrOpts: RequestOptions | string, cb?: Callback) => Promise<unknown>
 
-export interface RequestFn {
-	(opts: RequestOptions | string, cb?: Callback): Promise<unknown>
-	get: MethodFn
-	post: MethodFn
-	put: MethodFn
-	del: MethodFn
-	delete: MethodFn
-	patch: MethodFn
-	head: MethodFn
-	options: MethodFn
-	defaults(defaults?: Partial<RequestOptions>): DefaultsFn
+// The public call shape, mirrored by index.d.ts: `resolveWithFullResponse: true` written as a
+// literal resolves the full Response, anything else resolves just the body.
+export interface Invokable {
+	<TBody = unknown>(opts: RequestOptions & { resolveWithFullResponse: true }, cb?: Callback<TBody>): Promise<Response<TBody>>
+	<TBody = unknown>(opts: RequestOptions | string, cb?: Callback<TBody>): Promise<TBody>
+}
+
+interface Shortcuts {
+	get: Invokable
+	post: Invokable
+	put: Invokable
+	del: Invokable
+	delete: Invokable
+	patch: Invokable
+	head: Invokable
+	options: Invokable
 	jar(): Jar
+}
+
+export interface RequestFn extends Invokable, Shortcuts {
+	defaults(defaults?: Partial<RequestOptions>): DefaultsFn
 	HellojsError: typeof HellojsError
 }
 
-export interface DefaultsFn extends Omit<RequestFn, 'defaults'> {
-	defaults(more?: Partial<RequestOptions>): RequestFn
+export interface DefaultsFn extends Invokable, Shortcuts {
+	defaults(more?: Partial<RequestOptions>): DefaultsFn
 }
 
 // Everything a transport needs to put one request on the wire.

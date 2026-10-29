@@ -13,5 +13,5 @@ export default api
 export { HellojsError } from './lib/errors.ts'
 export { TLS, observability, profiles, setTrustedRoots, udp }
 export type { PerPhaseTimeouts } from './lib/connect.ts'
-export type { Callback, RequestFn, RequestOptions, Response, RetryPolicy } from './lib/client.ts'
+export type { Callback, DefaultsFn, Invokable, RequestFn, RequestOptions, Response, RetryPolicy } from './lib/client.ts'
 export type { ErrorCode as HellojsErrorCode, ErrorCategory as HellojsErrorCategory } from './lib/errors.ts'
