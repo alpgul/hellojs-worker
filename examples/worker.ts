@@ -18,7 +18,8 @@
 //      immediately instead of waiting on a handshake that cannot start. (A sandbox that DOES
 //      expose datagrams installs a provider instead — see README → UDP transport.)
 //   2. No built-in root certificates. workerd's TLS ships an empty trust store, so the
-//      Mozilla bundle is installed from a text secret on the first request.
+//      generated Mozilla bundle in ./root-certificates.ts is installed at module scope —
+//      no secret, no binding, and verification behaves the same as it does in Node.
 //   3. ML-KEM is behind a flag. The Chrome 147 key share is X25519MLKEM768, and workerd only
 //      puts ML-KEM on `crypto.subtle` when `webcrypto_modern_algorithms` is set — that flag
 //      has no default enable date, so a compatibility date alone will not turn it on and the
@@ -30,15 +31,11 @@
 
 import request from '../index.ts'
 
+import roots from './root-certificates.ts'
 import { scenarios } from './scenarios.ts'
 
 import type { HellojsError } from '../index.ts'
 import type { Scenario } from './scenarios.ts'
-
-interface Env {
-	/** PEM text secret (Mozilla / NSS bundle): `wrangler secret put TRUST_BUNDLE < ca-bundle.pem`. */
-	TRUST_BUNDLE?: string
-}
 
 interface ScenarioResult {
 	id: number
@@ -48,13 +45,10 @@ interface ScenarioResult {
 	ms: number
 }
 
-// One scenario must not be able to hold the whole response open.
-const SCENARIO_TIMEOUT_MS = 15_000
-
-// Split PEM text into the individual certificates setTrustedRoots() expects.
-function pemBlocks(text: string): string[] {
-	return text.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? []
-}
+// One scenario must not be able to hold the whole response open. The ceiling sits above the
+// slowest scenario's own retry budget (scenario 1 allows two ~10s attempts against tls.peet.ws),
+// otherwise a slow upstream is cut off before the retry that would have recovered it can finish.
+const SCENARIO_TIMEOUT_MS = 30_000
 
 function withTimeout(runs: Promise<string>, ms: number): Promise<string> {
 	return new Promise<string>((resolve, reject) => {
@@ -142,21 +136,15 @@ btn.addEventListener('click', async () => {
 </body>
 </html>`
 
-// The sandbox has no datagram transport: take HTTP/3 out of reach instead of letting each
-// request discover that on its own. Module scope runs once per isolate, before any handler.
+// Both fixes are module scope, so they run once per isolate before any handler: the seam
+// declares that this sandbox has no datagram transport (HTTP/3 is out of reach instead of
+// each request discovering that on its own), and the generated bundle stands in for the
+// trust store workerd does not ship.
 request.udp.setUdpProvider(null)
-
-let installed = false
+request.setTrustedRoots(roots)
 
 export default {
-	async fetch(req: Request, env: Env): Promise<Response> {
-		// Bindings only reach a handler, so the trust store is installed on the first request
-		// and then reused by every later handshake in this isolate.
-		if (!installed && env.TRUST_BUNDLE) {
-			request.setTrustedRoots(pemBlocks(env.TRUST_BUNDLE))
-			installed = true
-		}
-
+	async fetch(req: Request): Promise<Response> {
 		const path = new URL(req.url).pathname
 		if (path !== '/run' && path !== '/' && path !== '/run-test.html') {
 			return new Response('not found', { status: 404 })
@@ -178,4 +166,4 @@ export default {
 
 		return new Response(RUN_TEST_PAGE, { headers: { 'content-type': 'text/html; charset=utf-8' } })
 	},
-} satisfies ExportedHandler<Env>
+} satisfies ExportedHandler

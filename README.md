@@ -461,9 +461,10 @@ request.udp.setUdpProvider((type) => myRuntimeUdpSocket(type))
 With no provider configured the seam resolves to `dgram`, so Node needs no setup.
 
 `examples/worker.ts` is the worked version of this: a Worker (workerd) entry point whose
-runtime has no outbound UDP, so it takes HTTP/3 off the table at module scope, installs a
-trust bundle from a text secret (workerd ships no roots), and still serves `h3: true`
-requests over TCP + TLS. `npm run example:worker` starts it under wrangler, which needs
+runtime has no outbound UDP, so it takes HTTP/3 off the table at module scope, installs the
+generated Mozilla root bundle from `examples/root-certificates.ts` (workerd ships no roots),
+and still serves `h3: true` requests over TCP + TLS. `npm run example:worker` starts it
+under wrangler, which needs
 `nodejs_compat` for the `node:` modules hellojs uses and `webcrypto_modern_algorithms` for
 the ML-KEM-768 share in the Chrome 147 key exchange — that flag has no default enable date,
 so it has to be named. Open the URL wrangler prints and the Worker serves its run-test page
@@ -541,6 +542,11 @@ On the leaf specifically:
 Chain must terminate either in a self-signed root present in Node's bundled
 `tls.rootCertificates`, or in a cert whose issuer matches one of the bundled
 roots' subjects and whose signature verifies against that root's pubkey.
+
+`request.setTrustedRoots(pems)` replaces that store — required on runtimes that ship
+none (workerd's `node:tls` reports an empty `rootCertificates`), and useful for a private
+CA. `examples/root-certificates.ts` is the generated Mozilla bundle the Worker example
+installs at module scope.
 
 On TLS 1.2, the server's `ServerKeyExchange` signature is *additionally* verified
 against the leaf cert's public key — this authenticates the ECDHE parameters
