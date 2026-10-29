@@ -88,3 +88,16 @@ it('"fingerprint" event fires synchronously during startClientHello', () => {
 	expect(emitted.length, 'fingerprint event was emitted').toBe(1)
 	expect(emitted[0].ja3).toMatch(/^[0-9a-f]{32}$/)
 })
+
+it('emitted ClientHellos never repeat an extension type', () => {
+	// GREASE values used to be drawn independently, so a and b collided in 1 of 16
+	// ClientHellos and the first and last GREASE extensions got the same type. RFC 8446
+	// §4.2 forbids duplicate extension types; strict servers answered alert 50
+	// (decode_error) on those connections. 200 draws make a regression practically certain
+	// to show up.
+	for (let i = 0; i < 200; i++) {
+		const { parsed } = emitCh('chrome147-mac')
+		const ids = parsed.extensions.map((e) => e.id)
+		expect(new Set(ids).size, `duplicate extension type in CH #${i}`).toBe(ids.length)
+	}
+})

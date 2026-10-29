@@ -7,7 +7,8 @@ import {
 	CreateStatusRequestV2Extension,
 	CreateSignatureAlgorithmsCertExtension,
 	CreateSupportedGroupsExtension,
-	CreateSupportedVersionsExtension
+	CreateSupportedVersionsExtension,
+	pickGreaseTriple
 } from '../../lib/extensions/index.ts'
 
 it('status_request (5): default (Chrome) shape — type=1, 0/0', () => {
@@ -104,4 +105,16 @@ it('supported_versions (43): useGrease=false emits only the requested versions',
 	// hdr(2) + extLen(2) + listLen(1) + entries(1*2=2)
 	expect(ext.length).toBe(7)
 	expect(ext.readUInt16BE(5)).toBe(0x0303)
+})
+
+it('pickGreaseTriple: values are valid GREASE bytes and pairwise distinct', () => {
+	// The triple stores the 0x?a byte; the wire value is that byte doubled (0x?a?a).
+	const allowed = new Set([0x0a, 0x1a, 0x2a, 0x3a, 0x4a, 0x5a, 0x6a, 0x7a, 0x8a, 0x9a, 0xaa, 0xba, 0xca, 0xda, 0xea, 0xfa])
+	for (let i = 0; i < 2_000; i++) {
+		const { a, b, c } = pickGreaseTriple()
+		for (const v of [a, b, c]) expect(allowed.has(v), `0x${v.toString(16)} is a GREASE byte`).toBe(true)
+		// a and b type the first and last extensions: a collision puts two extensions of the
+		// same type in one ClientHello, which strict servers reject with alert 50.
+		expect(new Set([a, b, c]).size).toBe(3)
+	}
 })

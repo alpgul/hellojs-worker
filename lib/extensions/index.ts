@@ -23,12 +23,26 @@ const pickGreaseByte = () => (GREASE_HIGH_NIBBLES[crypto.randomBytes(1)[0] & 0x0
 // - greaseA: used in cipher_suites + first extension type
 // - greaseB: used in supported_versions inner + last extension type
 // - greaseC: used in key_share + supported_groups
-// They are independently random and may collide; that's OK.
-const pickGreaseTriple = () => ({
-	a: pickGreaseByte(),
-	b: pickGreaseByte(),
-	c: pickGreaseByte(),
-})
+// BoringSSL draws them from a random permutation of the 16 reserved values, so they are
+// pairwise distinct within one ClientHello. Distinctness is load-bearing: when A == B the
+// first and last extensions share a type, and RFC 8446 §4.2 forbids duplicate extension types
+// — strict servers answer with alert 50 (decode_error). Measured ~1/16 duplicate rate, which
+// matches the observed intermittent handshake failures.
+const pickGreaseTriple = () => {
+	const nibbles = GREASE_HIGH_NIBBLES.slice()
+	for (let i = nibbles.length - 1; i > 0; i--) {
+		const j = crypto.randomBytes(1)[0]! % (i + 1)
+		const t = nibbles[i]!
+		nibbles[i] = nibbles[j]!
+		nibbles[j] = t
+	}
+	const toValue = (nibble: number) => (nibble << 4) | 0x0a
+	return {
+		a: toValue(nibbles[0]!),
+		b: toValue(nibbles[1]!),
+		c: toValue(nibbles[2]!),
+	}
+}
 
 // CreateCompressCertificateExtension(algorithms?) — array of u16 algorithm codes
 // (RFC 8879). Defaults to [brotli] which is what Chrome 147 sends.
