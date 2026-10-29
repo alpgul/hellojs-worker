@@ -6,3 +6,4 @@ test/fixtures/
 *.pem
 *.der
 chrome-response-*.json
+examples/root-certificates.ts
