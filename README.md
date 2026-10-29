@@ -463,7 +463,7 @@ With no provider configured the seam resolves to `dgram`, so Node needs no setup
 `examples/worker.ts` is the worked version of this: a Worker (workerd) entry point whose
 runtime has no outbound UDP, so it takes HTTP/3 off the table at module scope, installs the
 generated Mozilla root bundle from `examples/root-certificates.ts` (workerd ships no roots),
-and still serves `h3: true` requests over TCP + TLS. `npm run example:worker` starts it
+and still serves `h3: true` requests over TCP + TLS. `npm run example` starts it
 under wrangler, which needs
 `nodejs_compat` for the `node:` modules hellojs uses and `webcrypto_modern_algorithms` for
 the ML-KEM-768 share in the Chrome 147 key exchange — that flag has no default enable date,

@@ -35,8 +35,7 @@
     "prebuild": "npm run clean",
     "typecheck": "tsc --noEmit",
     "test:types": "./node_modules/.bin/tsc --project test/types/tsconfig.json",
-    "example": "node examples/basic.ts",
-    "example:worker": "wrangler dev examples/worker.ts --compatibility-date 2026-10-01 --compatibility-flags nodejs_compat webcrypto_modern_algorithms",
+    "example": "wrangler dev examples/worker.ts --compatibility-date 2026-10-01 --compatibility-flags nodejs_compat webcrypto_modern_algorithms",
     "prepublishOnly": "node --input-type=module -e \"await import('./index.ts')\""
   },
   "keywords": [

@@ -1,11 +1,11 @@
 // The hellojs feature tour as data: fourteen scenarios, each one asserting a single
 // behaviour and returning the detail line to show for it.
 //
-// Two runners share this table:
-//   examples/basic.ts   — sequential, printed to a terminal
-//   examples/worker.ts  — all fourteen in parallel, rendered by the run-test page
+// examples/worker.ts runs all fourteen concurrently and the run-test page renders the
+// report; the scenarios themselves stay runtime-agnostic so the table reads as a
+// checklist rather than as test plumbing.
 //
-// Endpoints are chosen so both runtimes can reach them: a Worker may not open a TCP
+// Endpoints are chosen so a Worker can reach them: a Worker may not open a TCP
 // connection into Cloudflare's own address ranges, so the HTTP/3 scenarios point at
 // httpbingo (Fly.io) rather than cloudflare.com.
 

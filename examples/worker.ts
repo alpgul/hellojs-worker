@@ -2,9 +2,10 @@
 //
 // Run it locally on the real sandbox:
 //
-//   npx wrangler dev examples/worker.ts \
-//     --compatibility-date 2026-10-01 \
-//     --compatibility-flags nodejs_compat webcrypto_modern_algorithms
+//   npm run example
+//
+// (wrangler dev with --compatibility-date 2026-10-01 and both compatibility flags; the
+// exact command lives in package.json so this comment cannot drift from it.)
 //
 // `wrangler dev` prints a URL; open it and the Worker serves run-test.html — one button
 // that fires all fourteen scenarios from examples/scenarios.ts in parallel and renders the
