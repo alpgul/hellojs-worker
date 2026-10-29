@@ -75,9 +75,6 @@ function runWorker(client: string, target: string, port: number | null, opts: Ru
 			BENCH_WARM_REPS: String(opts.warmReps ?? WARM_REPS),
 			BENCH_CONCURRENT: String(opts.concurrent ?? CONCURRENT),
 		}
-		// Only the LOCAL scenario runs a self-signed certificate; remote targets have valid
-		// certs and this env var emits a stderr warning that pollutes error capture.
-		if (target === 'local') env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
 		const child = spawn(process.execPath, [WORKER], { env, stdio: ['ignore', 'pipe', 'pipe'] })
 		let out = ''
 		let err = ''

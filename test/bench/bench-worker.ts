@@ -18,6 +18,10 @@ const PORT = Number(process.env.BENCH_PORT ?? 443)
 const WARM_REPS = Number(process.env.BENCH_WARM_REPS ?? 30)
 const CONCURRENT = Number(process.env.BENCH_CONCURRENT ?? 50)
 
+// Only the local scenario serves a throwaway self-signed cert. Remote runs hit real hosts and
+// must keep certificate validation on so a MITM can't silently skew the numbers.
+const VERIFY_TLS = TARGET !== 'local'
+
 function errMsg(e: unknown): string {
 	if (e instanceof Error) {
 		// fetch and node:http2 hide the useful part in `cause`.
@@ -32,7 +36,7 @@ async function makeAdapter(name: string | undefined): Promise<Adapter> {
 		const { default: request } = await import('../../index.ts')
 		return {
 			fn: async (url) => {
-				const r = (await request({ url, verifyTLS: false, resolveWithFullResponse: true })) as {
+				const r = (await request({ url, verifyTLS: VERIFY_TLS, resolveWithFullResponse: true })) as {
 					body?: Buffer
 					rawBody?: Buffer
 				}
@@ -42,11 +46,11 @@ async function makeAdapter(name: string | undefined): Promise<Adapter> {
 		}
 	}
 	if (name === 'node-https') {
-		const agent = new https.Agent({ keepAlive: true, rejectUnauthorized: false })
+		const agent = new https.Agent({ keepAlive: true, rejectUnauthorized: VERIFY_TLS })
 		return {
 			fn: (url) =>
 				new Promise<number>((resolve, reject) => {
-					const req = https.get(url, { agent, rejectUnauthorized: false }, (res) => {
+					const req = https.get(url, { agent }, (res) => {
 						let total = 0
 						res.on('data', (c: Buffer) => (total += c.length))
 						res.on('end', () => resolve(total))
@@ -63,7 +67,7 @@ async function makeAdapter(name: string | undefined): Promise<Adapter> {
 			const origin = new URL(url).origin
 			let s = sessions.get(origin)
 			if (s && !s.destroyed && !s.closed) return s
-			s = http2.connect(origin, { rejectUnauthorized: false })
+			s = http2.connect(origin, { rejectUnauthorized: VERIFY_TLS })
 			sessions.set(origin, s)
 			s.on('error', () => {})
 			return s
@@ -91,7 +95,7 @@ async function makeAdapter(name: string | undefined): Promise<Adapter> {
 	}
 	if (name === 'undici') {
 		const { Agent, request } = await import('undici')
-		const agent = new Agent({ connect: { rejectUnauthorized: false }, allowH2: true })
+		const agent = new Agent({ connect: { rejectUnauthorized: VERIFY_TLS }, allowH2: true })
 		return {
 			fn: async (url) => {
 				const { body } = await request(url, { dispatcher: agent })
@@ -104,7 +108,7 @@ async function makeAdapter(name: string | undefined): Promise<Adapter> {
 	}
 	if (name === 'got') {
 		const { default: got } = await import('got')
-		const client = got.extend({ https: { rejectUnauthorized: false }, http2: true })
+		const client = got.extend({ https: { rejectUnauthorized: VERIFY_TLS }, http2: true })
 		return {
 			fn: async (url) => {
 				const r = await client(url, { responseType: 'buffer' })
@@ -115,7 +119,7 @@ async function makeAdapter(name: string | undefined): Promise<Adapter> {
 	}
 	if (name === 'axios') {
 		const { default: axios } = await import('axios')
-		const agent = new https.Agent({ keepAlive: true, rejectUnauthorized: false })
+		const agent = new https.Agent({ keepAlive: true, rejectUnauthorized: VERIFY_TLS })
 		const inst = axios.create({ httpsAgent: agent, responseType: 'arraybuffer', validateStatus: () => true })
 		return {
 			fn: async (url) => {
@@ -127,7 +131,7 @@ async function makeAdapter(name: string | undefined): Promise<Adapter> {
 	}
 	if (name === 'node-fetch') {
 		const { default: fetch } = await import('node-fetch')
-		const agent = new https.Agent({ keepAlive: true, rejectUnauthorized: false })
+		const agent = new https.Agent({ keepAlive: true, rejectUnauthorized: VERIFY_TLS })
 		return {
 			fn: async (url) => {
 				const r = await fetch(url, { agent })
@@ -143,7 +147,7 @@ async function makeAdapter(name: string | undefined): Promise<Adapter> {
 		// h2 with an npm undici Agent hangs against the local server, and h1 is what a stock
 		// fetch user gets anyway.
 		const { Agent, setGlobalDispatcher } = await import('undici')
-		setGlobalDispatcher(new Agent({ connect: { rejectUnauthorized: false } }))
+		setGlobalDispatcher(new Agent({ connect: { rejectUnauthorized: VERIFY_TLS } }))
 		return {
 			fn: async (url) => {
 				const r = await fetch(url)
