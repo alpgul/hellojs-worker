@@ -1,14 +1,16 @@
 // opts.stream returns a Readable that delivers chunks as they arrive (no buffer).
 
-const test = require('node:test')
-const assert = require('node:assert')
-const http2 = require('node:http2')
-const tls = require('node:tls')
-const fs = require('node:fs')
-const os = require('node:os')
-const path = require('node:path')
-const crypto = require('node:crypto')
-const { execSync } = require('node:child_process')
+import assert from 'node:assert'
+import { execSync } from 'node:child_process'
+import * as crypto from 'node:crypto'
+import * as fs from 'node:fs'
+import * as http2 from 'node:http2'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import test from 'node:test'
+import * as tls from 'node:tls'
+
+import request from '../../index.js'
 
 function genServerCert() {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hjsrv-'))
@@ -38,7 +40,6 @@ test('opts.stream resolves with a Readable that yields chunks progressively', { 
 	const port = server.address().port
 
 	try {
-		const request = require('../../')
 		// localhost cert is not in trust store, so we must disable cert validation.
 		const stream = await request({
 			url: `https://127.0.0.1:${port}/`,
@@ -72,7 +73,6 @@ test('opts.stream + resolveWithFullResponse exposes status, headers, body Readab
 	const port = server.address().port
 
 	try {
-		const request = require('../../')
 		const res = await request({
 			url: `https://127.0.0.1:${port}/`,
 			stream: true,

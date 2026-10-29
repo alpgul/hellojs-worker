@@ -1,7 +1,8 @@
 // Subprocess worker: run one client through cold + warm + concurrent + memory phases.
 // Reads BENCH_CLIENT, BENCH_TARGET, BENCH_PORT from env; prints JSON to stdout.
 
-const path = require('node:path')
+import * as http2 from 'node:http2'
+import * as https from 'node:https'
 
 const CLIENT = process.env.BENCH_CLIENT
 const TARGET = process.env.BENCH_TARGET
@@ -14,7 +15,7 @@ const CONCURRENT = parseInt(process.env.BENCH_CONCURRENT || '50', 10)
 
 async function makeAdapter(name) {
 	if (name === 'hellojs') {
-		const request = require('../..')
+		const { default: request } = await import('../../index.js')
 		return {
 			fn: async (url) => {
 				const r = await request({ url, verifyTLS: false, resolveWithFullResponse: true })
@@ -24,7 +25,6 @@ async function makeAdapter(name) {
 		}
 	}
 	if (name === 'node-https') {
-		const https = require('node:https')
 		const agent = new https.Agent({ keepAlive: true, rejectUnauthorized: false })
 		return {
 			fn: (url) => new Promise((resolve, reject) => {
@@ -39,7 +39,6 @@ async function makeAdapter(name) {
 		}
 	}
 	if (name === 'node-http2') {
-		const http2 = require('node:http2')
 		// Pool sessions by origin so multiple requests reuse the same connection.
 		const sessions = new Map()
 		const getSession = (url) => {
@@ -67,7 +66,7 @@ async function makeAdapter(name) {
 		}
 	}
 	if (name === 'undici') {
-		const { Agent, request } = require('undici')
+		const { Agent, request } = await import('undici')
 		const agent = new Agent({ connect: { rejectUnauthorized: false }, allowH2: true })
 		return {
 			fn: async (url) => {
@@ -92,8 +91,7 @@ async function makeAdapter(name) {
 		}
 	}
 	if (name === 'axios') {
-		const axios = require('axios')
-		const https = require('node:https')
+		const { default: axios } = await import('axios')
 		const agent = new https.Agent({ keepAlive: true, rejectUnauthorized: false })
 		const inst = axios.create({ httpsAgent: agent, responseType: 'arraybuffer', validateStatus: () => true })
 		return {
@@ -107,7 +105,6 @@ async function makeAdapter(name) {
 	if (name === 'node-fetch') {
 		// node-fetch v3 is ESM-only.
 		const { default: fetch } = await import('node-fetch')
-		const https = require('node:https')
 		const agent = new https.Agent({ keepAlive: true, rejectUnauthorized: false })
 		return {
 			fn: async (url) => {
@@ -121,7 +118,7 @@ async function makeAdapter(name) {
 	if (name === 'fetch-native') {
 		// Node's built-in undici-backed fetch. For self-signed local certs we need to install
 		// a permissive dispatcher — native fetch ignores NODE_TLS_REJECT_UNAUTHORIZED.
-		const { Agent, setGlobalDispatcher } = require('undici')
+		const { Agent, setGlobalDispatcher } = await import('undici')
 		setGlobalDispatcher(new Agent({ connect: { rejectUnauthorized: false } }))
 		return {
 			fn: async (url) => {

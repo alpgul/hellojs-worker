@@ -14,9 +14,10 @@
 // block per TLS instance, so JA3 hash — computed over extensions in wire order — varies
 // run to run. JA4, peetprint, and akamai_fingerprint are all extension-order-invariant.
 
-const fs = require('fs')
-const request = require('../..')
-const profiles = require('../../lib/profiles')
+import * as fs from 'node:fs'
+
+import request from '../../index.js'
+import * as profiles from '../../lib/profiles/index.js'
 
 const fixturePath = process.argv[2]
 if (!fixturePath) {
@@ -72,9 +73,9 @@ console.log(`  akamai    ${expected.akamai}`)
 	let fail = 0
 	for (const k of ['ja4', 'peetprint', 'akamai']) {
 		if (expected[k] === got[k]) {
-			console.log(`\x1b[32mMATCH\x1b[0m ${k}`)
+			console.log(`\x1B[32mMATCH\x1B[0m ${k}`)
 		} else {
-			console.log(`\x1b[31mDIFF \x1b[0m ${k}\n  expected: ${expected[k]}\n  got:      ${got[k]}`)
+			console.log(`\x1B[31mDIFF \x1B[0m ${k}\n  expected: ${expected[k]}\n  got:      ${got[k]}`)
 			fail++
 		}
 	}
@@ -85,7 +86,7 @@ console.log(`  akamai    ${expected.akamai}`)
 	const fixtureUnknowns = (fixture.tls?.extensions || [])
 		.map(e => {
 			const m = String(e.name).match(/^Unknown extension\s+(?:0x([0-9a-fA-F]+)|(\d+))$/)
-			return m ? (m[1] ? parseInt(m[1], 16) : parseInt(m[2], 10)) : null
+			return m ? (m[1] ? Number.parseInt(m[1], 16) : parseInt(m[2], 10)) : null
 		})
 		.filter(id => id != null)
 	if (fixtureUnknowns.length) {
@@ -94,16 +95,16 @@ console.log(`  akamai    ${expected.akamai}`)
 			(res.body.tls?.extensions || []).map(e => {
 				const m = String(e.name).match(/\((?:0x([0-9a-fA-F]+)|(\d+))\)\s*$/)
 					|| String(e.name).match(/^Unknown extension\s+(?:0x([0-9a-fA-F]+)|(\d+))$/)
-				return m ? (m[1] ? parseInt(m[1], 16) : parseInt(m[2], 10)) : null
+				return m ? (m[1] ? Number.parseInt(m[1], 16) : parseInt(m[2], 10)) : null
 			}).filter(id => id != null),
 		)
 		for (const id of fixtureUnknowns) {
-			if (gotExtIds.has(id)) console.log(`\x1b[32mMATCH\x1b[0m unknown ext ${id} (0x${id.toString(16)}) present on wire`)
-			else { console.log(`\x1b[31mDIFF \x1b[0m unknown ext ${id} (0x${id.toString(16)}) MISSING from live CH`); fail++ }
+			if (gotExtIds.has(id)) console.log(`\x1B[32mMATCH\x1B[0m unknown ext ${id} (0x${id.toString(16)}) present on wire`)
+			else { console.log(`\x1B[31mDIFF \x1B[0m unknown ext ${id} (0x${id.toString(16)}) MISSING from live CH`); fail++ }
 		}
 	}
 
-	console.log(`\n${fail === 0 ? '\x1b[32mALL PASS\x1b[0m' : `\x1b[31m${fail} FAILURE(S)\x1b[0m`}`)
+	console.log(`\n${fail === 0 ? '\x1B[32mALL PASS\x1B[0m' : `\x1B[31m${fail} FAILURE(S)\x1B[0m`}`)
 	process.exit(fail ? 1 : 0)
 })().catch((e) => {
 	console.error('\nRequest failed:', e.code || '', e.message)

@@ -1,8 +1,9 @@
 // RFC 6265 cookie jar tests.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const { Jar, parseSetCookie, domainMatch, pathMatch } = require('../../lib/cookies')
+import assert from 'node:assert'
+import test from 'node:test'
+
+import { Jar, parseSetCookie, domainMatch, pathMatch } from '../../lib/cookies.js'
 
 test('parseSetCookie: name/value + attributes', () => {
 	const r = parseSetCookie('SID=abc; Domain=example.com; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=3600')

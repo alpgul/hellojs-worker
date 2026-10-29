@@ -1,14 +1,9 @@
 // Wire-format tests for the extension builders that Phase 2 added.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const {
-	CreateStatusRequestExtension,
-	CreateStatusRequestV2Extension,
-	CreateSignatureAlgorithmsCertExtension,
-	CreateSupportedGroupsExtension,
-	CreateSupportedVersionsExtension,
-} = require('../../lib/extensions')
+import assert from 'node:assert'
+import test from 'node:test'
+
+import { CreateStatusRequestExtension, CreateStatusRequestV2Extension, CreateSignatureAlgorithmsCertExtension, CreateSupportedGroupsExtension, CreateSupportedVersionsExtension } from '../../lib/extensions/index.js'
 
 test('status_request (5): default (Chrome) shape — type=1, 0/0', () => {
 	const ext = CreateStatusRequestExtension()

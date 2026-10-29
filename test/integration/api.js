@@ -1,12 +1,12 @@
 // Exercises the request.js-shape public API end-to-end against tls.peet.ws.
 // Verifies: callback form, promise form, defaults, jar, qs, gzip auto-decompress, h2 path.
 
-const request = require('../../')
+import request from '../../index.js'
 
 let pass = 0, fail = 0
 const log = (label, ok, detail) => {
-	if (ok) { pass++; console.log(`\x1b[32mPASS\x1b[0m ${label}`) }
-	else { fail++; console.log(`\x1b[31mFAIL\x1b[0m ${label}${detail ? '\n     ' + detail : ''}`) }
+	if (ok) { pass++; console.log(`\x1B[32mPASS\x1B[0m ${label}`) }
+	else { fail++; console.log(`\x1B[31mFAIL\x1B[0m ${label}${detail ? '\n     ' + detail : ''}`) }
 }
 
 ;(async () => {

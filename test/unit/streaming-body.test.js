@@ -1,10 +1,12 @@
 // H2Stream write/end streaming interface — verified against a mock session.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const { H2Session } = require('../../lib/h2/session')
-const frame = require('../../lib/h2/frame')
-const { Duplex, Readable } = require('node:stream')
+import assert from 'node:assert'
+import { Duplex, Readable } from 'node:stream'
+import test from 'node:test'
+
+import * as frame from '../../lib/h2/frame.js'
+import { H2Session } from '../../lib/h2/session.js'
+
 
 function mockTransport() {
 	const written = []

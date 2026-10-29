@@ -1,8 +1,9 @@
 // Logger: levels + JSON mode.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const logger = require('../../lib/models/log')
+import assert from 'node:assert'
+import test from 'node:test'
+
+import logger from '../../lib/models/log.js'
 
 function captureLogs(fn) {
 	const orig = console.log

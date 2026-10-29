@@ -12,9 +12,19 @@
 //
 // Each fuzz batch is ITERATIONS rounds. Bump with FUZZ_ITERATIONS=10000 for a longer run.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const crypto = require('node:crypto')
+import assert from 'node:assert'
+import * as crypto from 'node:crypto'
+import test from 'node:test'
+
+import * as frame from '../../lib/h2/frame.js'
+import * as hpack from '../../lib/h2/hpack.js'
+import * as huffman from '../../lib/h3/huffman.js'
+import * as packet from '../../lib/h3/packet.js'
+import * as qpack from '../../lib/h3/qpack.js'
+import * as tp from '../../lib/h3/transport-params.js'
+import * as varint from '../../lib/h3/varint.js'
+import { validateChain } from '../../lib/tls/cert-validate.js'
+import * as records from '../../lib/tls/tls12_records.js'
 
 const ITERATIONS = parseInt(process.env.FUZZ_ITERATIONS || '1000', 10)
 const TIMEOUT_MS = 30_000
@@ -39,7 +49,7 @@ function fuzz(name, fn) {
 	test(`fuzz: ${name}`, { timeout: TIMEOUT_MS }, () => {
 		let panics = 0
 		for (let i = 0; i < ITERATIONS; i++) {
-			try { fn() } catch (e) {
+			try { fn() } catch {
 				// Throws are acceptable. We're only watching for hangs (timeout) or process exits.
 				panics++
 			}
@@ -51,13 +61,11 @@ function fuzz(name, fn) {
 
 // -------- HPACK decoder --------
 fuzz('HPACK decoder on random bytes', () => {
-	const hpack = require('../../lib/h2/hpack')
 	const dt = new hpack.DynamicTable(4096)
 	hpack.decode(randomBuf(512), dt)
 })
 
 fuzz('HPACK decoder on mutated-good blocks', () => {
-	const hpack = require('../../lib/h2/hpack')
 	const dt = new hpack.DynamicTable(4096)
 	// Build a known-good block then mutate
 	const enc = new hpack.DynamicTable(4096)
@@ -67,7 +75,6 @@ fuzz('HPACK decoder on mutated-good blocks', () => {
 
 // -------- HPACK encoder (defensive — shouldn't blow up on weird inputs) --------
 fuzz('HPACK encoder on random header pairs', () => {
-	const hpack = require('../../lib/h2/hpack')
 	const dt = new hpack.DynamicTable(4096)
 	const pairs = []
 	const count = Math.floor(Math.random() * 8)
@@ -82,7 +89,6 @@ fuzz('HPACK encoder on random header pairs', () => {
 
 // -------- h2 frame parser --------
 fuzz('h2 frame parser on random bytes', () => {
-	const frame = require('../../lib/h2/frame')
 	let buf = randomBuf(1024)
 	while (buf.length >= 9) {
 		const f = frame.parse(buf)
@@ -93,22 +99,19 @@ fuzz('h2 frame parser on random bytes', () => {
 
 // -------- TLS 1.2 record codec (decrypt side) --------
 fuzz('TLS 1.2 GCM record codec on truncated input', () => {
-	const records = require('../../lib/tls/tls12_records')
 	const cipher = { aead: 'aes-128-gcm', name: 'TEST' }
 	const keys = { key: crypto.randomBytes(16), iv: crypto.randomBytes(4) }
 	const garbage = randomBuf(64)
-	try { records.decryptRecord(cipher, keys, 0, 0x17, garbage) } catch (_) {}
+	try { records.decryptRecord(cipher, keys, 0, 0x17, garbage) } catch {}
 })
 
 // -------- Cert chain parser (X509) --------
 fuzz('Cert validate on random DER blobs', () => {
-	const { validateChain } = require('../../lib/tls/cert-validate')
-	try { validateChain([randomBuf(512)], 'example.com') } catch (_) {}
+	try { validateChain([randomBuf(512)], 'example.com') } catch {}
 })
 
 // -------- QUIC varint --------
 fuzz('QUIC varint decode on random bytes', () => {
-	const varint = require('../../lib/h3/varint')
 	const buf = randomBuf(16)
 	let off = 0
 	while (off < buf.length) {
@@ -116,31 +119,27 @@ fuzz('QUIC varint decode on random bytes', () => {
 			const [, next] = varint.decode(buf, off)
 			if (next === off) break
 			off = next
-		} catch (_) { break }
+		} catch { break }
 	}
 })
 
 // -------- QUIC packet parser via long-header detection --------
 fuzz('QUIC long-header packet parse on random bytes', () => {
-	const packet = require('../../lib/h3/packet')
-	try { packet.parseLongHeader?.(randomBuf(256)) } catch (_) {}
-	try { packet.parseShortHeader?.(randomBuf(256)) } catch (_) {}
+	try { packet.parseLongHeader?.(randomBuf(256)) } catch {}
+	try { packet.parseShortHeader?.(randomBuf(256)) } catch {}
 })
 
 // -------- QPACK decoder --------
 fuzz('QPACK decoder on random bytes', () => {
-	const qpack = require('../../lib/h3/qpack')
-	try { qpack.decodeHeaders?.(randomBuf(256)) } catch (_) {}
+	try { qpack.decodeHeaders?.(randomBuf(256)) } catch {}
 })
 
 // -------- Huffman codec --------
 fuzz('Huffman decoder on random bytes', () => {
-	const huffman = require('../../lib/h3/huffman')
-	try { huffman.decode(randomBuf(128)) } catch (_) {}
+	try { huffman.decode(randomBuf(128)) } catch {}
 })
 
 // -------- Transport params parser --------
 fuzz('QUIC transport params on random bytes', () => {
-	const tp = require('../../lib/h3/transport-params')
-	try { tp.parse?.(randomBuf(128)) } catch (_) {}
+	try { tp.parse?.(randomBuf(128)) } catch {}
 })

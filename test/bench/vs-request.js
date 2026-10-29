@@ -8,9 +8,11 @@
 // Target: a small JSON endpoint on Cloudflare (cdn-cgi/trace) which is fast,
 // keep-alive friendly, and supports h2 (for hellojs).
 
-const hello = require('../../')
-const rp = require('request-promise')
-const https = require('https')
+import * as https from 'node:https'
+
+import rp from 'request-promise'
+
+import hello from '../../index.js'
 
 const URL = 'https://www.cloudflare.com/cdn-cgi/trace'
 const N = 50

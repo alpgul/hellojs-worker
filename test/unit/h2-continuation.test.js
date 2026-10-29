@@ -1,10 +1,12 @@
 // h2 CONTINUATION frame send/receive when header blocks exceed MAX_FRAME_SIZE.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const { H2Session } = require('../../lib/h2/session')
-const frame = require('../../lib/h2/frame')
-const { Duplex } = require('node:stream')
+import assert from 'node:assert'
+import { Duplex } from 'node:stream'
+import test from 'node:test'
+
+import * as frame from '../../lib/h2/frame.js'
+import * as hpack from '../../lib/h2/hpack.js'
+import { H2Session } from '../../lib/h2/session.js'
 
 function mockTransport() {
 	const written = []
@@ -42,7 +44,7 @@ test('huge header block is sent as HEADERS + CONTINUATION(s)', () => {
 	// HEADERS must NOT carry END_HEADERS (the last CONT does).
 	assert.strictEqual(headerFrames[0].flags & frame.FLAG.END_HEADERS, 0)
 	// The LAST CONT must carry END_HEADERS.
-	const last = contFrames[contFrames.length - 1]
+	const last = contFrames.at(-1)
 	assert.strictEqual(last.flags & frame.FLAG.END_HEADERS, frame.FLAG.END_HEADERS)
 	// Non-last CONTs do not.
 	for (let i = 0; i < contFrames.length - 1; i++) {
@@ -57,7 +59,6 @@ test('inbound: HEADERS+CONTINUATION reassembles into a single response event', a
 	const stream = s.request({ ':method': 'GET', ':scheme': 'https', ':authority': 'a', ':path': '/' })
 
 	// Encode a big response header block and split it across one HEADERS + one CONTINUATION.
-	const hpack = require('../../lib/h2/hpack')
 	const responsePairs = [
 		[':status', '200'],
 		['content-type', 'application/json'],

@@ -1,10 +1,11 @@
 // TLS 1.2 PRF — P_SHA256/P_SHA384, master_secret, EMS, key_block, finished verify_data.
 // PRF is the heart of TLS 1.2 key derivation. If this is wrong, nothing else works.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const crypto = require('node:crypto')
-const prf = require('../../lib/tls/tls12_prf')
+import assert from 'node:assert'
+import * as crypto from 'node:crypto'
+import test from 'node:test'
+
+import * as prf from '../../lib/tls/tls12_prf.js'
 
 test('P_SHA256 matches a hand-rolled HMAC chain', () => {
 	const secret = Buffer.from('secret')

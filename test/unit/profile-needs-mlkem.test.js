@@ -2,9 +2,10 @@
 // key_share construction run during connect(). TLS-1.2-only / non-key_share profiles must
 // not pay the MLKEM cost.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const { TLS } = require('../../lib/tls/tls')
+import assert from 'node:assert'
+import test from 'node:test'
+
+import { TLS } from '../../lib/tls/tls.js'
 
 function withProfile(tls) {
 	// Synthesize a TLS instance with just enough state to invoke _profileNeedsMlkem().

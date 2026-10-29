@@ -1,11 +1,12 @@
 // Fingerprint regression test: drives our TLS class directly into its built-in
 // http2 session and asserts JA4 / Akamai fingerprint vs the captured Chrome 147 fixture.
 
-const fs = require('fs')
-const path = require('path')
-const { TLS } = require('../../lib/tls/tls')
+import * as fs from 'node:fs'
+import * as path from 'node:path'
 
-const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, '../fixtures/chrome147-peet.json'), 'utf8'))
+import { TLS } from '../../lib/tls/tls.js'
+
+const fixture = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '../fixtures/chrome147-peet.json'), 'utf8'))
 
 ;(async () => {
 	const tls = new TLS('tls.peet.ws', 443)
@@ -92,7 +93,7 @@ const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, '../fixtures/chr
 
 	let pass = 0, fail = 0
 	for (const c of checks) {
-		const tag = c.ok ? '\x1b[32mPASS\x1b[0m' : '\x1b[31mFAIL\x1b[0m'
+		const tag = c.ok ? '\x1B[32mPASS\x1B[0m' : '\x1B[31mFAIL\x1B[0m'
 		console.log(`${tag} ${c.name}`)
 		if (!c.ok) {
 			console.log(`     expected: ${c.expected}`)

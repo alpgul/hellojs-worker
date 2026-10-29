@@ -1,15 +1,15 @@
 // Redirect handling: cross-origin credential stripping, same-origin retention, and method/body
 // downgrade (303 -> GET, and POST -> GET on 301/302) per RFC 9110 §15.4 / browser behavior.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const http2 = require('node:http2')
-const fs = require('node:fs')
-const os = require('node:os')
-const path = require('node:path')
-const { execSync } = require('node:child_process')
+import assert from 'node:assert'
+import { execSync } from 'node:child_process'
+import * as fs from 'node:fs'
+import * as http2 from 'node:http2'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import test from 'node:test'
 
-const request = require('../../')
+import request from '../../index.js'
 
 function genServerCert() {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hjrd-'))

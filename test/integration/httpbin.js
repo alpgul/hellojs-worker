@@ -3,13 +3,13 @@
 // Target: httpbingo.org (modern Go-based httpbin, TLS 1.3 + h2 + zstd).
 // httpbin.org is TLS 1.2 only and we don't support that. Same endpoints, same response shape.
 
-const request = require('../../')
+import request from '../../index.js'
 
 const BASE = 'https://httpbingo.org'
 let pass = 0, fail = 0
 const log = (label, ok, detail) => {
-	if (ok) { pass++; console.log(`\x1b[32mPASS\x1b[0m ${label}${detail ? ' — ' + detail : ''}`) }
-	else { fail++; console.log(`\x1b[31mFAIL\x1b[0m ${label}${detail ? ' — ' + detail : ''}`) }
+	if (ok) { pass++; console.log(`\x1B[32mPASS\x1B[0m ${label}${detail ? ' — ' + detail : ''}`) }
+	else { fail++; console.log(`\x1B[31mFAIL\x1B[0m ${label}${detail ? ' — ' + detail : ''}`) }
 }
 
 const opts = (overrides = {}) => ({ simple: false, ...overrides })

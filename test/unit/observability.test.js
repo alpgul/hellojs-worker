@@ -1,12 +1,14 @@
 // Observability hooks fire on the expected lifecycle.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const http2 = require('node:http2')
-const fs = require('node:fs')
-const os = require('node:os')
-const path = require('node:path')
-const { execSync } = require('node:child_process')
+import assert from 'node:assert'
+import { execSync } from 'node:child_process'
+import * as fs from 'node:fs'
+import * as http2 from 'node:http2'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import test from 'node:test'
+
+import request from '../../index.js'
 
 function genCert() {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-'))
@@ -24,7 +26,6 @@ test('request lifecycle emits start, headersSent, firstByte, end', { timeout: 10
 	await new Promise((r) => server.listen(0, '127.0.0.1', r))
 	const port = server.address().port
 
-	const request = require('../../')
 	const events = []
 	const recorder = (name) => (ev) => events.push({ name, ...ev })
 	for (const e of ['request:start', 'request:headersSent', 'request:firstByte', 'request:end']) {
@@ -34,11 +35,11 @@ test('request lifecycle emits start, headersSent, firstByte, end', { timeout: 10
 	const res = await request({ url: `https://127.0.0.1:${port}/`, verifyTLS: false, resolveWithFullResponse: true })
 	assert.strictEqual(res.statusCode, 200)
 
-	const names = events.map((e) => e.name)
-	assert.ok(names.includes('request:start'))
-	assert.ok(names.includes('request:headersSent'))
-	assert.ok(names.includes('request:firstByte'))
-	assert.ok(names.includes('request:end'))
+	const names = new Set(events.map((e) => e.name))
+	assert.ok(names.has('request:start'))
+	assert.ok(names.has('request:headersSent'))
+	assert.ok(names.has('request:firstByte'))
+	assert.ok(names.has('request:end'))
 
 	const endEv = events.find((e) => e.name === 'request:end')
 	assert.strictEqual(endEv.status, 200)
@@ -57,7 +58,6 @@ test('throwing in a hook listener does not break the request', { timeout: 10_000
 	await new Promise((r) => server.listen(0, '127.0.0.1', r))
 	const port = server.address().port
 
-	const request = require('../../')
 	request.observability.on('request:start', () => { throw new Error('boom') })
 	const res = await request({ url: `https://127.0.0.1:${port}/`, verifyTLS: false, resolveWithFullResponse: true })
 	assert.strictEqual(res.statusCode, 200)

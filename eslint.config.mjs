@@ -1,9 +1,9 @@
 import js from '@eslint/js'
 import prettier from 'eslint-config-prettier/flat'
 import importX from 'eslint-plugin-import-x'
+import unicorn from 'eslint-plugin-unicorn'
 import globals from 'globals'
 import tseslint from 'typescript-eslint'
-import unicorn from 'eslint-plugin-unicorn'
 
 // Flat ESLint config. JavaScript and TypeScript sources are both ESM.
 export default tseslint.config(

@@ -6,7 +6,8 @@
 /// <reference types="node" />
 
 import { EventEmitter } from 'node:events'
-import { Duplex } from 'node:stream'
+
+import type { Duplex } from 'node:stream'
 
 export interface CookieJar {
 	getCookieString(host: string): string
@@ -115,7 +116,26 @@ export interface RequestFn {
 
 declare const request: RequestFn
 export default request
-export = request
+
+export interface ProfileRegistry {
+	get(name?: string): unknown
+	list(): string[]
+	register(name: string, profile: unknown): void
+	registerFromPeet(name: string, peet: unknown): unknown
+	fromPeet(peet: unknown, opts?: unknown): unknown
+	profiles: Record<string, unknown>
+}
+
+export interface Observability {
+	safeEmit(event: string, payload?: unknown): void
+	on(event: string, listener: (...args: unknown[]) => void): unknown
+	off(event: string, listener: (...args: unknown[]) => void): unknown
+}
+
+export const observability: Observability
+export const profiles: ProfileRegistry
+export const udp: UdpTransport
+export function setTrustedRoots(pems: string[]): void
 
 export interface TLSOptions {
 	verifyTLS?: boolean

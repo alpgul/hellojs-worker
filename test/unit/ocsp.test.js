@@ -1,9 +1,10 @@
 // OCSP stapled-response parser tests. We don't have a stable test vector library, so we
 // build minimal hand-rolled DER for the happy paths.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const { parseOcspResponse } = require('../../lib/tls/ocsp')
+import assert from 'node:assert'
+import test from 'node:test'
+
+import { parseOcspResponse } from '../../lib/tls/ocsp.js'
 
 // Build a SEQUENCE prefixed with tag 0x30 + length.
 function seq(content) {

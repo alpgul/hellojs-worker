@@ -1,6 +1,7 @@
-const test = require('node:test')
-const assert = require('node:assert')
-const v = require('../../lib/h3/varint')
+import assert from 'node:assert'
+import test from 'node:test'
+
+import * as v from '../../lib/h3/varint.js'
 
 // RFC 9000 Appendix A.1 test vectors
 test('varint encode/decode round-trip', () => {

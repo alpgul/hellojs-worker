@@ -1,9 +1,10 @@
 // TLS 1.2 record codec — AEAD (GCM/ChaCha20) + CBC round-trip.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const crypto = require('node:crypto')
-const records = require('../../lib/tls/tls12_records')
+import assert from 'node:assert'
+import * as crypto from 'node:crypto'
+import test from 'node:test'
+
+import * as records from '../../lib/tls/tls12_records.js'
 
 test('AEAD AAD layout: seq(8) + type(1) + version(2) + length(2) = 13 bytes', () => {
 	const aad = records.aeadAAD(0x1234, 0x16, 100)

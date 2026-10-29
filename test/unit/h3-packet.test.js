@@ -2,9 +2,10 @@
 // invariant (RFC 9001 §5.4.2). HP samples 16 bytes starting 4 bytes into the
 // packet-number field, so every built packet must carry enough protected bytes;
 // short payloads (e.g. a 1-byte PING probe sent on PTO) must be PADDING-padded.
-const test = require('node:test')
-const assert = require('node:assert')
-const pkt = require('../../lib/h3/packet')
+import assert from 'node:assert'
+import test from 'node:test'
+
+import * as pkt from '../../lib/h3/packet.js'
 
 const CK = { key: Buffer.alloc(16, 1), iv: Buffer.alloc(12, 2), hp: Buffer.alloc(16, 3) }
 const DST = Buffer.alloc(8, 9)

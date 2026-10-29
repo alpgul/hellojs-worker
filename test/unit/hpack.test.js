@@ -1,8 +1,9 @@
 // HPACK (RFC 7541) encoder + decoder — for the custom h2 client.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const hpack = require('../../lib/h2/hpack')
+import assert from 'node:assert'
+import test from 'node:test'
+
+import * as hpack from '../../lib/h2/hpack.js'
 
 test('static table indexes match RFC 7541 Appendix A', () => {
 	// Smoke-check a few well-known entries

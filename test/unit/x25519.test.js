@@ -3,10 +3,11 @@
 // The helper must produce exactly what node:crypto's diffieHellman does on a runtime where
 // it works, because the handshake's wire bytes and the derived secrets must not change.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const crypto = require('node:crypto')
-const { deriveX25519SharedSecret } = require('../../lib/tls/x25519')
+import assert from 'node:assert'
+import * as crypto from 'node:crypto'
+import test from 'node:test'
+
+import { deriveX25519SharedSecret } from '../../lib/tls/x25519.js'
 
 // X25519 PKCS8 = fixed 16-byte header + the 32-byte private seed (RFC 8410).
 const PKCS8_PREFIX = Buffer.from('302e020100300506032b656e04220420', 'hex')

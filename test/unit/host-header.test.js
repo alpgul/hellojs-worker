@@ -2,9 +2,10 @@
 // their own Host header. Two Host headers are malformed (RFC 7230 5.4) and a fingerprint tell; a
 // stray `host` header over h2 is likewise a tell (Chrome carries the origin only in :authority).
 
-const test = require('node:test')
-const assert = require('node:assert')
-const { buildH1Headers, buildH2Headers } = require('../../lib/headers')
+import assert from 'node:assert'
+import test from 'node:test'
+
+import { buildH1Headers, buildH2Headers } from '../../lib/headers.js'
 
 function hostLines(block) {
 	return block.split('\r\n').filter((l) => /^host:/i.test(l))

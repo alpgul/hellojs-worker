@@ -2,14 +2,15 @@
 // that the JA3 hellojs computes from the CH it just emitted matches the middlebox parrot's
 // stated JA3 hash (so users can run profiles.verify(...) without round-tripping through peet).
 
-const test = require('node:test')
-const assert = require('node:assert')
-const fs = require('node:fs')
-const path = require('node:path')
-const { Writable } = require('node:stream')
-const { TLS } = require('../../lib/tls/tls')
-const profiles = require('../../lib/profiles')
-const { parseClientHello, ja3, ja4, isGrease } = require('../../lib/tls/fingerprint')
+import assert from 'node:assert'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import { Writable } from 'node:stream'
+import test from 'node:test'
+
+import * as profiles from '../../lib/profiles/index.js'
+import { parseClientHello, ja3, ja4, isGrease } from '../../lib/tls/fingerprint.js'
+import { TLS } from '../../lib/tls/tls.js'
 
 test('isGrease: recognises GREASE codepoints', () => {
 	assert.strictEqual(isGrease(0x0a0a), true)
@@ -53,7 +54,7 @@ test('ja3 + ja4 are recorded on TLS.actualFingerprint after startClientHello', (
 
 test('ja3 over the middlebox parrot reproduces the fixture hash', () => {
 	const SAMPLE = JSON.parse(fs.readFileSync(
-		path.join(__dirname, '../fixtures/middlebox-tls12-peet.json'), 'utf8'))
+		path.join(import.meta.dirname, '../fixtures/middlebox-tls12-peet.json'), 'utf8'))
 	profiles.registerFromPeet('middlebox-tls12-fp', SAMPLE)
 	const { tls } = emitCh('middlebox-tls12-fp')
 	// The fixture's ja3_hash is the canonical hash computed by peet.ws's pipeline. If our
@@ -63,7 +64,7 @@ test('ja3 over the middlebox parrot reproduces the fixture hash', () => {
 
 test('ja4 over the middlebox parrot reproduces the JA4_a prefix from the fixture', () => {
 	const SAMPLE = JSON.parse(fs.readFileSync(
-		path.join(__dirname, '../fixtures/middlebox-tls12-peet.json'), 'utf8'))
+		path.join(import.meta.dirname, '../fixtures/middlebox-tls12-peet.json'), 'utf8'))
 	const expectedPrefix = SAMPLE.tls.ja4.split('_')[0]   // e.g. "t12d1310h2"
 	const { tls } = emitCh('middlebox-tls12-fp')
 	const actualPrefix = tls.actualFingerprint.ja4.split('_')[0]

@@ -13,8 +13,8 @@
 // Some of these tests may flake when a server retires TLS 1.2 or upgrades to 1.3-only.
 // That's fine — we want to know.
 
-const request = require('../..')
-const { TLS } = require('../../lib/tls/tls')
+import request from '../../index.js'
+import { TLS } from '../../lib/tls/tls.js'
 
 const TLS12_TARGETS = [
 	'httpbin.org',                  // ECDHE-RSA-AES128-GCM, h2 ALPN over TLS 1.2
@@ -54,9 +54,9 @@ async function probe(target) {
 		if (r.ok) {
 			ok++
 			if (r.version === '1.2') tls12Hits++
-			console.log(`\x1b[32mOK\x1b[0m   ${r.target.padEnd(34)} tls=${r.version} alpn=${(r.alpn || '?').padEnd(8)} cipher=${r.cipher}`)
+			console.log(`\x1B[32mOK\x1B[0m   ${r.target.padEnd(34)} tls=${r.version} alpn=${(r.alpn || '?').padEnd(8)} cipher=${r.cipher}`)
 		} else {
-			console.log(`\x1b[31mFAIL\x1b[0m ${r.target.padEnd(34)} err=${r.err}`)
+			console.log(`\x1B[31mFAIL\x1B[0m ${r.target.padEnd(34)} err=${r.err}`)
 		}
 	}
 
@@ -64,9 +64,9 @@ async function probe(target) {
 	console.log('\nEnd-to-end GET over TLS 1.2:')
 	try {
 		const res = await request({ url: 'https://httpbin.org/ip', timeout: 15_000, resolveWithFullResponse: true })
-		console.log(`\x1b[32mOK\x1b[0m   httpbin.org/ip status=${res.statusCode} body=${res.body.toString().slice(0, 80)}`)
+		console.log(`\x1B[32mOK\x1B[0m   httpbin.org/ip status=${res.statusCode} body=${res.body.toString().slice(0, 80)}`)
 	} catch (e) {
-		console.log(`\x1b[31mFAIL\x1b[0m httpbin.org/ip ${e.code} ${e.message}`)
+		console.log(`\x1B[31mFAIL\x1B[0m httpbin.org/ip ${e.code} ${e.message}`)
 	}
 
 	console.log(`\n${ok}/${results.length} probes OK; ${tls12Hits} negotiated TLS 1.2`)

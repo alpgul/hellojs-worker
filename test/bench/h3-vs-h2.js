@@ -1,5 +1,6 @@
 // Benchmark h3 vs h2 (cold + warm steady-state).
-const request = require('../../')
+import request from '../../index.js'
+
 const N = 10
 const stats = (arr) => {
 	const sorted = [...arr].sort((a, b) => a - b)

@@ -1,13 +1,14 @@
 // Certificate chain validation — accept/reject paths.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const crypto = require('node:crypto')
-const { execSync } = require('node:child_process')
-const fs = require('node:fs')
-const os = require('node:os')
-const path = require('node:path')
-const { validateChain, hostnameMatches, trustedRoots } = require('../../lib/tls/cert-validate')
+import assert from 'node:assert'
+import { execSync } from 'node:child_process'
+import * as crypto from 'node:crypto'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import test from 'node:test'
+
+import { validateChain, hostnameMatches, trustedRoots } from '../../lib/tls/cert-validate.js'
 
 function genSelfSigned(cn, san = `DNS:${cn}`, validity = 1) {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hjcert-'))

@@ -1,10 +1,11 @@
 // Profile-driven request headers: injected automatically in the profile's order, caller
 // extras appended, non-identity values overridable in place, identity headers fixed.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const { buildH1Headers, buildH2Headers, mergeProfileHeaders } = require('../../lib/headers')
-const chrome = require('../../lib/profiles/chrome147-mac')
+import assert from 'node:assert'
+import test from 'node:test'
+
+import { buildH1Headers, buildH2Headers, mergeProfileHeaders } from '../../lib/headers.js'
+import chrome from '../../lib/profiles/chrome147-mac.js'
 
 const PROFILE_ORDER = Object.keys(chrome.headers)
 

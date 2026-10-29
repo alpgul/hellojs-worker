@@ -2,16 +2,16 @@
 // drive TLS.startClientHello() against a fake socket, parse the captured ClientHello, and
 // assert that what hit the wire matches the parrot. No real network.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const fs = require('node:fs')
-const path = require('node:path')
-const { Writable } = require('node:stream')
+import assert from 'node:assert'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import { Writable } from 'node:stream'
+import test from 'node:test'
 
-const { TLS } = require('../../lib/tls/tls')
-const profiles = require('../../lib/profiles')
+import * as profiles from '../../lib/profiles/index.js'
+import { TLS } from '../../lib/tls/tls.js'
 
-const SAMPLE_PATH = path.join(__dirname, '../fixtures/middlebox-tls12-peet.json')
+const SAMPLE_PATH = path.join(import.meta.dirname, '../fixtures/middlebox-tls12-peet.json')
 const SAMPLE = JSON.parse(fs.readFileSync(SAMPLE_PATH, 'utf8'))
 
 // Minimal ClientHello parser. Returns { ciphers, extensionIds, extensionMap } where
@@ -119,7 +119,7 @@ test('chrome147-mac still emits GREASE everywhere expected', () => {
 
 	// First and last extension are GREASE.
 	assert.strictEqual(extensionIds[0] & 0x0f0f, 0x0a0a)
-	assert.strictEqual(extensionIds[extensionIds.length - 1] & 0x0f0f, 0x0a0a)
+	assert.strictEqual(extensionIds.at(-1) & 0x0f0f, 0x0a0a)
 
 	// supported_versions starts with GREASE then 0x0304, 0x0303.
 	const sv = extensionMap[43]

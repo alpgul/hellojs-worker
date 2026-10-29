@@ -3,16 +3,16 @@
 //   - verifyCertVerify checks the TLS 1.3 server CertificateVerify signature (RFC 8446 §4.4.3)
 //   - parseCertificateList parses/round-trips the Certificate message (also via the compressed path)
 
-const test = require('node:test')
-const assert = require('node:assert')
-const { after } = require('node:test')
-const crypto = require('node:crypto')
-const fs = require('node:fs')
-const os = require('node:os')
-const path = require('node:path')
-const zlib = require('node:zlib')
-const { execSync } = require('node:child_process')
-const { validateChain, trustedRoots, verifyCertVerify, parseCertificateList } = require('../../lib/tls/cert-validate')
+import assert from 'node:assert'
+import { execSync } from 'node:child_process'
+import * as crypto from 'node:crypto'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import test, { after } from 'node:test'
+import * as zlib from 'node:zlib'
+
+import { validateChain, trustedRoots, verifyCertVerify, parseCertificateList } from '../../lib/tls/cert-validate.js'
 
 const D = fs.mkdtempSync(path.join(os.tmpdir(), 'hjcv-'))
 const sh = (cmd) => execSync(cmd, { cwd: D, stdio: ['ignore', 'ignore', 'ignore'] })

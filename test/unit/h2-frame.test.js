@@ -1,8 +1,9 @@
 // h2 frame codec — 9-byte header + payload.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const frame = require('../../lib/h2/frame')
+import assert from 'node:assert'
+import test from 'node:test'
+
+import * as frame from '../../lib/h2/frame.js'
 
 test('build + parse round-trip preserves type/flags/streamId/payload', () => {
 	const payload = Buffer.from([0x01, 0x02, 0x03, 0x04, 0x05])

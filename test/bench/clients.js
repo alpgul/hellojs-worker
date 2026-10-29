@@ -13,12 +13,11 @@
 // Each client is run in its own subprocess so module-level caches don't bleed across
 // runs. Numbers below are MS unless noted otherwise.
 
-const { spawn } = require('node:child_process')
-const path = require('node:path')
-const http2 = require('node:http2')
-const fs = require('node:fs')
-const os = require('node:os')
-const { execSync } = require('node:child_process')
+import { spawn, execSync  } from 'node:child_process'
+import * as fs from 'node:fs'
+import * as http2 from 'node:http2'
+import * as os from 'node:os'
+import * as path from 'node:path'
 
 const WARM_REPS = parseInt(process.env.WARM_REPS || '30', 10)
 const CONCURRENT = parseInt(process.env.CONCURRENT || '50', 10)
@@ -36,7 +35,7 @@ function genCert() {
 }
 
 // Tiny worker script that runs ONE client against ONE target and prints JSON.
-const WORKER = path.join(__dirname, 'bench-worker.js')
+const WORKER = path.join(import.meta.dirname, 'bench-worker.js')
 
 function runWorker(client, target, port, opts = {}) {
 	const perRunTimeoutMs = opts.timeoutMs || 90_000
@@ -53,7 +52,7 @@ function runWorker(client, target, port, opts = {}) {
 		if (target === 'local') env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
 		const child = spawn(process.execPath, [WORKER], { env, stdio: ['ignore', 'pipe', 'pipe'] })
 		let out = '', err = ''
-		const timer = setTimeout(() => { try { child.kill('SIGKILL') } catch (_) {} }, perRunTimeoutMs)
+		const timer = setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, perRunTimeoutMs)
 		child.stdout.on('data', (d) => out += d.toString())
 		child.stderr.on('data', (d) => err += d.toString())
 		child.on('exit', (code, signal) => {

@@ -1,18 +1,19 @@
 // The UDP seam that gates QUIC socket creation: default provider, explicit disable,
 // custom provider injection.
 
-const test = require('node:test')
-const assert = require('node:assert')
+import assert from 'node:assert'
+import test from 'node:test'
 
-// Each case wants its own view of the seam's module-level state.
+// Each case wants its own view of the seam's module-level state. ESM caches modules
+// permanently, so a unique query string gives each case a fresh evaluation.
+let seamGeneration = 0
 function freshSeam() {
-	const path = require.resolve('../../lib/h3/udp')
-	delete require.cache[path]
-	return require(path)
+	seamGeneration++
+	return import(`../../lib/h3/udp.js?fresh=${seamGeneration}`)
 }
 
-test('dgram is the default provider and opens a usable socket', () => {
-	const udp = freshSeam()
+test('dgram is the default provider and opens a usable socket', async () => {
+	const udp = await freshSeam()
 	assert.equal(udp.udpAvailable(), true)
 	const sock = udp.createSocket()
 	try {
@@ -25,15 +26,15 @@ test('dgram is the default provider and opens a usable socket', () => {
 	}
 })
 
-test('setUdpProvider(null) passiveizes the transport', () => {
-	const udp = freshSeam()
+test('setUdpProvider(null) passiveizes the transport', async () => {
+	const udp = await freshSeam()
 	udp.setUdpProvider(null)
 	assert.equal(udp.udpAvailable(), false)
 	assert.throws(() => udp.createSocket(), (e) => e.code === 'EUDPUNAVAILABLE')
 })
 
-test('a custom provider replaces dgram without touching connection.js', () => {
-	const udp = freshSeam()
+test('a custom provider replaces dgram without touching connection.js', async () => {
+	const udp = await freshSeam()
 	const stub = { on() {}, bind() {}, send() {}, close() {}, destroyed: false }
 	udp.setUdpProvider((type) => { stub.type = type; return stub })
 	assert.equal(udp.udpAvailable(), true)

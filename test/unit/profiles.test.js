@@ -1,8 +1,9 @@
 // Profile registry: register a custom profile and use it.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const profiles = require('../../lib/profiles')
+import assert from 'node:assert'
+import test from 'node:test'
+
+import * as profiles from '../../lib/profiles/index.js'
 
 test('get(default) returns chrome147-mac', () => {
 	assert.strictEqual(profiles.get('default').name, 'chrome147-mac')

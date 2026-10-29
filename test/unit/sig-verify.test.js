@@ -9,15 +9,16 @@
 //     answers TRUE when asked about PSS. Both directions are asserted here.
 //   - ECDSA signatures stay DER — the streaming path takes them as they arrive on the wire.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const crypto = require('node:crypto')
-const fs = require('node:fs')
-const os = require('node:os')
-const path = require('node:path')
-const { execSync } = require('node:child_process')
-const tls = require('node:tls')
-const { verifySignature, verifyCertSignature, resolveKey, derToSpkiPem, normHash } = require('../../lib/tls/sig-verify')
+import assert from 'node:assert'
+import { execSync } from 'node:child_process'
+import * as crypto from 'node:crypto'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import test from 'node:test'
+import * as tls from 'node:tls'
+
+import { verifySignature, verifyCertSignature, resolveKey, derToSpkiPem, normHash } from '../../lib/tls/sig-verify.js'
 
 const K = crypto.constants
 const roots = tls.rootCertificates.map(pem => new crypto.X509Certificate(pem))

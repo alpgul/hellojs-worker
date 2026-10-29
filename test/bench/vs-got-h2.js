@@ -5,9 +5,11 @@
 // but the implementations are very different (hellojs uses our custom TLS + node:http2
 // over a Duplex; got uses http2-wrapper).
 
-const hello = require('../../')
-const rp = require('request-promise')
-const https = require('https')
+import * as https from 'node:https'
+
+import rp from 'request-promise'
+
+import hello from '../../index.js'
 
 const URL = 'https://www.cloudflare.com/cdn-cgi/trace'
 const N = 50

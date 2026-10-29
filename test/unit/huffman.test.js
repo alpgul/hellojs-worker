@@ -1,8 +1,10 @@
 // HPACK/QPACK Huffman codec (RFC 7541 Appendix B).
 
-const test = require('node:test')
-const assert = require('node:assert')
-const huffman = require('../../lib/h3/huffman')
+import assert from 'node:assert'
+import { randomBytes } from 'node:crypto'
+import test from 'node:test'
+
+import * as huffman from '../../lib/h3/huffman.js'
 
 test('RFC 7541 Appendix C.4.1 vector: www.example.com', () => {
 	const got = huffman.encode('www.example.com')
@@ -20,7 +22,7 @@ test('round-trip preserves ASCII strings', () => {
 })
 
 test('round-trip preserves arbitrary binary bytes', () => {
-	const buf = require('crypto').randomBytes(256)
+	const buf = randomBytes(256)
 	const enc = huffman.encode(buf)
 	const dec = huffman.decode(enc)
 	assert.deepStrictEqual(dec, buf)

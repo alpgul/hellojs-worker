@@ -1,11 +1,12 @@
 // Tier-2 remote-DoS hardening for the QUIC/HTTP-3 transport: a malicious or buggy server must not
 // be able to crash the client process or freeze the event loop or exhaust memory.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const crypto = require('node:crypto')
-const { QuicConnection, QuicStream } = require('../../lib/h3/connection')
-const qpack = require('../../lib/h3/qpack')
+import assert from 'node:assert'
+import * as crypto from 'node:crypto'
+import test from 'node:test'
+
+import { QuicConnection, QuicStream } from '../../lib/h3/connection.js'
+import * as qpack from '../../lib/h3/qpack.js'
 
 test('_onDatagram drops malformed/garbage datagrams without throwing', () => {
 	const c = new QuicConnection('127.0.0.1', 443)
@@ -66,6 +67,20 @@ test('QPACK encoder-stream parser never throws or over-advances on arbitrary inp
 		assert.doesNotThrow(() => { consumed = qpack.parseEncoderInstructions(buf, t) })
 		assert.ok(consumed >= 0 && consumed <= buf.length, `consumed ${consumed} not in [0, ${buf.length}]`)
 	}
+})
+
+test('QPACK over-long varint cannot wrap a length negative and stall the parser', () => {
+	// 0x5f is "literal name, 5-bit length" whose prefix is saturated; the continuation bytes make
+	// the length exceed 2^32. With 32-bit shifts this wrapped negative, moved the cursor backwards
+	// and made parseEncoderInstructions crawl forward ~1.3e9 times (event-loop freeze).
+	const t = new qpack.DynamicTable(4096)
+	const buf = Buffer.from('5fd9fc99e2eb1305333e9ae98a9fb3db', 'hex')
+	const start = process.hrtime.bigint()
+	const consumed = qpack.parseEncoderInstructions(buf, t)
+	const ms = Number(process.hrtime.bigint() - start) / 1e6
+	assert.ok(ms < 100, `parse took ${ms}ms (should be ~instant)`)
+	assert.strictEqual(consumed, 0)
+	assert.strictEqual(t.totalInserted, 0)
 })
 
 test('QPACK encoder instruction split across chunks reassembles without corruption', () => {

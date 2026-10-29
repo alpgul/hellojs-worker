@@ -1,8 +1,10 @@
 // profiles.fromPeet — paste a peet.ws response, get a profile that emits the same fingerprint.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const { fromPeet } = require('../../lib/profiles/from-peet')
+import assert from 'node:assert'
+import test from 'node:test'
+
+import { fromPeet } from '../../lib/profiles/from-peet.js'
+import * as profiles from '../../lib/profiles/index.js'
 
 const SAMPLE = {
 	user_agent: 'Mozilla/5.0 ... Chrome/147.0.0.0 Safari/537.36',
@@ -161,7 +163,6 @@ test('fromPeet: rejects non-peet inputs', () => {
 })
 
 test('registerFromPeet: registers + returns profile', () => {
-	const profiles = require('../../lib/profiles')
 	const p = profiles.registerFromPeet('parrot-test', SAMPLE)
 	assert.strictEqual(p.name, 'parrot-test')
 	assert.strictEqual(profiles.get('parrot-test'), p)
@@ -181,9 +182,10 @@ test('fromPeet: detects useGrease=true when GREASE appears anywhere', () => {
 //   - useGrease=false because input has zero GREASE markers
 //   - extension 50 raw bytes captured for byte-exact emission
 //   - status_request_v2 shape captured
-const fs = require('node:fs')
-const path = require('node:path')
-const MIDDLEBOX = JSON.parse(fs.readFileSync(path.join(__dirname, '../fixtures/middlebox-tls12-peet.json'), 'utf8'))
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+
+const MIDDLEBOX = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '../fixtures/middlebox-tls12-peet.json'), 'utf8'))
 
 test('fromPeet (middlebox-tls12): parses without throwing', () => {
 	const p = fromPeet(MIDDLEBOX)
@@ -193,7 +195,7 @@ test('fromPeet (middlebox-tls12): parses without throwing', () => {
 test('fromPeet (middlebox-tls12): cipher list includes SCSV (0x00ff) at end', () => {
 	const p = fromPeet(MIDDLEBOX)
 	assert.strictEqual(p.tls.ciphers.length, 13)
-	assert.strictEqual(p.tls.ciphers[p.tls.ciphers.length - 1], 0x00ff)
+	assert.strictEqual(p.tls.ciphers.at(-1), 0x00ff)
 })
 
 test('fromPeet (middlebox-tls12): useGrease=false', () => {

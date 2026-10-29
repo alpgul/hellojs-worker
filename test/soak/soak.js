@@ -1,11 +1,11 @@
 // Soak test: send many requests against a local h2 server, watch for memory growth
 // and handle leaks. Not part of the unit test suite — invoke via `npm run test:soak`.
 
-const http2 = require('node:http2')
-const fs = require('node:fs')
-const os = require('node:os')
-const path = require('node:path')
-const { execSync } = require('node:child_process')
+import { execSync } from 'node:child_process'
+import * as fs from 'node:fs'
+import * as http2 from 'node:http2'
+import * as os from 'node:os'
+import * as path from 'node:path'
 
 const TOTAL_REQUESTS = parseInt(process.env.SOAK_REQUESTS || '2000', 10)
 const CONCURRENCY    = parseInt(process.env.SOAK_CONCURRENCY || '50', 10)
@@ -30,7 +30,7 @@ server.on('stream', (stream) => {
 
 server.listen(0, '127.0.0.1', async () => {
 	const port = server.address().port
-	const request = require('../../')
+	const { default: request } = await import('../../index.js')
 
 	const start = Date.now()
 	const samples = []

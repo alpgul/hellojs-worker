@@ -1,9 +1,10 @@
 // setTrustedRoots() replaces the bundled store — workerd's node:tls has none.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const tls = require('node:tls')
-const { setTrustedRoots, trustedRoots } = require('../../lib/tls/cert-validate')
+import assert from 'node:assert'
+import test from 'node:test'
+import * as tls from 'node:tls'
+
+import { setTrustedRoots, trustedRoots } from '../../lib/tls/cert-validate.js'
 
 test('setTrustedRoots replaces the store and can restore the Node bundle', () => {
 	setTrustedRoots([])

@@ -1,10 +1,11 @@
 // Firefox 147 profile: pinned TLS/HTTP2 fingerprint values and header behaviour.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const profiles = require('../../lib/profiles')
-const firefox = require('../../lib/profiles/firefox147')
-const { buildH2Headers } = require('../../lib/headers')
+import assert from 'node:assert'
+import test from 'node:test'
+
+import { buildH2Headers } from '../../lib/headers.js'
+import firefox from '../../lib/profiles/firefox147.js'
+import * as profiles from '../../lib/profiles/index.js'
 
 test('firefox147 is registered', () => {
 	assert.strictEqual(profiles.get('firefox147').name, 'firefox147')

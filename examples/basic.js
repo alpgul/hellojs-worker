@@ -3,10 +3,10 @@
 // Tour of hellojs against httpbingo.org. Demonstrates the request.js-shape API
 // and the Chrome 147 fingerprint at the same time.
 
-const request = require('..')
+import request from '../index.js'
 
 const log = (label, ok, detail = '') => {
-	const tag = ok ? '\x1b[32m✓\x1b[0m' : '\x1b[31m✗\x1b[0m'
+	const tag = ok ? '\x1B[32m✓\x1B[0m' : '\x1B[31m✗\x1B[0m'
 	console.log(`${tag}  ${label}${detail ? '  —  ' + detail : ''}`)
 }
 const v = (x) => Array.isArray(x) ? x[0] : x
@@ -117,6 +117,6 @@ const step = async (label, fn) => {
 	console.log('\n=== done ===\n')
 	process.exit(0)
 })().catch((e) => {
-	console.error('\n\x1b[31m✗  FATAL\x1b[0m', e)
+	console.error('\n\x1B[31m✗  FATAL\x1B[0m', e)
 	process.exit(1)
 })

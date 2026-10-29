@@ -1,9 +1,10 @@
 // HKDF (RFC 5869) + Expand-Label (RFC 8446 §7.1). Underpins all TLS 1.3 key derivation.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const crypto = require('node:crypto')
-const HKDF = require('../../lib/utils/hkdf')
+import assert from 'node:assert'
+import * as crypto from 'node:crypto'
+import test from 'node:test'
+
+import * as HKDF from '../../lib/utils/hkdf.js'
 
 test('Extract is HMAC(salt, IKM)', () => {
 	const salt = Buffer.alloc(32, 0)

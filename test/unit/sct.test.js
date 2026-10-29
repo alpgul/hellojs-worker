@@ -1,13 +1,17 @@
 // Signed Certificate Timestamp parser tests.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const crypto = require('node:crypto')
-const { extractScts, parseSctList, findSctExtension } = require('../../lib/tls/sct')
+import assert from 'node:assert'
+import { execSync } from 'node:child_process'
+import * as crypto from 'node:crypto'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import test from 'node:test'
+import * as tls from 'node:tls'
+
+import { extractScts, parseSctList, findSctExtension } from '../../lib/tls/sct.js'
 
 test('extractScts on a cert with no SCT extension returns []', () => {
-	const { execSync } = require('node:child_process')
-	const fs = require('node:fs'), path = require('node:path'), os = require('node:os')
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sct-'))
 	const k = path.join(dir, 'k'), c = path.join(dir, 'c')
 	execSync(`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days 1 -subj "/CN=localhost" 2>/dev/null`)
@@ -54,7 +58,6 @@ test('parseSctList handles a synthetic 2-SCT list', () => {
 
 test('findSctExtension on a real-world cert returns the extension bytes', async () => {
 	// Fetch the cert from a real CT-enforced site (cloudflare.com) by opening a TLS socket.
-	const tls = require('node:tls')
 	await new Promise((resolve) => {
 		const sock = tls.connect({ host: 'www.cloudflare.com', port: 443, servername: 'www.cloudflare.com', rejectUnauthorized: false }, () => {
 			const peer = sock.getPeerX509Certificate()

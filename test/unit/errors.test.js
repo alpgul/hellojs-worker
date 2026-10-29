@@ -1,8 +1,9 @@
 // Error taxonomy: stable shape, codes, categories, and wrap() promotion.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const { HellojsError, CODES, CATEGORY, wrap } = require('../../lib/errors')
+import assert from 'node:assert'
+import test from 'node:test'
+
+import { HellojsError, CODES, CATEGORY, wrap } from '../../lib/errors.js'
 
 test('HellojsError has stable name + code + category', () => {
 	const e = new HellojsError('boom', 'EHTTP')

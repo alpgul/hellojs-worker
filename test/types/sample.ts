@@ -6,13 +6,16 @@
 
 import request, {
 	HellojsError,
+	TLS
+} from '../../index.js'
+
+import type {
 	HellojsErrorCode,
 	HellojsErrorCategory,
 	Response,
 	RequestOptions,
-	TLS,
 	PerPhaseTimeouts,
-} from '../../index'
+} from '../../index.js'
 import type { Readable, Writable } from 'node:stream'
 
 async function smoke(): Promise<void> {
@@ -27,7 +30,7 @@ async function smoke(): Promise<void> {
 		json: { name: 'foo' },
 		gzip: true,
 		timeout: 5000,
-		timeouts: { connect: 1000, tlsHandshake: 2000, response: 3000, idle: 60_000 },
+		timeouts: { connect: 1000, tlsHandshake: 2000, response: 3000 },
 		verifyTLS: true,
 		resolveWithFullResponse: true,
 	})

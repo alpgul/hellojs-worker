@@ -9,7 +9,7 @@
 // This test uses the internal `_forceHRRGroup` test affordance to send a ClientHello
 // that DEFINITELY triggers HRR — advertising only a single group with no real key_share.
 
-const { TLS } = require('../../lib/tls/tls')
+import { TLS } from '../../lib/tls/tls.js'
 
 const TARGETS = [
 	'www.cloudflare.com',
@@ -46,10 +46,10 @@ async function probe(host, forceGroup) {
 		const r = await probe(host, 0x0017)  // secp256r1 — most servers prefer x25519 first
 		if (r.ok) {
 			pass++
-			console.log(`\x1b[32mOK\x1b[0m   ${host.padEnd(22)} alpn=${r.alpn.padEnd(8)} group=${r.group.padEnd(8)} cipher=${r.cipher}`)
+			console.log(`\x1B[32mOK\x1B[0m   ${host.padEnd(22)} alpn=${r.alpn.padEnd(8)} group=${r.group.padEnd(8)} cipher=${r.cipher}`)
 		} else {
 			fail++
-			console.log(`\x1b[31mFAIL\x1b[0m ${host.padEnd(22)} err=${r.err}`)
+			console.log(`\x1B[31mFAIL\x1B[0m ${host.padEnd(22)} err=${r.err}`)
 		}
 	}
 

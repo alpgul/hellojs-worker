@@ -5,8 +5,8 @@
 // This is the round-trip proof that `profiles.fromPeet()` produces a structurally
 // faithful clone of the input.
 
-const request = require('../..')
-const profiles = require('../../lib/profiles')
+import request from '../../index.js'
+import * as profiles from '../../lib/profiles/index.js'
 
 ;(async () => {
 	console.log('Parrot end-to-end test\n')

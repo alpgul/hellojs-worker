@@ -1,6 +1,6 @@
 // Smoke test h3 handshake against several public h3 endpoints.
-const { QuicConnection } = require('../../lib/h3/connection')
-const { H3Client } = require('../../lib/h3/h3')
+import { QuicConnection } from '../../lib/h3/connection.js'
+import { H3Client } from '../../lib/h3/h3.js'
 
 const targets = [
 	{ host: 'cloudflare-quic.com', path: '/' },
@@ -41,10 +41,10 @@ async function tryOne({ host, path }) {
 	let pass = 0, fail = 0
 	for (const r of results) {
 		if (r.ok) {
-			console.log(`\x1b[32mOK\x1b[0m   ${r.host.padEnd(22)} status=${r.status} bytes=${r.bytes} server="${r.server}" t=${r.ms}ms`)
+			console.log(`\x1B[32mOK\x1B[0m   ${r.host.padEnd(22)} status=${r.status} bytes=${r.bytes} server="${r.server}" t=${r.ms}ms`)
 			pass++
 		} else {
-			console.log(`\x1b[31mFAIL\x1b[0m ${r.host.padEnd(22)} err=${r.err}`)
+			console.log(`\x1B[31mFAIL\x1B[0m ${r.host.padEnd(22)} err=${r.err}`)
 			fail++
 		}
 	}

@@ -1,12 +1,13 @@
 // Tier-2 remote-DoS hardening for HTTP/2: malformed HPACK / oversized header blocks from the peer
 // must fail the request and tear down the connection, not crash the process or exhaust memory.
 
-const test = require('node:test')
-const assert = require('node:assert')
-const { EventEmitter } = require('node:events')
-const { H2Session } = require('../../lib/h2/session')
-const hpack = require('../../lib/h2/hpack')
-const frame = require('../../lib/h2/frame')
+import assert from 'node:assert'
+import { EventEmitter } from 'node:events'
+import test from 'node:test'
+
+import * as frame from '../../lib/h2/frame.js'
+import * as hpack from '../../lib/h2/hpack.js'
+import { H2Session } from '../../lib/h2/session.js'
 
 const REQ = { ':method': 'GET', ':path': '/', ':scheme': 'https', ':authority': 'x' }
 
