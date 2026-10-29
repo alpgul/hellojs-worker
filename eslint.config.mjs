@@ -1,4 +1,5 @@
 import js from '@eslint/js'
+import { defineConfig, globalIgnores } from 'eslint/config'
 import prettier from 'eslint-config-prettier/flat'
 import importX from 'eslint-plugin-import-x'
 import unicorn from 'eslint-plugin-unicorn'
@@ -6,18 +7,16 @@ import globals from 'globals'
 import tseslint from 'typescript-eslint'
 
 // Flat ESLint config. JavaScript and TypeScript sources are both ESM.
-export default tseslint.config(
-	{
-		ignores: [
-			'node_modules/**',
-			'dist/**',
-			'coverage/**',
-			'test/fixtures/**',
-			'chrome-response-*.json',
-			'leaf*.pem',
-			'leaf*.der',
-		],
-	},
+export default defineConfig(
+	globalIgnores([
+		'node_modules/**',
+		'dist/**',
+		'coverage/**',
+		'test/fixtures/**',
+		'chrome-response-*.json',
+		'leaf*.pem',
+		'leaf*.der',
+	]),
 	js.configs.recommended,
 	importX.flatConfigs.recommended,
 	{
