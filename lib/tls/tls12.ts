@@ -711,7 +711,7 @@ class TLS12Handshake {
 		}
 	}
 
-	// ---- outbound app-data path (called from client.js via tls.h2Transport / write) -
+	// ---- outbound app-data path (called from client.ts via tls.h2Transport / write) -
 
 	encryptAppData(plaintext: Buffer): void {
 		const rec = records.encryptRecord(this.cipher, this.clientKeys!, this.clientSeq++, CONTENT.APPDATA, plaintext)

@@ -30,7 +30,7 @@ server.on('stream', (stream) => {
 
 server.listen(0, '127.0.0.1', async () => {
 	const port = server.address().port
-	const { default: request } = await import('../../index.js')
+	const { default: request } = await import('../../index.ts')
 
 	const start = Date.now()
 	const samples = []

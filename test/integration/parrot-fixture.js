@@ -16,7 +16,7 @@
 
 import * as fs from 'node:fs'
 
-import request from '../../index.js'
+import request from '../../index.ts'
 import * as profiles from '../../lib/profiles/index.ts'
 
 const fixturePath = process.argv[2]

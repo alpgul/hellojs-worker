@@ -33,7 +33,7 @@ import {
 import { H2Session } from '../h2/session.ts'
 import logFactory from '../models/log.ts'
 import * as profileRegistry from '../profiles/index.ts'
-import { socks5Connect } from '../socks5.js'
+import { socks5Connect } from '../socks5.ts'
 import { MESSAGE_TYPES, HASHES, type HashInfo } from '../utils/config.ts'
 import * as HKDF from '../utils/hkdf.ts'
 
@@ -346,7 +346,7 @@ class TLS extends EventEmitter {
 
 			// CONNECT-phase timeout. Without this, a proxy that accepts TCP but never returns
 			// the CONNECT response (overloaded, blackholed, malicious) leaves createTLS in
-			// lib/connect.js waiting on tls.on('error') forever.
+			// lib/connect.ts waiting on tls.on('error') forever.
 			const CONNECT_TIMEOUT_MS = 10_000
 			const MAX_PROXY_RESP_BYTES = 65536
 			let proxyDone = false
@@ -364,7 +364,7 @@ class TLS extends EventEmitter {
 				try {
 					this.socket?.destroy()
 				} catch {}
-				// Propagate to TLS listeners — lib/connect.js's createTLS is awaiting this.
+				// Propagate to TLS listeners — lib/connect.ts's createTLS is awaiting this.
 				// Missing emit was the silent-hang bug: socket errors were logged, never surfaced.
 				this.emit('error', err)
 			}
@@ -1639,7 +1639,7 @@ class TLS extends EventEmitter {
 		}
 
 		this.socket!.write(Buffer.concat(pieces))
-		// Signal to callers (lib/connect.js) that TLS bytes are now on the wire. Used to gate
+		// Signal to callers (lib/connect.ts) that TLS bytes are now on the wire. Used to gate
 		// the `tlsHandshake` timeout so it measures the TLS phase specifically, not the TCP
 		// connect / proxy CONNECT / MLKEM-keypair phases that ran before this point. HRR
 		// re-fires this; createTLS only starts the timer on the first fire.
@@ -1668,4 +1668,4 @@ function shuffleSeeded(arr: string[], seed: number): string[] {
 }
 
 export { TLS, TLSTransport }
-export type { TLSError }
+export type { TLSError, TLSOptions }

@@ -3,7 +3,7 @@
 // Target: httpbingo.org (modern Go-based httpbin, TLS 1.3 + h2 + zstd).
 // httpbin.org is TLS 1.2 only and we don't support that. Same endpoints, same response shape.
 
-import request from '../../index.js'
+import request from '../../index.ts'
 
 const BASE = 'https://httpbingo.org'
 let pass = 0, fail = 0

@@ -19,16 +19,35 @@
 
 import * as net from 'node:net'
 
-function buildAuthRequest(username, password) {
+export interface Socks5Options {
+	proxyHost: string
+	proxyPort: number
+	destHost: string
+	destPort: number
+	username?: string | null
+	password?: string | null
+	connectTimeoutMs?: number
+}
+
+// Parsed SOCKS5 CONNECT reply. `error` is set only for a malformed/unknown reply; a
+// rejected connect still parses fine and reports the failure through `rep`.
+export interface Socks5Reply {
+	ver: number
+	rep: number
+	consumed: number
+	error?: string
+}
+
+function buildAuthRequest(username: string, password: string): Buffer {
 	// RFC 1929: VER=0x01, ULEN, UNAME, PLEN, PASSWD
 	const u = Buffer.from(username, 'utf8')
 	const p = Buffer.from(password, 'utf8')
 	return Buffer.concat([Buffer.from([0x01, u.length]), u, Buffer.from([p.length]), p])
 }
 
-function buildConnectRequest(destHost, destPort) {
+function buildConnectRequest(destHost: string, destPort: number): Buffer {
 	// RFC 1928 §4: VER=0x05, CMD=CONNECT(0x01), RSV=0x00, ATYP, DST.ADDR, DST.PORT
-	let atyp, addr
+	let atyp: number, addr: Buffer
 	const ipFamily = net.isIP(destHost)
 	if (ipFamily === 4) {
 		atyp = 0x01
@@ -51,7 +70,7 @@ function buildConnectRequest(destHost, destPort) {
 	return Buffer.concat([Buffer.from([0x05, 0x01, 0x00, atyp]), addr, portBuf])
 }
 
-function readReply(buf) {
+function readReply(buf: Buffer): Socks5Reply | null {
 	// SOCKS5 reply: VER, REP, RSV, ATYP, BND.ADDR, BND.PORT
 	if (buf.length < 7) return null   // need at least ATYP byte to know length
 	const ver = buf[0]
@@ -63,24 +82,25 @@ function readReply(buf) {
 	else if (atyp === 0x03) {
 		if (buf.length < 5) return null
 		bndLen = 1 + buf[4]
-	} else return { error: `unknown ATYP ${atyp}` }
+	} else return { ver: 0, rep: 0, consumed: 0, error: `unknown ATYP ${atyp}` }
 	const total = 4 + bndLen + 2
 	if (buf.length < total) return null
 	return { ver, rep, consumed: total }
 }
 
-function socks5Connect({ proxyHost, proxyPort, username, password, destHost, destPort, connectTimeoutMs = 10_000 }) {
-	return new Promise((resolve, reject) => {
+function socks5Connect(options: Socks5Options): Promise<net.Socket> {
+	const { proxyHost, proxyPort, username, password, destHost, destPort, connectTimeoutMs = 10_000 } = options
+	return new Promise<net.Socket>((resolve, reject) => {
 		const sock = net.createConnection({ host: proxyHost, port: proxyPort })
 		const t = setTimeout(() => { sock.destroy(new Error('SOCKS5 connect timed out')) }, connectTimeoutMs)
 		let buf = Buffer.alloc(0)
 		let state = 'greeting'   // greeting -> auth (optional) -> connect -> done
 
-		const fail = (err) => { clearTimeout(t); try { sock.destroy() } catch {}; reject(err) }
+		const fail = (err: Error): void => { clearTimeout(t); try { sock.destroy() } catch {}; reject(err) }
 
 		sock.once('error', (e) => fail(e))
 
-		sock.on('data', (chunk) => {
+		sock.on('data', (chunk: Buffer) => {
 			buf = Buffer.concat([buf, chunk])
 			while (true) {
 				if (state === 'greeting') {
@@ -109,7 +129,7 @@ function socks5Connect({ proxyHost, proxyPort, username, password, destHost, des
 					if (reply.error) return fail(new Error(`SOCKS5 reply: ${reply.error}`))
 					if (reply.ver !== 0x05) return fail(new Error(`SOCKS5 reply: unexpected version ${reply.ver}`))
 					if (reply.rep !== 0x00) {
-						const codes = { 1: 'general failure', 2: 'connection not allowed', 3: 'network unreachable',
+						const codes: Record<number, string> = { 1: 'general failure', 2: 'connection not allowed', 3: 'network unreachable',
 							4: 'host unreachable', 5: 'connection refused', 6: 'TTL expired',
 							7: 'command not supported', 8: 'address type not supported' }
 						return fail(new Error(`SOCKS5 connect failed: ${codes[reply.rep] || `code ${reply.rep}`}`))

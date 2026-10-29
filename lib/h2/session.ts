@@ -63,7 +63,8 @@ export interface H2Transport {
 	destroy?(error?: Error): unknown
 }
 
-export type H2HeaderValue = string | number
+// Header values reach HPACK as whatever the caller put in the object; the encoder stringifies.
+export type H2HeaderValue = string | number | boolean | null | undefined
 
 export interface H2RequestHeaders {
 	[name: string]: H2HeaderValue | H2HeaderValue[]
@@ -496,14 +497,14 @@ class H2Session extends EventEmitter {
 		this.emit('close')
 	}
 
-	// Public API (mirrors enough of Node's http2.ClientHttp2Session that lib/client.js can drive it).
+	// Public API (mirrors enough of Node's http2.ClientHttp2Session that lib/client.ts can drive it).
 	request(headers: H2RequestHeaders, opts: H2RequestOptions = {}): H2Stream {
 		const id = this.nextStreamId
 		this.nextStreamId += 2
 		const stream = new H2Stream(this, id)
 		this.streams.set(id, stream)
 
-		// Normalize: lib/client.js passes headers as { ':method': 'GET', ... } object.
+		// Normalize: lib/client.ts passes headers as { ':method': 'GET', ... } object.
 		const list: Array<[string, H2HeaderValue]> = []
 		for (const [k, v] of Object.entries(headers)) {
 			// Chrome (H2) sends EACH cookie as its OWN `cookie` header (HPACK indexes them

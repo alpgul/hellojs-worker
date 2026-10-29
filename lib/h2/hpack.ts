@@ -186,8 +186,9 @@ function findInTables(name: string, value: string, table: DynamicTable): { exact
 
 // Encode a list of [name, value] pairs. We use Literal Without Indexing for non-indexed
 // values — stateless encoder, no dynamic table writes from our side. Matches what Node's
-// http2 does by default for non-sensitive headers.
-function encode(headers: Array<[string | number, string | number]>, table: DynamicTable): Buffer {
+// http2 does by default for non-sensitive headers. Both halves are stringified, so callers
+// can hand us numbers (a content-length, a priority weight) directly.
+function encode(headers: Array<[name: string | number, value: string | number | boolean | null | undefined]>, table: DynamicTable): Buffer {
 	const out: Buffer[] = []
 	for (const [name, value] of headers) {
 		const n = String(name).toLowerCase()

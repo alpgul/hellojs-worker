@@ -1,13 +1,14 @@
 // Strict-TS validation of @unreleased/hellojs's index.d.ts.
 //
 // This file is compiled via `tsc --noEmit --strict` in CI. Any drift between the .d.ts
-// and the real export shape will surface as a compile error here. Don't import from the
-// package name to avoid `node_modules` resolution; use a relative path.
+// and the real export shape will surface as a compile error here. Importing through the
+// package's own name resolves via package.json "exports" -> "types" -> index.d.ts, so this
+// program sees exactly what a consumer's `tsc` sees and never the .ts sources behind it.
 
 import request, {
 	HellojsError,
 	TLS
-} from '../../index.js'
+} from '@unreleased/hellojs'
 
 import type {
 	HellojsErrorCode,
@@ -15,7 +16,7 @@ import type {
 	Response,
 	RequestOptions,
 	PerPhaseTimeouts,
-} from '../../index.js'
+} from '@unreleased/hellojs'
 import type { Readable, Writable } from 'node:stream'
 
 async function smoke(): Promise<void> {

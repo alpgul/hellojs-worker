@@ -5,7 +5,7 @@
 // This is the round-trip proof that `profiles.fromPeet()` produces a structurally
 // faithful clone of the input.
 
-import request from '../../index.js'
+import request from '../../index.ts'
 import * as profiles from '../../lib/profiles/index.ts'
 
 ;(async () => {

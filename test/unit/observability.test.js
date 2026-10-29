@@ -8,7 +8,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import test from 'node:test'
 
-import request from '../../index.js'
+import request from '../../index.ts'
 
 function genCert() {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-'))

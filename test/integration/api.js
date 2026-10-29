@@ -1,7 +1,7 @@
 // Exercises the request.js-shape public API end-to-end against tls.peet.ws.
 // Verifies: callback form, promise form, defaults, jar, qs, gzip auto-decompress, h2 path.
 
-import request from '../../index.js'
+import request from '../../index.ts'
 
 let pass = 0, fail = 0
 const log = (label, ok, detail) => {

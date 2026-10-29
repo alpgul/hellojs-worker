@@ -4,7 +4,7 @@ import assert from 'node:assert'
 import * as net from 'node:net'
 import test from 'node:test'
 
-import { socks5Connect } from '../../lib/socks5.js'
+import { socks5Connect } from '../../lib/socks5.ts'
 
 // Spin up a minimal in-process SOCKS5 server that:
 //   - accepts 0x00 (no-auth) and 0x02 (userpass)

@@ -800,12 +800,12 @@ Errors are `HellojsError` instances. See [Errors](#errors) for the full taxonomy
 
 ```
 lib/
-├── client.js                  request()-shape API (URL parsing, redirects,
+├── client.ts                  request()-shape API (URL parsing, redirects,
 │                              cookie jar integration, body codec, retry policy,
 │                              streaming response, observability hooks)
-├── connect.js                 per-request TLS/QUIC connection factory (h2/h1/h3),
+├── connect.ts                 per-request TLS/QUIC connection factory (h2/h1/h3),
 │                              per-phase timeouts
-├── socks5.js                  SOCKS5 client (RFC 1928 + RFC 1929 user/pass)
+├── socks5.ts                  SOCKS5 client (RFC 1928 + RFC 1929 user/pass)
 ├── tls-summary.ts             best-effort TLS state summary for observability hooks
 ├── cookies.ts                 RFC 6265 cookie jar (Domain/Path/Secure/SameSite/Expires)
 ├── headers.ts                 Chrome 147 default header set + ordering

@@ -6,18 +6,51 @@ import { QuicConnection } from './h3/connection.js'
 import { H3Client } from './h3/h3.js'
 import { TLS } from './tls/tls.ts'
 
+import type { H2Session } from './h2/session.ts'
+import type { Profile } from './profiles/types.ts'
+import type { TLSTransport, TLSOptions } from './tls/tls.ts'
+
+// Per-phase timeouts, all optional. `response` is applied by lib/client.ts; the connect and
+// handshake phases are armed here.
+export interface PerPhaseTimeouts {
+	connect?: number
+	tlsHandshake?: number
+	response?: number
+}
+
+export interface ConnectOptions {
+	host: string
+	port?: number
+	profile?: Profile | string | null
+	proxy?: string | null
+	transport?: 'tcp' | 'quic'
+	verifyTLS?: boolean
+	timeouts?: PerPhaseTimeouts | null
+}
+
+export type Alpn = 'h2' | 'http/1.1' | 'h3'
+
 class Connection {
-	constructor(tls) {
+	declare tls: TLS | null
+	declare alpn: Alpn | null
+	declare h2Session: H2Session | null
+	declare h2Transport: TLSTransport | null
+	// Populated for h3 connections.
+	declare h3Client: H3Client | null
+	declare quicConn: QuicConnection | null
+	declare closed: boolean
+
+	constructor(tls: TLS | null) {
 		this.tls = tls
-		this.alpn = null               // 'h2' / 'http/1.1' / 'h3' once handshake done
+		this.alpn = null
 		this.h2Session = null
 		this.h2Transport = null
-		this.h3Client = null           // populated for h3 connections
+		this.h3Client = null
 		this.quicConn = null
 		this.closed = false
 	}
 
-	close(_reason) {
+	close(_reason: string): void {
 		if (this.closed) return
 		this.closed = true
 		try { this.quicConn?.close() } catch {}
@@ -26,7 +59,7 @@ class Connection {
 	}
 }
 
-function createH3(host, port) {
+function createH3(host: string, port: number): Promise<Connection> {
 	return new Promise((resolve, reject) => {
 		const qc = new QuicConnection(host, port)
 		const conn = new Connection(null)
@@ -42,32 +75,39 @@ function createH3(host, port) {
 			qc.on('error', () => conn.close('error'))
 			resolve(conn)
 		})
-		qc.on('error', (e) => { if (!settled) { settled = true; reject(e) } })
-		qc.connect().catch((e) => { if (!settled) { settled = true; reject(e) } })
+		qc.on('error', (e: Error) => { if (!settled) { settled = true; reject(e) } })
+		qc.connect().catch((e: Error) => { if (!settled) { settled = true; reject(e) } })
 	})
 }
 
-function createTLS(host, port, profile, proxy, opts = {}) {
+function createTLS(
+	host: string,
+	port: number,
+	profile: Profile | string | null | undefined,
+	proxy: string | null | undefined,
+	opts: { verifyTLS?: boolean; timeouts?: PerPhaseTimeouts | null } = {}
+): Promise<Connection> {
 	return new Promise((resolve, reject) => {
-		const tlsOpts = {}
+		const tlsOpts: TLSOptions = {}
 		tlsOpts.verifyTLS = opts.verifyTLS !== false
 		if (profile) tlsOpts.profile = profile
-		const tls = new TLS(host, port, proxy, tlsOpts)
+		const tls = new TLS(host, port, proxy ?? null, tlsOpts)
 		const conn = new Connection(tls)
 		let settled = false
-		let connectTimer = null, handshakeTimer = null
+		let connectTimer: ReturnType<typeof setTimeout> | null = null
+		let handshakeTimer: ReturnType<typeof setTimeout> | null = null
 		const clearAllTimers = () => {
 			if (connectTimer) { clearTimeout(connectTimer); connectTimer = null }
 			if (handshakeTimer) { clearTimeout(handshakeTimer); handshakeTimer = null }
 		}
-		const fail = (err) => {
+		const fail = (err: Error) => {
 			if (settled) return
 			settled = true
 			clearAllTimers()
 			try { tls.socket?.destroy() } catch {}
 			reject(err)
 		}
-		const onReady = (alpn) => {
+		const onReady = (alpn: Alpn) => {
 			if (settled) return
 			settled = true
 			clearAllTimers()
@@ -78,8 +118,8 @@ function createTLS(host, port, profile, proxy, opts = {}) {
 		}
 		tls.on('ready', () => onReady('h2'))
 		tls.on('ready-http1', () => onReady('http/1.1'))
-		tls.on('error', (e) => fail(e))
-		tls.connect().catch((e) => fail(e))
+		tls.on('error', (e: Error) => fail(e))
+		tls.connect().catch((e: Error) => fail(e))
 
 		// Per-phase timeouts. Each is optional; without one the connection inherits
 		// only Node's default socket and TLS behavior.
@@ -110,7 +150,7 @@ function createTLS(host, port, profile, proxy, opts = {}) {
 	})
 }
 
-function connect({ host, port = 443, profile, proxy, transport = 'tcp', verifyTLS = true, timeouts = null }) {
+function connect({ host, port = 443, profile, proxy, transport = 'tcp', verifyTLS = true, timeouts = null }: ConnectOptions): Promise<Connection> {
 	if (transport === 'quic') return createH3(host, port)
 	return createTLS(host, port, profile, proxy, { verifyTLS, timeouts })
 }

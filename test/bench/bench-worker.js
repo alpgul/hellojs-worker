@@ -15,7 +15,7 @@ const CONCURRENT = parseInt(process.env.BENCH_CONCURRENT || '50', 10)
 
 async function makeAdapter(name) {
 	if (name === 'hellojs') {
-		const { default: request } = await import('../../index.js')
+		const { default: request } = await import('../../index.ts')
 		return {
 			fn: async (url) => {
 				const r = await request({ url, verifyTLS: false, resolveWithFullResponse: true })

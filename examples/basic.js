@@ -3,7 +3,7 @@
 // Tour of hellojs against httpbingo.org. Demonstrates the request.js-shape API
 // and the Chrome 147 fingerprint at the same time.
 
-import request from '../index.js'
+import request from '../index.ts'
 
 const log = (label, ok, detail = '') => {
 	const tag = ok ? '\x1B[32m✓\x1B[0m' : '\x1B[31m✗\x1B[0m'

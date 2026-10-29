@@ -68,11 +68,23 @@ const CODES = Object.freeze({
 
 export type ErrorCode = keyof typeof CODES
 
+// The response shape lib/client.ts attaches to an `EHTTP` error (simple mode). Kept
+// structural so errors stays free of any dependency on the request layer.
+export interface ErrorResponse {
+	statusCode: number
+	status: number
+	headers: Record<string, string | string[]>
+	body: unknown
+	rawBody: unknown
+}
+
 const CODE_TABLE: Record<string, { category: ErrorCategory; msg: string }> = CODES
 
 class HellojsError extends Error {
 	code: ErrorCode | string
 	category: ErrorCategory
+	// Set when the server answered but the status was rejected.
+	declare response?: ErrorResponse
 	constructor(message: string, code: ErrorCode | string, cause?: unknown) {
 		super(message)
 		this.name = 'HellojsError'

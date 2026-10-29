@@ -30,7 +30,7 @@ jobs:
       - name: Unit tests
         run: npm test
       - name: Smoke import
-        run: node -e "import('./index.js').then(m => { if (typeof m.default !== 'function') process.exit(1); console.log('ok', Object.keys(m).join(',')) })"
+        run: node -e "import('./index.ts').then(m => { if (typeof m.default !== 'function') process.exit(1); console.log('ok', Object.keys(m).join(',')) })"
 
   types:
     name: lint + typecheck

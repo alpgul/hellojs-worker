@@ -1,5 +1,5 @@
 // Benchmark h3 vs h2 (cold + warm steady-state).
-import request from '../../index.js'
+import request from '../../index.ts'
 
 const N = 10
 const stats = (arr) => {

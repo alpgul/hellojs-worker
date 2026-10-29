@@ -4,7 +4,7 @@ import assert from 'node:assert'
 import * as net from 'node:net'
 import test from 'node:test'
 
-import { connect } from '../../lib/connect.js'
+import { connect } from '../../lib/connect.ts'
 
 test('connect timeout fires when TCP connect hangs (route to a sinkhole IP)', async () => {
 	// 240.0.0.1 is in TEST-NET-3 / reserved; routers drop the SYN, so connect hangs forever.

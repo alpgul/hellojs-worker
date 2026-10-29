@@ -10,7 +10,7 @@ import * as path from 'node:path'
 import test from 'node:test'
 import * as tls from 'node:tls'
 
-import request from '../../index.js'
+import request from '../../index.ts'
 
 function genServerCert() {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hjsrv-'))

@@ -9,7 +9,7 @@ import * as https from 'node:https'
 
 import rp from 'request-promise'
 
-import hello from '../../index.js'
+import hello from '../../index.ts'
 
 const URL = 'https://www.cloudflare.com/cdn-cgi/trace'
 const N = 50

@@ -13,7 +13,7 @@
 // Some of these tests may flake when a server retires TLS 1.2 or upgrades to 1.3-only.
 // That's fine — we want to know.
 
-import request from '../../index.js'
+import request from '../../index.ts'
 import { TLS } from '../../lib/tls/tls.ts'
 
 const TLS12_TARGETS = [
