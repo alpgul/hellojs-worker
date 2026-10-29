@@ -1,4 +1,4 @@
-// Structural shape of a fingerprint profile. `lib/headers.ts`, `lib/tls/tls.js` and
+// Structural shape of a fingerprint profile. `lib/headers.ts`, `lib/tls/tls.ts` and
 // `lib/h3/transport-params.js` consume these fields; anything extra is profile-specific
 // and simply carried along.
 
@@ -26,10 +26,10 @@ export interface Http2Profile {
 	pseudoHeaderOrder?: string[]
 }
 
-export interface ExtensionRef {
-	id?: number
-	grease?: boolean
-}
+// An entry in the captured/advertised extension order: either a real extension, or a GREASE
+// marker standing where the client puts one. The two shapes are exclusive so reading `id`
+// after skipping `grease` is type-safe.
+export type ExtensionRef = { id: number; grease?: false } | { grease: true; id?: number }
 
 export interface CertificateStatusRequest {
 	certificateStatusType: number
@@ -38,9 +38,12 @@ export interface CertificateStatusRequest {
 }
 
 export interface TlsProfile {
-	ciphers?: number[]
+	// Required: the ClientHello cipher list is written straight from this field.
+	ciphers: number[]
 	extensionPermutation?: 'shuffle-middle' | 'preserve'
 	extensionOrder?: ExtensionRef[]
+	// Turn the "extension lists an id with no builder" warning into a throw.
+	strictExtensions?: boolean
 	rawExtensionBodies?: Record<number, Buffer>
 	alpn?: string[]
 	signatureAlgorithms?: number[]

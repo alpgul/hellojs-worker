@@ -8,7 +8,7 @@
 //   profiles.register('chrome148-mac', { name: 'chrome148-mac', ... })
 //   request({ url, profile: 'chrome148-mac' })
 //
-// A profile is a plain object with the shape that lib/tls/tls.js, lib/headers.ts, and
+// A profile is a plain object with the shape that lib/tls/tls.ts, lib/headers.ts, and
 // lib/h3/transport-params.js consume. See ./chrome147-mac.ts for the canonical shape.
 // Validation here is intentionally minimal — we trust callers building these.
 

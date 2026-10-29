@@ -9,7 +9,7 @@
 //   3. Match the response SingleResponse's certID to the leaf cert.
 //
 // We return { responseStatus, statuses, signatureVerified, leafMatched } and callers can
-// decide their policy. Default policy in lib/tls/tls12.js:
+// decide their policy. Default policy in lib/tls/tls12.ts:
 //   - 'revoked' → hard fail
 //   - signatureVerified=false → soft fail (log + accept), matching Chrome's behavior
 //   - leafMatched=false → soft fail (the response was for a different cert)

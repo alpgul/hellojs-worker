@@ -14,7 +14,7 @@
 // That's fine — we want to know.
 
 import request from '../../index.js'
-import { TLS } from '../../lib/tls/tls.js'
+import { TLS } from '../../lib/tls/tls.ts'
 
 const TLS12_TARGETS = [
 	'httpbin.org',                  // ECDHE-RSA-AES128-GCM, h2 ALPN over TLS 1.2

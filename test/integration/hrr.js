@@ -9,7 +9,7 @@
 // This test uses the internal `_forceHRRGroup` test affordance to send a ClientHello
 // that DEFINITELY triggers HRR — advertising only a single group with no real key_share.
 
-import { TLS } from '../../lib/tls/tls.js'
+import { TLS } from '../../lib/tls/tls.ts'
 
 const TARGETS = [
 	'www.cloudflare.com',

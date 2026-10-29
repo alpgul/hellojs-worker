@@ -806,20 +806,23 @@ lib/
 ├── connect.js                 per-request TLS/QUIC connection factory (h2/h1/h3),
 │                              per-phase timeouts
 ├── socks5.js                  SOCKS5 client (RFC 1928 + RFC 1929 user/pass)
-├── cookies.js                 RFC 6265 cookie jar (Domain/Path/Secure/SameSite/Expires)
-├── headers.js                 Chrome 147 default header set + ordering
-├── errors.js                  HellojsError + closed-set codes + wrap() promotion
-├── observability.js           EventEmitter for request lifecycle
+├── tls-summary.ts             best-effort TLS state summary for observability hooks
+├── cookies.ts                 RFC 6265 cookie jar (Domain/Path/Secure/SameSite/Expires)
+├── headers.ts                 Chrome 147 default header set + ordering
+├── errors.ts                  HellojsError + closed-set codes + wrap() promotion
+├── observability.ts           EventEmitter for request lifecycle
 ├── tls/
-│   ├── tls.js                 TLS 1.3 state machine + AEAD + HKDF key schedule
-│   ├── tls12.js               TLS 1.2 handshake + 12-suite cipher catalog + EMS
-│   ├── tls12_records.js       TLS 1.2 record codec (AEAD GCM/ChaCha20 + CBC)
-│   ├── tls12_prf.js           TLS 1.2 PRF (P_SHA256/SHA384) + key schedule
-│   ├── cert-validate.js       Chain validation (path + SAN + dates + intermediate trust)
-│   ├── ocsp.js                OCSP response parser + signature verifier (RFC 6960)
-│   ├── sct.js                 Signed Certificate Timestamp parser (RFC 6962)
-│   ├── mlkem.js               X25519MLKEM768 hybrid key exchange (Web Crypto ML-KEM-768)
-│   └── x25519.js              X25519 shared secret via Web Crypto (workerd-safe)
+│   ├── tls.ts                 TLS 1.3 state machine + AEAD + HKDF key schedule
+│   ├── tls12.ts               TLS 1.2 handshake + 12-suite cipher catalog + EMS
+│   ├── tls12_records.ts       TLS 1.2 record codec (AEAD GCM/ChaCha20 + CBC)
+│   ├── tls12_prf.ts           TLS 1.2 PRF (P_SHA256/SHA384) + key schedule
+│   ├── cert-validate.ts       Chain validation (path + SAN + dates + intermediate trust)
+│   ├── fingerprint.ts         JA3 + JA4 + PeetPrint derivation from a ClientHello
+│   ├── sig-verify.ts          streaming signature verifier (workerd crypto gaps)
+│   ├── ocsp.ts                OCSP response parser + signature verifier (RFC 6960)
+│   ├── sct.ts                 Signed Certificate Timestamp parser (RFC 6962)
+│   ├── mlkem.ts               X25519MLKEM768 hybrid key exchange (Web Crypto ML-KEM-768)
+│   └── x25519.ts              X25519 shared secret via Web Crypto (workerd-safe)
 ├── h2/
 │   ├── frame.js               9-byte frame header codec + type/flag constants
 │   ├── hpack.js               full HPACK (static + dynamic tables, Huffman)
@@ -836,17 +839,18 @@ lib/
 │   ├── transport-params.js    QUIC transport-parameters TLS extension codec
 │   └── varint.js              QUIC variable-length integer codec
 ├── extensions/
-│   └── index.js               every TLS extension builder (profile-driven)
+│   └── index.ts               every TLS extension builder (profile-driven)
 ├── profiles/
-│   ├── index.js               registry (get/register/registerFromPeet)
-│   ├── chrome147-mac.js       canonical Chrome 147 profile
-│   ├── firefox147.js          Firefox 147 (macOS) profile
-│   └── from-peet.js           paste a tls.peet.ws response → profile object
+│   ├── index.ts               registry (get/register/registerFromPeet)
+│   ├── types.ts               Profile / TlsProfile / Http2Profile shapes
+│   ├── chrome147-mac.ts       canonical Chrome 147 profile
+│   ├── firefox147.ts          Firefox 147 (macOS) profile
+│   └── from-peet.ts           paste a tls.peet.ws response → profile object
 ├── utils/
-│   ├── config.js              MESSAGE_TYPES, CIPHERS, HASHES tables
-│   └── hkdf.js                HKDF-Extract / Expand / Expand-Label / hashes
+│   ├── config.ts              MESSAGE_TYPES, CIPHERS, HASHES tables
+│   └── hkdf.ts                HKDF-Extract / Expand / Expand-Label / hashes
 └── models/
-    └── log.js                 leveled logger (HELLOJS_LOG=info/debug/trace;
+    └── log.ts                 leveled logger (HELLOJS_LOG=info/debug/trace;
                                JSON-line output via HELLOJS_LOG_JSON=1)
 ```
 

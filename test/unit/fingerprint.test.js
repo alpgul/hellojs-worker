@@ -10,7 +10,7 @@ import test from 'node:test'
 
 import * as profiles from '../../lib/profiles/index.ts'
 import { parseClientHello, ja3, ja4, isGrease } from '../../lib/tls/fingerprint.ts'
-import { TLS } from '../../lib/tls/tls.js'
+import { TLS } from '../../lib/tls/tls.ts'
 
 test('isGrease: recognises GREASE codepoints', () => {
 	assert.strictEqual(isGrease(0x0a0a), true)

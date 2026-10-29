@@ -30,7 +30,7 @@ test('firefox147 extension order is preserved and fully buildable', () => {
 		[0, 23, 65281, 10, 11, 35, 16, 5, 34, 18, 51, 43, 13, 45, 28, 27, 65037],
 	)
 
-	// Semantic builders in lib/tls/tls.js; 34 and 28 come from rawExtensionBodies.
+	// Semantic builders in lib/tls/tls.ts; 34 and 28 come from rawExtensionBodies.
 	const semantic = new Set([0, 5, 10, 11, 13, 16, 18, 23, 27, 35, 43, 45, 51, 65037, 65281])
 	for (const e of firefox.tls.extensionOrder) {
 		const raw = firefox.tls.rawExtensionBodies && firefox.tls.rawExtensionBodies[e.id]

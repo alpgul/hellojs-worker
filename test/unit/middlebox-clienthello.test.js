@@ -9,7 +9,7 @@ import { Writable } from 'node:stream'
 import test from 'node:test'
 
 import * as profiles from '../../lib/profiles/index.ts'
-import { TLS } from '../../lib/tls/tls.js'
+import { TLS } from '../../lib/tls/tls.ts'
 
 const SAMPLE_PATH = path.join(import.meta.dirname, '../fixtures/middlebox-tls12-peet.json')
 const SAMPLE = JSON.parse(fs.readFileSync(SAMPLE_PATH, 'utf8'))

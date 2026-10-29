@@ -10,7 +10,7 @@
 //
 // ML-KEM-768 itself is done by Web Crypto — the same `ML-KEM-768` algorithm the worker
 // runtime exposes behind its `webcrypto_modern_algorithms` flag — so there is no
-// pure-JS implementation to ship. `sk` is therefore an opaque CryptoKey that only this
+// pure-JS implementation to ship. `sk` is therefore an opaque Web Crypto key that only this
 // module touches: the ClientHello takes `pk` (raw encapsulation key), decapsulation takes
 // `sk` back. Both operations are native (~0.4ms for keygen), so nothing is pre-warmed.
 
@@ -23,7 +23,9 @@ import { deriveX25519SharedSecret } from './x25519.ts'
 import type { KeyObject } from 'node:crypto'
 
 type Subtle = typeof crypto.subtle
-type CryptoKey = Awaited<ReturnType<Subtle['importKey']>>
+// Named, and exported, because tls.ts stores the opaque `sk` on the handshake state and has to
+// call it the same thing this module does.
+export type WebCryptoKey = Awaited<ReturnType<Subtle['importKey']>>
 
 const ALG = 'ML-KEM-768'
 const KEY_OPS = ['encapsulateBits', 'decapsulateBits']
@@ -33,20 +35,17 @@ const MLKEM_CT_LEN = 1088
 const X25519_LEN = 32
 
 function subtle(): Subtle {
-	// Read through a cast, for the typecheck only: workers-types declares `crypto` as an ambient
-	// const rather than a `globalThis` member, so workerd's own global read looks unknown there.
-	const c = (globalThis as unknown as { crypto?: typeof crypto }).crypto
-	const s = c && c.subtle
-	if (!s || typeof s.encapsulateBits !== 'function' || typeof s.decapsulateBits !== 'function') {
+	const s = crypto.subtle
+	if (typeof s.encapsulateBits !== 'function' || typeof s.decapsulateBits !== 'function') {
 		throw new Error(`${ALG} unavailable: runtime needs Web Crypto with ML-KEM support`)
 	}
 	return s
 }
 
-async function generateMlKemKeyPair(): Promise<{ pk: Buffer; sk: CryptoKey }> {
+async function generateMlKemKeyPair(): Promise<{ pk: Buffer; sk: WebCryptoKey }> {
 	const pair = await subtle().generateKey(ALG, true, KEY_OPS)
-	// generateKey answers CryptoKey | CryptoKeyPair for the string-algorithm form; a KEM keygen is
-	// always a pair, so this narrows rather than guards.
+	// generateKey answers a union for the string-algorithm form; a KEM keygen is always a pair, so
+	// this narrows rather than guards.
 	if (!('publicKey' in pair)) throw new Error(`${ALG}: keygen returned no key pair`)
 	const jwk = (await subtle().exportKey('jwk', pair.publicKey)) as { pub?: string }
 	if (!jwk || typeof jwk.pub !== 'string') throw new Error(`${ALG}: JWK has no "pub" field`)
@@ -57,14 +56,14 @@ async function generateMlKemKeyPair(): Promise<{ pk: Buffer; sk: CryptoKey }> {
 	return { pk, sk: pair.privateKey }
 }
 
-async function decapsulateMlKem(ct: Uint8Array, sk: CryptoKey): Promise<Buffer> {
+async function decapsulateMlKem(ct: Uint8Array, sk: WebCryptoKey): Promise<Buffer> {
 	return Buffer.from(await subtle().decapsulateBits(ALG, sk, ct))
 }
 
 // Given the server's 1120-byte X25519MLKEM768 key_share entry and our private keys, compute the 64-byte hybrid shared secret.
 async function deriveHybridSharedSecret(
 	serverShareBuf: Buffer,
-	clientMlKemSk: CryptoKey,
+	clientMlKemSk: WebCryptoKey,
 	clientX25519PrivateKey: KeyObject
 ): Promise<Buffer> {
 	if (serverShareBuf.length !== MLKEM_CT_LEN + X25519_LEN) {

@@ -4,7 +4,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
-import { TLS } from '../../lib/tls/tls.js'
+import { TLS } from '../../lib/tls/tls.ts'
 
 const fixture = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '../fixtures/chrome147-peet.json'), 'utf8'))
 

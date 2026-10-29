@@ -1,7 +1,7 @@
 // Smoke test: handshake against a variety of real servers.
 // Confirms TLS layer survives the diversity of cipher / group / cert-compression / ALPN choices.
 
-import { TLS } from '../../lib/tls/tls.js'
+import { TLS } from '../../lib/tls/tls.ts'
 
 const targets = [
 	'tls.peet.ws',

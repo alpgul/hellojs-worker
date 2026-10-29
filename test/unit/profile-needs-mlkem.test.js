@@ -5,7 +5,7 @@
 import assert from 'node:assert'
 import test from 'node:test'
 
-import { TLS } from '../../lib/tls/tls.js'
+import { TLS } from '../../lib/tls/tls.ts'
 
 function withProfile(tls) {
 	// Synthesize a TLS instance with just enough state to invoke _profileNeedsMlkem().

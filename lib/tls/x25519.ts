@@ -12,23 +12,12 @@ import type { KeyObject } from 'node:crypto'
 // SubtleCrypto as a constructor value with no matching type, so the name cannot be used directly.
 type Subtle = typeof crypto.subtle
 
-function subtle(): Subtle {
-	// Cast for the typecheck only: workers-types declares `crypto` as an ambient const rather than a
-	// `globalThis` member. Both runtimes really do expose globalThis.crypto.
-	const c = (globalThis as unknown as { crypto?: typeof crypto }).crypto
-	const s = c && c.subtle
-	if (!s || typeof s.deriveBits !== 'function') {
-		throw new Error('Web Crypto X25519 is unavailable — cannot compute a shared secret')
-	}
-	return s
-}
-
 // privateKey: node:crypto KeyObject (x25519); peerRaw32: the peer's raw 32-byte public key.
 async function deriveX25519SharedSecret(privateKey: KeyObject, peerRaw32: Uint8Array): Promise<Buffer> {
 	if (!peerRaw32 || peerRaw32.length !== 32) {
 		throw new Error(`X25519 peer key must be 32 bytes, got ${peerRaw32 ? peerRaw32.length : 0}`)
 	}
-	const s = subtle()
+	const s = crypto.subtle
 	const priv = await s.importKey(
 		'pkcs8',
 		privateKey.export({ type: 'pkcs8', format: 'der' }),
