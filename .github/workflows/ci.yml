@@ -16,7 +16,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ['20', '22']
+        # Matches package.json engines. The .ts sources need unflagged type stripping, so 24 is
+        # the floor as well as the development version.
+        node: ['24']
     steps:
       - uses: actions/checkout@v4
       - name: Use Node.js ${{ matrix.node }}
@@ -28,19 +30,25 @@ jobs:
       - name: Unit tests
         run: npm test
       - name: Smoke import
-        run: node -e "const r = require('./'); if (typeof r !== 'function') process.exit(1); console.log('ok', Object.keys(r).join(','))"
+        run: node -e "import('./index.js').then(m => { if (typeof m.default !== 'function') process.exit(1); console.log('ok', Object.keys(m).join(',')) })"
 
-  lint:
-    name: lint
+  types:
+    name: lint + typecheck
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'npm'
       - run: npm ci
+      - name: ESLint
+        run: npm run lint
+      # Checks the .ts sources against both @types/node and @cloudflare/workers-types, so the
+      # Web Crypto surfaces are typed the way workerd declares them.
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Build
+        run: npm run build
       - name: Strict-TS validation of index.d.ts
-        run: |
-          npm install --no-save --silent typescript@5 @types/node@20
-          ./node_modules/.bin/tsc --project test/types/tsconfig.json
+        run: npm run test:types

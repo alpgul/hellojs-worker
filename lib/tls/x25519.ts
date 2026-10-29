@@ -5,12 +5,18 @@
 // key_share can arrive in. Key generation stays in node:crypto because the ClientHello is
 // built synchronously; only the exchange itself is async.
 
-// `webcrypto` is imported as a namespace so the types are referenced as webcrypto.SubtleCrypto:
-// the global SubtleCrypto declaration is a constructor value only, with no matching type.
-import type { KeyObject, webcrypto } from 'node:crypto'
+import type { KeyObject } from 'node:crypto'
 
-function subtle(): webcrypto.SubtleCrypto {
-	const s = globalThis.crypto && globalThis.crypto.subtle
+// Read off the global `crypto` VALUE so the type is the host runtime's own: the tsconfig loads
+// @cloudflare/workers-types, so this is workerd's SubtleCrypto — @types/node ships its global
+// SubtleCrypto as a constructor value with no matching type, so the name cannot be used directly.
+type Subtle = typeof crypto.subtle
+
+function subtle(): Subtle {
+	// Cast for the typecheck only: workers-types declares `crypto` as an ambient const rather than a
+	// `globalThis` member. Both runtimes really do expose globalThis.crypto.
+	const c = (globalThis as unknown as { crypto?: typeof crypto }).crypto
+	const s = c && c.subtle
 	if (!s || typeof s.deriveBits !== 'function') {
 		throw new Error('Web Crypto X25519 is unavailable — cannot compute a shared secret')
 	}
@@ -24,11 +30,20 @@ async function deriveX25519SharedSecret(privateKey: KeyObject, peerRaw32: Uint8A
 	}
 	const s = subtle()
 	const priv = await s.importKey(
-		'pkcs8', privateKey.export({ type: 'pkcs8', format: 'der' }), { name: 'X25519' }, false, ['deriveBits'])
+		'pkcs8',
+		privateKey.export({ type: 'pkcs8', format: 'der' }),
+		{ name: 'X25519' },
+		false,
+		['deriveBits']
+	)
 	const pub = await s.importKey('raw', peerRaw32, { name: 'X25519' }, false, [])
 	// RFC 7748 §6.1 requires rejecting an all-zero result for a low-order peer key; Web Crypto
 	// enforces it (Node and workerd both throw OperationError from deriveBits).
-	return Buffer.from(await s.deriveBits({ name: 'X25519', public: pub }, priv, 256))
+	// The cast papers over the generated workerd typings, which escape the reserved word `public` as
+	// `$public` in the derive-algorithm union; the property both runtimes actually read is `public`.
+	return Buffer.from(
+		await s.deriveBits({ name: 'X25519', public: pub } as unknown as Parameters<Subtle['deriveBits']>[0], priv, 256)
+	)
 }
 
 export { deriveX25519SharedSecret }

@@ -4,7 +4,9 @@
     "lib": ["ES2023"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "types": ["node"],
+    // workerd's own globals alongside Node's: the /experimental entry is the one that declares
+    // ML-KEM on SubtleCrypto, which the stable v5 entrypoint does not.
+    "types": ["@cloudflare/workers-types/experimental", "node"],
 
     "strict": true,
     "noImplicitOverride": true,
