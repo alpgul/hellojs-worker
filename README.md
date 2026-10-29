@@ -460,6 +460,12 @@ request.udp.setUdpProvider((type) => myRuntimeUdpSocket(type))
 
 With no provider configured the seam resolves to `dgram`, so Node needs no setup.
 
+`examples/worker.ts` is the worked version of this: a Worker (workerd) entry point whose
+runtime has no outbound UDP, so it takes HTTP/3 off the table at module scope, installs a
+trust bundle from a text secret (workerd ships no roots), and still serves `h3: true`
+requests over TCP + TLS. Run it with `npm run example:worker` (wrangler needs
+`nodejs_compat` for the `node:` modules hellojs uses).
+
 ### What's implemented
 
 - **QUIC v1 packet protection** (Initial / Handshake / 1-RTT) — AEAD payload + header protection. RFC 9001 Appendix A test vectors pass byte-perfect.
