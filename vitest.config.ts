@@ -5,7 +5,9 @@
 //               and ML-KEM only exists there behind `webcrypto_modern_algorithms` — which Node has no
 //               equivalent of. Those tests are meaningless anywhere else.
 //   node     -> Node's own pool, for tests that need local TCP/TLS servers, node:fs fixtures,
-//               node:dgram or Node's real CA bundle, none of which workerd provides.
+//               node:dgram or Node's real CA bundle, none of which workerd provides. The soak
+//               suite (test/soak) lives here too: it drives a local h2 server under load and
+//               asserts that heap and handles return to their idle levels.
 //   network  -> live internet. Never part of `npm test`.
 //
 // A test moves from workers to node only because of a workerd runtime limitation, never to hide a
@@ -36,7 +38,14 @@ export default defineConfig({
 				}
 			},
 			{
-				test: { name: 'node', include: ['test/node/**/*.test.ts'], testTimeout: 30_000 }
+				test: {
+					name: 'node',
+					include: ['test/node/**/*.test.ts', 'test/soak/**/*.test.ts'],
+					testTimeout: 30_000,
+					// The soak test compares heap after an explicit GC; without --expose-gc the
+					// measurement is whatever the collector happened to do, so it is opt-out only.
+					execArgv: ['--expose-gc']
+				}
 			},
 			{
 				test: {

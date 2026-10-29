@@ -634,7 +634,8 @@ that entry is the one that declares ML-KEM.
 Benchmarked on macOS / Node 22.11 against a local HTTP/2 server (127.0.0.1, 1 KB
 fixed-size response). Each client runs as a fresh subprocess: 1 cold request
 (includes TLS handshake), then 30 warm-serial requests on the same connection,
-then 50 parallel requests. Reproduce with `node test/bench/clients.js`.
+then 50 parallel requests. Reproduce with `npm run bench`; the same harness runs
+in CI (`bench` job) to prove every client still completes.
 
 | Client | Cold | Warm p50 | Warm p99 | 50 parallel | RSS Δ |
 |---|---:|---:|---:|---:|---:|
@@ -694,20 +695,23 @@ shared endpoint).
   more slowly than Node's native C++ TLS. There's no further optimization
   available here without dropping fingerprint fidelity.
 
-Reproduce: `REMOTE_TARGET=www.cloudflare.com/cdn-cgi/trace node test/bench/clients.js`.
+Reproduce: `npm run bench:remote` (default target `www.cloudflare.com/cdn-cgi/trace`,
+override with `REMOTE_TARGET=host/path`).
 
 ### Soak
 
-`npm run test:soak` runs a sustained-load test against a local h2 server. Current
-baseline:
+The soak is a `node`-project test (`test/soak/soak.test.ts`), so it runs on every
+`npm test` and in CI: a local h2 server under sustained load, with heap growth
+(after an explicit GC) and active handles compared against the idle baseline.
+The default run is a 300-request smoke; `npm run test:soak` runs just that file.
+Baseline on this machine:
 
 ```
-200,000 requests in 13s (~15,000 rps)
-Heap growth: -5.93 MB (negative — GC reclaimed more than was held)
-Active handles after load: 3
+soak: 300 requests in 1.98s (152 rps), heap 1.54 MB, handles 5 -> 5
 ```
 
-Knobs: `SOAK_REQUESTS=1000000 SOAK_CONCURRENCY=200 SOAK_HEAP_BUDGET_MB=128 npm run test:soak`.
+Knobs: `SOAK_REQUESTS=1000000 SOAK_CONCURRENCY=200 SOAK_HEAP_BUDGET_MB=128 npm run test:soak`
+(raise `SOAK_TIMEOUT_MS` to match, default 120000).
 
 ---
 
@@ -722,18 +726,25 @@ which boots a worker from `wrangler.jsonc` and gives each test file the real
 | Project | Location | Runs in | Covers |
 |---|---|---|---|
 | `workers` | `test/unit/**/*.test.ts` | workerd (`cloudflare-pool`) | the library itself: handshake crypto, HKDF, HPACK/Huffman, frame codecs, parsers, profiles, fingerprint shaping |
-| `node` | `test/node/**/*.test.ts` | Node | the same lib, plus what workerd cannot host: `node:fs` fixtures, `openssl` subprocesses, loopback servers, `node:dgram`, a real trust store |
+| `node` | `test/node/**/*.test.ts`, `test/soak/**/*.test.ts` | Node | the same lib, plus what workerd cannot host: `node:fs` fixtures, `openssl` subprocesses, loopback servers, `node:dgram`, a real trust store — and the sustained-load soak |
 | `network` | `test/integration/**`, `test/fingerprint/**` | Node, live internet | round-trips against public servers and the Chrome 147 fingerprint regression, over a minimal host set (`test/helpers/hosts.ts`) |
 
 ```bash
-npm test                    # workers + node — offline, the default gate
+npm test                    # workers + node (incl. the soak) — offline, the default gate
 npm run test:watch
 npm run test:workers        # workerd pool only
 npm run test:node           # node pool only
+npm run test:soak           # soak file only; SOAK_* knobs raise the load
 npm run test:network        # live internet; NOT part of npm test
 npm run test:integration
 npm run test:fingerprint
 npm run test:all            # everything, network included
+
+npm run bench               # benchmark vs. 7 other clients, local h2 server
+npm run bench:remote        # same harness against a real host
+npm run bench:h3            # h3 vs h2
+npm run bench:vs-got
+npm run bench:vs-axios
 ```
 
 Why workerd: two of the library's crypto paths exist *because* of workerd.
@@ -760,8 +771,15 @@ comparison must behave identically in both runtimes. `test/setup/workerd.ts` run
 `workers` test file and applies the same two module-scope fixes as the Worker example: no UDP
 provider, and the generated Mozilla roots.
 
-`test/bench/clients.js` and `test/soak/soak.js` stay plain Node scripts: they measure and
-sustain load rather than assert, and Vitest would add nothing.
+The soak is a real test — it asserts a request count, post-GC heap growth and handle growth —
+so it lives in the `node` project and runs on every `npm test`. The `node` project sets
+`execArgv: ['--expose-gc']` so the heap check can force a collection rather than measure
+floating garbage; without it the heap assertion is skipped and only the handle check runs.
+
+The benchmark is the exception: it shells out to each client in a fresh subprocess and its
+output is numbers, not pass/fail, so Vitest would add nothing. It stays a plain script
+(`test/bench/clients.ts`, run directly — Node 24+ strips the types), and CI runs it once as
+a smoke test that every client still completes.
 
 ---
 
@@ -954,8 +972,8 @@ test/
 ├── helpers/               hex(), rejection(), listenOnLoopback(), probeTls()
 ├── fixtures/              captured peet.json / peet samples
 ├── types/                 strict-tsc consumer check for index.d.ts
-├── bench/                 cross-client benchmarks (plain Node script)
-└── soak/                  sustained-load soak (plain Node script)
+├── bench/                 cross-client benchmarks (plain script, run via npm run bench)
+└── soak/                  sustained-load soak (Vitest node project, runs in npm test)
 ```
 
 The custom h2 client (`lib/h2/session.ts`) replaces Node's built-in
