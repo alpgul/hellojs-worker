@@ -92,7 +92,12 @@ function socks5Connect(options: Socks5Options): Promise<net.Socket> {
 	const { proxyHost, proxyPort, username, password, destHost, destPort, connectTimeoutMs = 10_000 } = options
 	return new Promise<net.Socket>((resolve, reject) => {
 		const sock = net.createConnection({ host: proxyHost, port: proxyPort })
-		const t = setTimeout(() => { sock.destroy(new Error('SOCKS5 connect timed out')) }, connectTimeoutMs)
+		const t = setTimeout(() => {
+			// Tagged so the caller sees a timeout rather than wrap()'s EPROTO fallback.
+			const err = new Error('SOCKS5 connect timed out') as NodeJS.ErrnoException
+			err.code = 'ETIMEDOUT'
+			sock.destroy(err)
+		}, connectTimeoutMs)
 		let buf = Buffer.alloc(0)
 		let state = 'greeting'   // greeting -> auth (optional) -> connect -> done
 

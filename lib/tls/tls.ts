@@ -428,7 +428,11 @@ class TLS extends EventEmitter {
 			const sock = net.createConnection({ host: this.host, port: this.port })
 			this.socket = sock
 			const timer = setTimeout(() => {
-				sock.destroy(new Error(`connect timed out (${this.host}:${this.port})`))
+				// Carry the code so the error reports as a timeout instead of falling through
+				// wrap()'s EPROTO default.
+				const err = new Error(`connect timed out (${this.host}:${this.port})`) as NodeJS.ErrnoException
+				err.code = 'ETIMEDOUT'
+				sock.destroy(err)
 			}, 10_000)
 			timer.unref?.()
 			const onError = (err: Error) => {
