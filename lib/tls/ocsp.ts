@@ -14,9 +14,6 @@
 //   - signatureVerified=false → soft fail (log + accept), matching Chrome's behavior
 //   - leafMatched=false → soft fail (the response was for a different cert)
 
-import * as crypto from 'node:crypto'
-
-
 import { verifySignature } from './sig-verify.ts'
 
 import type { KeyMaterial, SignatureSpec } from './sig-verify.ts'
@@ -99,52 +96,6 @@ function tlvSequence(buf: Buffer): Tlv[] {
 		off = t.end
 	}
 	return items
-}
-
-// Compute SHA-1 over a cert's subject public key (the BIT STRING bytes after the leading
-// 0x00 "unused bits" byte). RFC 6960 §4.1.1: CertID.issuerKeyHash is the SHA-1 of the
-// issuer's subjectPublicKey (BIT STRING content, excluding the unused-bits byte).
-function issuerKeyHashSha1(issuerCert: X509Certificate): Buffer {
-	// Get the issuer cert's SPKI (raw DER) via X509Certificate.publicKey export ('spki', 'der').
-	// SubjectPublicKeyInfo ::= SEQUENCE { algorithm AlgorithmIdentifier, subjectPublicKey BIT STRING }
-	const spkiDer = issuerCert.publicKey.export({ type: 'spki', format: 'der' })
-	// Parse SPKI to extract the BIT STRING content.
-	const spki = readTLV(spkiDer, 0)
-	const inner = spki.value
-	// inner: AlgorithmIdentifier (SEQUENCE), then BIT STRING
-	const alg = readTLV(inner, 0)
-	const bs = readTLV(inner, alg.end)
-	if ((bs.tag & 0x1f) !== 0x03) throw new Error('SPKI: missing BIT STRING for public key')
-	// BIT STRING content: 1 byte unused-bits, then key octets
-	const keyOctets = bs.value.subarray(1)
-	return crypto.createHash('sha1').update(keyOctets).digest()
-}
-
-// SHA-1 over the issuer's DN (the SEQUENCE of RDNs, INCLUDING the outer SEQUENCE tag/len).
-// We pull it directly from the issuer cert's `subject` DER (X509Certificate doesn't expose
-// the raw subject DER, so we re-encode from .subject — but that's lossy). Use the leaf's
-// `issuer` DER instead via the cert's DER bytes.
-function issuerNameHashSha1FromLeaf(leafCert: X509Certificate): Buffer {
-	const leafDer = Buffer.from(leafCert.raw)
-	// TBSCertificate ::= SEQUENCE { version, serial, sigAlg, issuer, validity, subject, ... }
-	const cert = readTLV(leafDer, 0)
-	const tbs = readTLV(cert.value, 0)
-	let p = 0
-	const tbsBody = tbs.value
-	// [0] EXPLICIT version
-	let f = readTLV(tbsBody, p); p = f.end
-	if (f.tag === 0xa0) { f = readTLV(tbsBody, p); p = f.end }   // skip version, on to serial
-	// serial INTEGER, signatureAlgorithm SEQUENCE, then issuer SEQUENCE
-	// f currently is serial. Skip:
-	f = readTLV(tbsBody, p); p = f.end   // signatureAlgorithm
-	// f currently is signatureAlgorithm. Next is issuer.
-	const issuerTLV = readTLV(tbsBody, p)
-	// issuerTLV bytes (with tag+length) is the issuer Name DER
-	const issuerDer = leafDer.subarray(
-		leafDer.indexOf(issuerTLV.value, 0) - issuerTLV.headerLen,
-		leafDer.indexOf(issuerTLV.value, 0) + issuerTLV.length,
-	)
-	return crypto.createHash('sha1').update(issuerDer).digest()
 }
 
 function parseOcspResponse(der: Buffer): ParsedOcspResponse {
@@ -322,4 +273,4 @@ function leafMatchesOcsp(parsed: ParsedOcspResponse, leafCert: X509Certificate):
 	return false
 }
 
-export { parseOcspResponse, verifyOcspSignature, leafMatchesOcsp, issuerKeyHashSha1, issuerNameHashSha1FromLeaf }
+export { parseOcspResponse, verifyOcspSignature, leafMatchesOcsp }
