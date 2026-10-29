@@ -3,7 +3,7 @@
 
 import * as crypto from 'node:crypto'
 
-import { H2Session } from '../h2/session.js'
+import { H2Session } from '../h2/session.ts'
 import logFactory from '../models/log.ts'
 
 import { validateChain } from './cert-validate.ts'

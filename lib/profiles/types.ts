@@ -24,6 +24,8 @@ export interface Http2Profile {
 	sendPriorityFrame?: boolean
 	priority?: PrioritySettings
 	pseudoHeaderOrder?: string[]
+	keepaliveIntervalMs?: number
+	keepaliveTimeoutMs?: number
 }
 
 // An entry in the captured/advertised extension order: either a real extension, or a GREASE

@@ -4,8 +4,8 @@ import assert from 'node:assert'
 import { Duplex, Readable } from 'node:stream'
 import test from 'node:test'
 
-import * as frame from '../../lib/h2/frame.js'
-import { H2Session } from '../../lib/h2/session.js'
+import * as frame from '../../lib/h2/frame.ts'
+import { H2Session } from '../../lib/h2/session.ts'
 
 
 function mockTransport() {

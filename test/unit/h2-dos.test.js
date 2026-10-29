@@ -5,9 +5,9 @@ import assert from 'node:assert'
 import { EventEmitter } from 'node:events'
 import test from 'node:test'
 
-import * as frame from '../../lib/h2/frame.js'
-import * as hpack from '../../lib/h2/hpack.js'
-import { H2Session } from '../../lib/h2/session.js'
+import * as frame from '../../lib/h2/frame.ts'
+import * as hpack from '../../lib/h2/hpack.ts'
+import { H2Session } from '../../lib/h2/session.ts'
 
 const REQ = { ':method': 'GET', ':path': '/', ':scheme': 'https', ':authority': 'x' }
 

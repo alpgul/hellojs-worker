@@ -30,7 +30,7 @@ import {
 	CreateRawExtension,
 	pickGreaseTriple
 } from '../extensions/index.ts'
-import { H2Session } from '../h2/session.js'
+import { H2Session } from '../h2/session.ts'
 import logFactory from '../models/log.ts'
 import * as profileRegistry from '../profiles/index.ts'
 import { socks5Connect } from '../socks5.js'

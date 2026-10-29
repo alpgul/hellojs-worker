@@ -3,7 +3,7 @@
 import assert from 'node:assert'
 import test from 'node:test'
 
-import * as hpack from '../../lib/h2/hpack.js'
+import * as hpack from '../../lib/h2/hpack.ts'
 
 test('static table indexes match RFC 7541 Appendix A', () => {
 	// Smoke-check a few well-known entries

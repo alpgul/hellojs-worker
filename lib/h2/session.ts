@@ -14,21 +14,21 @@
 //
 // Not implemented:
 //   - Server push (we set ENABLE_PUSH=0 in our SETTINGS)
-//   - HEADERS continuation across multiple frames (rare; would only hit if a single
-//     response had > MAX_FRAME_SIZE worth of header bytes)
 //   - Priority frame parsing (we ignore peer priority; we send fixed Chrome-like values
 //     in our HEADERS flags)
 
 import { EventEmitter } from 'node:events'
 
-import * as frame from './frame.js'
-import * as hpack from './hpack.js'
+import * as frame from './frame.ts'
+import * as hpack from './hpack.ts'
+
+import type { Profile } from '../profiles/types.ts'
 
 const H2_PREFACE = Buffer.from('PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n')
 
 // Chrome 147 client SETTINGS (matches the wire fingerprint). Used as the fallback when no
 // profile is supplied or a profile omits http2.settings.
-const CHROME_147_SETTINGS = [
+const CHROME_147_SETTINGS: frame.SettingsPair[] = [
 	[frame.SETTING.HEADER_TABLE_SIZE, 65536],
 	[frame.SETTING.ENABLE_PUSH, 0],
 	[frame.SETTING.INITIAL_WINDOW_SIZE, 6291456],
@@ -36,10 +36,14 @@ const CHROME_147_SETTINGS = [
 ]
 const CHROME_WINDOW_UPDATE = 15663105   // adds to the initial 65535
 
+// Cap on an accumulated HEADERS + CONTINUATION block, mirroring the MAX_HEADER_LIST_SIZE
+// we advertise.
+const MAX_HEADER_BLOCK = 262144
+
 // Map from profile.http2.settings property names (insertion-order preserved by JS) to wire
 // IDs. Properties not in this map are silently ignored so a profile can carry extra info
 // without breaking the codec.
-const SETTING_NAME_TO_ID = {
+const SETTING_NAME_TO_ID: Record<string, number> = {
 	headerTableSize:       frame.SETTING.HEADER_TABLE_SIZE,
 	enablePush:            frame.SETTING.ENABLE_PUSH,
 	maxConcurrentStreams:  frame.SETTING.MAX_CONCURRENT_STREAMS,
@@ -49,40 +53,82 @@ const SETTING_NAME_TO_ID = {
 	noRfc7540Priorities:   frame.SETTING.NO_RFC7540_PRIORITIES,
 }
 
+// The plaintext byte stream the session reads from and writes to — TLSTransport in
+// production, an EventEmitter in the tests.
+export interface H2Transport {
+	on(event: 'data', listener: (chunk: Buffer) => void): unknown
+	on(event: 'end', listener: () => void): unknown
+	on(event: 'error', listener: (err: Error) => void): unknown
+	write(chunk: Buffer): unknown
+	destroy?(error?: Error): unknown
+}
+
+export type H2HeaderValue = string | number
+
+export interface H2RequestHeaders {
+	[name: string]: H2HeaderValue | H2HeaderValue[]
+}
+
+export interface H2RequestOptions {
+	endStream?: boolean
+	weight?: number
+	exclusive?: boolean
+	parent?: number
+}
+
+type H2Error = Error & { code?: string; errorCode?: number }
+
+const asError = (e: unknown): H2Error => (e instanceof Error ? e : new Error(String(e)))
+
 // Translate profile.http2.settings (object with insertion-order-significant keys) into the
 // wire pairs the SETTINGS frame builder expects. Booleans collapse to 0/1.
-function settingsFromProfile(profile) {
+function settingsFromProfile(profile: Profile | null): frame.SettingsPair[] {
 	const s = profile?.http2?.settings
 	if (!s) return CHROME_147_SETTINGS
-	const pairs = []
-	for (const [name, val] of Object.entries(s)) {
+	const pairs: frame.SettingsPair[] = []
+	for (const [name, val] of Object.entries(s) as [string, number | boolean | undefined][]) {
 		const id = SETTING_NAME_TO_ID[name]
 		if (id == null) continue
-		const num = typeof val === 'boolean' ? (val ? 1 : 0) : (val >>> 0)
+		// Number(undefined) is NaN and `NaN >>> 0` is 0 — an absent setting keeps the old
+		// `val >>> 0` behaviour without needing a nullish guard.
+		const num = typeof val === 'boolean' ? (val ? 1 : 0) : Number(val) >>> 0
 		pairs.push([id, num])
 	}
 	return pairs.length ? pairs : CHROME_147_SETTINGS
 }
 
 class H2Stream extends EventEmitter {
-	constructor(session, id) {
+	declare session: H2Session
+	declare id: number
+	declare closed: boolean
+	declare _endRecvd: boolean
+	// HEADERS may be followed by CONTINUATION frames if the header block exceeds one
+	// frame. We accumulate the fragments here and finalize on END_HEADERS.
+	declare _headerFragments: Buffer[] | null
+	declare _headerBytes: number
+	declare _headerEndStream: boolean
+	// Per-stream flow control windows (RFC 7540 §6.9).
+	// `sendWindow` shrinks as we send DATA; refilled by inbound WINDOW_UPDATE for this stream.
+	// `recvUsed` accumulates received DATA bytes; we refill via outbound WINDOW_UPDATE.
+	declare sendWindow: number
+	declare recvUsed: number
+	// Set once a body chunk has been streamed, so end() knows whether a trailing
+	// zero-length DATA frame would be legal.
+	declare _wroteBody: boolean | undefined
+
+	constructor(session: H2Session, id: number) {
 		super()
 		this.session = session
 		this.id = id
 		this.closed = false
-		this._buf = Buffer.alloc(0)
 		this._endRecvd = false
-		// HEADERS may be followed by CONTINUATION frames if the header block exceeds one
-		// frame. We accumulate the fragments here and finalize on END_HEADERS.
 		this._headerFragments = null
+		this._headerBytes = 0
 		this._headerEndStream = false
-		// Per-stream flow control windows (RFC 7540 §6.9).
-		// `sendWindow` shrinks as we send DATA; refilled by inbound WINDOW_UPDATE for this stream.
-		// `recvUsed` accumulates received DATA bytes; we refill via outbound WINDOW_UPDATE.
 		this.sendWindow = 65535
-		this.recvUsed   = 0
+		this.recvUsed = 0
 	}
-	_onHeaders(payload, flags) {
+	_onHeaders(payload: Buffer, flags: number): void {
 		// HEADERS may have PADDED or PRIORITY flags affecting payload layout.
 		let p = payload
 		if (flags & frame.FLAG.PADDED) {
@@ -97,7 +143,7 @@ class H2Stream extends EventEmitter {
 		this._headerEndStream = !!(flags & frame.FLAG.END_STREAM)
 		if (flags & frame.FLAG.END_HEADERS) this._finalizeHeaders()
 	}
-	_onContinuation(payload, flags) {
+	_onContinuation(payload: Buffer, flags: number): void {
 		if (!this._headerFragments) {
 			// CONTINUATION without preceding HEADERS — protocol error
 			this.session._sendFrame(frame.TYPE.RST_STREAM, 0, this.id, frame.buildRstStream(frame.ERROR.PROTOCOL_ERROR))
@@ -106,28 +152,30 @@ class H2Stream extends EventEmitter {
 		this._headerFragments.push(Buffer.from(payload))
 		// Bound the compressed header block to defend against a CONTINUATION flood (unbounded
 		// fragment accumulation before END_HEADERS — the CVE-2024-27316 class).
-		this._headerBytes = (this._headerBytes || 0) + payload.length
-		if (this._headerBytes > 262144) {
-			return this.session._fatalError(Object.assign(new Error('header block too large'), { code: 'EH2COMPRESS' }))
+		this._headerBytes += payload.length
+		if (this._headerBytes > MAX_HEADER_BLOCK) {
+			const err: H2Error = new Error('header block too large')
+			err.code = 'EH2COMPRESS'
+			return this.session._fatalError(err)
 		}
 		if (flags & frame.FLAG.END_HEADERS) this._finalizeHeaders()
 	}
-	_finalizeHeaders() {
-		const block = this._headerFragments.length === 1
-			? this._headerFragments[0]
-			: Buffer.concat(this._headerFragments)
+	_finalizeHeaders(): void {
+		const fragments = this._headerFragments
+		if (!fragments) return
+		const block = fragments.length === 1 ? fragments[0] : Buffer.concat(fragments)
 		this._headerFragments = null
 		const list = hpack.decode(block, this.session.peerHpackTable)
-		const headers = {}
-		for (const [n, v] of list) headers[n] = headers[n] != null ? [].concat(headers[n], v) : v
+		const headers: Record<string, string | string[]> = {}
+		for (const [n, v] of list) headers[n] = headers[n] != null ? ([] as string[]).concat(headers[n], v) : v
 		this.emit('response', headers)
 		if (this._headerEndStream) this._endStream()
 	}
-	_onData(payload, flags) {
+	_onData(payload: Buffer, flags: number): void {
 		this.emit('data', payload)
 		// Auto-replenish flow control on the stream + connection.
 		this.recvUsed += payload.length
-		this.session._creditFlow(this.id, payload.length)
+		this.session._creditFlow(payload.length)
 		// Per-stream replenish: when this stream has consumed >32KB, issue a stream WINDOW_UPDATE.
 		if (this.recvUsed >= 32768) {
 			this.session._sendFrame(frame.TYPE.WINDOW_UPDATE, 0, this.id, frame.buildWindowUpdate(this.recvUsed))
@@ -135,28 +183,28 @@ class H2Stream extends EventEmitter {
 		}
 		if (flags & frame.FLAG.END_STREAM) this._endStream()
 	}
-	_endStream() {
+	_endStream(): void {
 		if (this._endRecvd) return
 		this._endRecvd = true
 		this.closed = true
 		this.session._closeStream(this.id)
 		this.emit('end')
 	}
-	_onRst(errorCode) {
+	_onRst(errorCode: number): void {
 		this.closed = true
 		this.session._closeStream(this.id)
-		const err = new Error(`stream reset by peer (code=${errorCode})`)
+		const err: H2Error = new Error(`stream reset by peer (code=${errorCode})`)
 		err.code = 'EH2STREAM'
 		err.errorCode = errorCode
 		this.emit('error', err)
 	}
 	// Public API
-	write(chunk) {
+	write(chunk: Buffer | string): void {
 		if (!chunk || chunk.length === 0) return
 		this.session._sendData(this.id, chunk, false)
 		this._wroteBody = true
 	}
-	end(body) {
+	end(body?: Buffer | string): void {
 		if (body) { this.session._sendData(this.id, body, true); this._wroteBody = true; return }
 		// If we've streamed any body chunks already, terminate the stream with an empty
 		// END_STREAM DATA frame. Otherwise the HEADERS frame already carried END_STREAM
@@ -164,7 +212,7 @@ class H2Stream extends EventEmitter {
 		// would be a protocol error.
 		if (this._wroteBody) this.session._sendData(this.id, Buffer.alloc(0), true)
 	}
-	close(errorCode = 0x08) {
+	close(errorCode = 0x08): void {
 		if (this.closed) return
 		this.closed = true
 		this.session._sendFrame(frame.TYPE.RST_STREAM, 0, this.id, frame.buildRstStream(errorCode))
@@ -173,11 +221,35 @@ class H2Stream extends EventEmitter {
 }
 
 class H2Session extends EventEmitter {
-	/**
-	 * @param {object} transport
-	 * @param {import('../profiles/types.ts').Profile} [profile]
-	 */
-	constructor(transport, profile = null) {
+	declare transport: H2Transport
+	declare profile: Profile | null
+	declare streams: Map<number, H2Stream>
+	declare nextStreamId: number
+	declare _rxBuf: Buffer
+	declare _sawSettings: boolean
+	declare _localSettings: frame.SettingsPair[]
+	declare _windowUpdateIncrement: number
+	declare peerSettings: Record<number, number>
+	// Connection-level send window — limited by peer.
+	declare _connSendWindow: number
+	// Connection-level receive window — we restore aggressively.
+	declare _connRecvUsed: number
+	// HPACK tables. Encoder uses ours, decoder uses peer's. Capacities track each SETTINGS.
+	declare localHpackTable: hpack.DynamicTable
+	declare peerHpackTable: hpack.DynamicTable
+	declare closed: boolean
+	declare destroyed: boolean
+	// Keepalive PING loop. Residential proxies + NAT boxes routinely blackhole idle TCP
+	// (no FIN/RST) — Node keeps thinking the socket is fine while the next request hangs
+	// forever waiting for a HEADERS frame from a corpse. Send a PING every 30s; if no ACK
+	// within 30s, treat the connection as dead and tear it down so in-flight requests
+	// fail cleanly.
+	declare _keepaliveIntervalMs: number
+	declare _keepaliveTimeoutMs: number
+	declare _pingOutstanding: { timer: ReturnType<typeof setTimeout> } | null
+	declare _keepaliveTimer: ReturnType<typeof setInterval> | null
+
+	constructor(transport: H2Transport, profile: Profile | null = null) {
 		super()
 		this.transport = transport
 		this.profile = profile
@@ -195,13 +267,9 @@ class H2Session extends EventEmitter {
 			[frame.SETTING.INITIAL_WINDOW_SIZE]: 65535,
 			[frame.SETTING.MAX_FRAME_SIZE]: 16384,
 		}
-		// Connection-level send window — limited by peer.
 		this._connSendWindow = 65535
-		// Connection-level receive window — we restore aggressively.
-		this._connRecvWindow = 65535 + this._windowUpdateIncrement
 		this._connRecvUsed = 0
 
-		// HPACK tables. Encoder uses ours, decoder uses peer's. Capacities track each SETTINGS.
 		this.localHpackTable = new hpack.DynamicTable(65536)
 		this.peerHpackTable = new hpack.DynamicTable(4096)
 
@@ -212,11 +280,6 @@ class H2Session extends EventEmitter {
 		transport.on('end', () => this._onTransportClose())
 		transport.on('error', (e) => this.emit('error', e))
 
-		// Keepalive PING loop. Residential proxies + NAT boxes routinely blackhole idle TCP
-		// (no FIN/RST) — Node keeps thinking the socket is fine while the next request hangs
-		// forever waiting for a HEADERS frame from a corpse. Send a PING every 30s; if no ACK
-		// within 30s, treat the connection as dead and tear it down so in-flight requests
-		// fail cleanly.
 		this._keepaliveIntervalMs = profile?.http2?.keepaliveIntervalMs ?? 30_000
 		this._keepaliveTimeoutMs = profile?.http2?.keepaliveTimeoutMs ?? 30_000
 		this._pingOutstanding = null
@@ -226,14 +289,16 @@ class H2Session extends EventEmitter {
 		this._sendPreface()
 	}
 
-	_sendKeepalivePing() {
+	_sendKeepalivePing(): void {
 		if (this.closed || this.destroyed || this._pingOutstanding) return
 		const payload = Buffer.alloc(8)
 		payload.writeUInt32BE(0x68656c6c, 0)  // "hell" — magic tag identifying our probes
 		payload.writeUInt32BE((Date.now() & 0xffffffff) >>> 0, 4)
 		const timer = setTimeout(() => {
 			// No ACK — peer is dead. Tear down; _fatalError fails in-flight streams and evicts.
-			this._fatalError(Object.assign(new Error('h2 keepalive PING timed out'), { code: 'EH2KEEPALIVE' }))
+			const err: H2Error = new Error('h2 keepalive PING timed out')
+			err.code = 'EH2KEEPALIVE'
+			this._fatalError(err)
 		}, this._keepaliveTimeoutMs)
 		timer.unref?.()
 		this._pingOutstanding = { timer }
@@ -242,16 +307,16 @@ class H2Session extends EventEmitter {
 		} catch (e) {
 			clearTimeout(timer)
 			this._pingOutstanding = null
-			this._fatalError(e)
+			this._fatalError(asError(e))
 		}
 	}
 
-	_clearKeepalive() {
+	_clearKeepalive(): void {
 		if (this._keepaliveTimer) { clearInterval(this._keepaliveTimer); this._keepaliveTimer = null }
 		if (this._pingOutstanding) { clearTimeout(this._pingOutstanding.timer); this._pingOutstanding = null }
 	}
 
-	_sendPreface() {
+	_sendPreface(): void {
 		const settings = frame.build(frame.TYPE.SETTINGS, 0, 0, frame.buildSettings(this._localSettings))
 		const winUpdate = frame.build(frame.TYPE.WINDOW_UPDATE, 0, 0, frame.buildWindowUpdate(this._windowUpdateIncrement))
 		// Single write so the preface + SETTINGS + WINDOW_UPDATE land in one application_data
@@ -259,11 +324,11 @@ class H2Session extends EventEmitter {
 		this.transport.write(Buffer.concat([H2_PREFACE, settings, winUpdate]))
 	}
 
-	_sendFrame(type, flags, streamId, payload) {
+	_sendFrame(type: number, flags: number, streamId: number, payload: Buffer): void {
 		this.transport.write(frame.build(type, flags, streamId, payload))
 	}
 
-	_onData(chunk) {
+	_onData(chunk: Buffer): void {
 		this._rxBuf = Buffer.concat([this._rxBuf, chunk])
 		// Malformed frames / header blocks (HPACK errors, bad lengths) from the peer must not crash
 		// the process by throwing out of this transport 'data' handler. An HPACK error desyncs the
@@ -276,18 +341,18 @@ class H2Session extends EventEmitter {
 				this._dispatch(f)
 			}
 		} catch (e) {
-			this._fatalError(e)
+			this._fatalError(asError(e))
 		}
 	}
 
 	// Fail all in-flight streams (callers listen via req.on('error')) and tear the session down.
 	// We do NOT emit a session 'error' — nothing listens for it, so that would itself throw.
-	_fatalError(err) {
+	_fatalError(err: H2Error): void {
 		if (this.destroyed) return
 		this.destroyed = true
 		this.closed = true
 		this._clearKeepalive()
-		const e = new Error(`h2 connection error: ${err.message}`)
+		const e: H2Error = new Error(`h2 connection error: ${err.message}`)
 		e.code = err.code || 'EH2PROTOCOL'
 		for (const s of [...this.streams.values()]) {
 			s.closed = true
@@ -299,7 +364,7 @@ class H2Session extends EventEmitter {
 		this.emit('close')
 	}
 
-	_dispatch(f) {
+	_dispatch(f: frame.Frame): void {
 		switch (f.type) {
 			case frame.TYPE.SETTINGS: {
 				if (f.flags & frame.FLAG.ACK) break
@@ -345,7 +410,7 @@ class H2Session extends EventEmitter {
 				}
 				const s = this.streams.get(f.streamId)
 				if (s) s._onData(p, f.flags)
-				else this._creditFlow(0, p.length)   // unknown stream — still credit the conn window
+				else this._creditFlow(p.length)   // unknown stream — still credit the conn window
 				break
 			}
 			case frame.TYPE.RST_STREAM: {
@@ -380,7 +445,7 @@ class H2Session extends EventEmitter {
 		}
 	}
 
-	_creditFlow(streamId, bytes) {
+	_creditFlow(bytes: number): void {
 		this._connRecvUsed += bytes
 		// Replenish in big chunks to amortize.
 		if (this._connRecvUsed >= 65536) {
@@ -389,7 +454,7 @@ class H2Session extends EventEmitter {
 		}
 	}
 
-	_sendData(streamId, body, endStream) {
+	_sendData(streamId: number, body: Buffer | string, endStream: boolean): void {
 		const buf = Buffer.isBuffer(body) ? body : Buffer.from(body)
 		const maxFrame = Math.min(this.peerSettings[frame.SETTING.MAX_FRAME_SIZE] || 16384, 16384)
 		const stream = this.streams.get(streamId)
@@ -420,11 +485,11 @@ class H2Session extends EventEmitter {
 		}
 	}
 
-	_closeStream(id) {
+	_closeStream(id: number): void {
 		this.streams.delete(id)
 	}
 
-	_onTransportClose() {
+	_onTransportClose(): void {
 		this.closed = true
 		this.destroyed = true
 		this._clearKeepalive()
@@ -432,14 +497,14 @@ class H2Session extends EventEmitter {
 	}
 
 	// Public API (mirrors enough of Node's http2.ClientHttp2Session that lib/client.js can drive it).
-	request(headers, opts = {}) {
+	request(headers: H2RequestHeaders, opts: H2RequestOptions = {}): H2Stream {
 		const id = this.nextStreamId
 		this.nextStreamId += 2
 		const stream = new H2Stream(this, id)
 		this.streams.set(id, stream)
 
 		// Normalize: lib/client.js passes headers as { ':method': 'GET', ... } object.
-		const list = []
+		const list: Array<[string, H2HeaderValue]> = []
 		for (const [k, v] of Object.entries(headers)) {
 			// Chrome (H2) sends EACH cookie as its OWN `cookie` header (HPACK indexes them
 			// individually); a single combined `cookie` line is an Akamai/DataDome header-
@@ -500,7 +565,7 @@ class H2Session extends EventEmitter {
 		return stream
 	}
 
-	close() {
+	close(): void {
 		if (this.closed) return
 		this.closed = true
 		this._clearKeepalive()

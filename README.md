@@ -824,9 +824,9 @@ lib/
 │   ├── mlkem.ts               X25519MLKEM768 hybrid key exchange (Web Crypto ML-KEM-768)
 │   └── x25519.ts              X25519 shared secret via Web Crypto (workerd-safe)
 ├── h2/
-│   ├── frame.js               9-byte frame header codec + type/flag constants
-│   ├── hpack.js               full HPACK (static + dynamic tables, Huffman)
-│   └── session.js             H2Session + H2Stream (replaces Node's http2,
+│   ├── frame.ts               9-byte frame header codec + type/flag constants
+│   ├── hpack.ts               full HPACK (static + dynamic tables, Huffman)
+│   └── session.ts             H2Session + H2Stream (replaces Node's http2,
 │                              with CONTINUATION + per-stream flow control)
 ├── h3/
 │   ├── connection.js          QUIC v1 connection + NewReno + key updates + NCID
@@ -835,9 +835,9 @@ lib/
 │   ├── packet.js              QUIC packet build/parse + frame codec
 │   ├── keys.js                Initial + traffic key derivation + AEAD helpers
 │   ├── qpack.js               QPACK static + dynamic-table decode
-│   ├── huffman.js             RFC 7541 Huffman encoder + decoder
+│   ├── huffman.ts             RFC 7541 Huffman encoder + decoder
 │   ├── transport-params.js    QUIC transport-parameters TLS extension codec
-│   └── varint.js              QUIC variable-length integer codec
+│   └── varint.ts              QUIC variable-length integer codec
 ├── extensions/
 │   └── index.ts               every TLS extension builder (profile-driven)
 ├── profiles/
@@ -854,7 +854,7 @@ lib/
                                JSON-line output via HELLOJS_LOG_JSON=1)
 ```
 
-The custom h2 client (`lib/h2/session.js`) replaces Node's built-in
+The custom h2 client (`lib/h2/session.ts`) replaces Node's built-in
 `http2.connect()` on the hot path. It handles the SETTINGS exchange, HPACK
 encode/decode, per-stream and connection flow control, CONTINUATION frame
 assembly/emission, frame dispatch, and PING auto-response — vs. the thousands of
