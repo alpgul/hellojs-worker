@@ -31,7 +31,7 @@ const pickGreaseByte = () => (GREASE_HIGH_NIBBLES[crypto.randomBytes(1)[0] & 0x0
 const pickGreaseTriple = () => {
 	const nibbles = GREASE_HIGH_NIBBLES.slice()
 	for (let i = nibbles.length - 1; i > 0; i--) {
-		const j = crypto.randomBytes(1)[0]! % (i + 1)
+		const j = crypto.randomInt(0, i + 1)
 		const t = nibbles[i]!
 		nibbles[i] = nibbles[j]!
 		nibbles[j] = t
