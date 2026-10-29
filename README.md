@@ -830,13 +830,13 @@ lib/
 │                              with CONTINUATION + per-stream flow control)
 ├── h3/
 │   ├── connection.js          QUIC v1 connection + NewReno + key updates + NCID
-│   ├── udp.js                 UDP transport seam (dgram by default, swappable/off)
+│   ├── udp.ts                 UDP transport seam (dgram by default, swappable/off)
 │   ├── h3.js                  HTTP/3 layer (control + encoder + decoder streams)
-│   ├── packet.js              QUIC packet build/parse + frame codec
-│   ├── keys.js                Initial + traffic key derivation + AEAD helpers
-│   ├── qpack.js               QPACK static + dynamic-table decode
+│   ├── packet.ts              QUIC packet build/parse + frame codec
+│   ├── keys.ts                Initial + traffic key derivation + AEAD helpers
+│   ├── qpack.ts               QPACK static + dynamic-table decode
 │   ├── huffman.ts             RFC 7541 Huffman encoder + decoder
-│   ├── transport-params.js    QUIC transport-parameters TLS extension codec
+│   ├── transport-params.ts    QUIC transport-parameters TLS extension codec
 │   └── varint.ts              QUIC variable-length integer codec
 ├── extensions/
 │   └── index.ts               every TLS extension builder (profile-driven)

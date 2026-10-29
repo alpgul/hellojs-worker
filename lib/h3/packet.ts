@@ -18,6 +18,14 @@
 import * as keys from './keys.ts'
 import * as varint from './varint.ts'
 
+import type * as crypto from 'node:crypto'
+
+type Aead = crypto.CipherGCMTypes
+
+// Varints decode to `number` up to 2^53 and `bigint` beyond; offsets and lengths on the
+// wire always fit the narrow side, so the arithmetic below narrows explicitly.
+const asNumber = (v: number | bigint): number => Number(v)
+
 const VERSION_V1 = 0x00000001
 
 const PACKET_TYPE = {
@@ -50,6 +58,102 @@ const FRAME_TYPE = {
 	PATH_RESPONSE:        0x1b,
 }
 
+// One direction's keys for an epoch, plus the AEAD they belong to.
+export interface EpochKeys {
+	server: keys.PacketKeys
+	// Post-key-update set, consulted when the peer's K bit differs from `currentPhase`.
+	serverNext?: keys.PacketKeys
+	aead?: Aead
+	currentPhase?: number | null
+}
+
+export interface KeysByEpoch {
+	initial?: EpochKeys
+	handshake?: EpochKeys
+	oneRtt?: EpochKeys
+}
+
+export interface BuildInitialOptions {
+	dstCid: Buffer
+	srcCid: Buffer
+	token?: Buffer
+	payloadFrames: Buffer
+	pn: number
+	pnLen: number
+	clientKeys: keys.PacketKeys
+}
+
+export interface BuildHandshakeOptions {
+	dstCid: Buffer
+	srcCid: Buffer
+	payloadFrames: Buffer
+	pn: number
+	pnLen: number
+	clientKeys: keys.PacketKeys
+	aead?: Aead
+}
+
+export interface BuildOneRttOptions {
+	dstCid: Buffer
+	payloadFrames: Buffer
+	pn: number
+	pnLen: number
+	clientKeys: keys.PacketKeys
+	aead?: Aead
+	keyPhase?: number
+}
+
+export type PacketKind =
+	| 'initial' | 'handshake' | '1rtt' | 'retry'
+	| 'unknown-long' | 'unknown-short' | 'decrypt-failed'
+
+export interface ParsedPacket {
+	kind: PacketKind
+	consumed: number
+	version?: number
+	dstCid?: Buffer
+	srcCid?: Buffer
+	firstByte?: number
+	pn?: number
+	payload?: Buffer
+	type?: number
+	epoch?: string | null
+	error?: string
+	retryToken?: Buffer
+	integrityTag?: Buffer
+	peerPhase?: number
+	usedNextKeys?: boolean
+}
+
+export type FrameType =
+	| 'ping' | 'ack' | 'crypto' | 'stream' | 'new_token' | 'handshake_done' | 'flow_control'
+	| 'max_stream_data' | 'path_challenge' | 'path_response' | 'new_connection_id'
+	| 'retire_connection_id' | 'datagram' | 'connection_close' | 'unknown'
+
+export interface AckRange { gap: number | bigint; length: number | bigint }
+
+export interface QuicFrame {
+	type: FrameType
+	data?: Buffer
+	offset?: number | bigint
+	streamId?: number | bigint
+	fin?: boolean
+	largestAcked?: number | bigint
+	ackDelay?: number | bigint
+	firstAckRange?: number | bigint
+	ranges?: AckRange[]
+	subtype?: number
+	value?: number | bigint
+	seq?: number | bigint
+	retirePriorTo?: number | bigint
+	cid?: Buffer
+	statelessResetToken?: Buffer
+	errorCode?: number | bigint
+	reason?: string
+	frameType?: number
+	raw?: Buffer
+}
+
 // --- Builders ---------------------------------------------------------------
 
 // RFC 9001 §5.4.2: header protection samples 16 bytes starting 4 bytes into the
@@ -58,24 +162,24 @@ const FRAME_TYPE = {
 // must be at least (4 - pnLen) bytes. Pad short payloads with PADDING frames (0x00).
 const HP_SAMPLE_OFFSET = 4
 const HP_SAMPLE_LEN = 16
-function padForHeaderProtection(payloadFrames, pnLen) {
+function padForHeaderProtection(payloadFrames: Buffer, pnLen: number): Buffer {
 	const minPlaintext = (HP_SAMPLE_OFFSET + HP_SAMPLE_LEN) - 16 - pnLen
 	if (payloadFrames.length >= minPlaintext) return payloadFrames
 	return Buffer.concat([payloadFrames, Buffer.alloc(minPlaintext - payloadFrames.length, FRAME_TYPE.PADDING)])
 }
 
 // Build an Initial packet. Initial epoch always uses AES-128-GCM.
-function buildInitial({ dstCid, srcCid, token = Buffer.alloc(0), payloadFrames, pn, pnLen, clientKeys }) {
-	const aead = 'aes-128-gcm'
+function buildInitial({ dstCid, srcCid, token = Buffer.alloc(0), payloadFrames, pn, pnLen, clientKeys }: BuildInitialOptions): Buffer {
+	const aead: Aead = 'aes-128-gcm'
 	const reservedAndPnLen = (pnLen - 1) & 0x03  // bottom 2 bits = pnLen - 1
 	const firstByte = 0xc0 | (PACKET_TYPE.INITIAL << 4) | reservedAndPnLen
-	payloadFrames = padForHeaderProtection(payloadFrames, pnLen)
+	const padded = padForHeaderProtection(payloadFrames, pnLen)
 	const version = Buffer.alloc(4); version.writeUInt32BE(VERSION_V1, 0)
 	const dstLen = Buffer.from([dstCid.length])
 	const srcLen = Buffer.from([srcCid.length])
 	const tokenLen = varint.encode(token.length)
 	// Compute the length field: pnLen + payload length + 16 (auth tag)
-	const totalProtectedLen = pnLen + payloadFrames.length + 16
+	const totalProtectedLen = pnLen + padded.length + 16
 	const lengthVarint = varint.encode(totalProtectedLen)
 	const pnBytes = varint.encodeUint(pn, pnLen)
 
@@ -88,21 +192,21 @@ function buildInitial({ dstCid, srcCid, token = Buffer.alloc(0), payloadFrames, 
 		lengthVarint,
 		pnBytes,
 	])
-	const ciphertext = keys.aeadEncrypt(aead, clientKeys.key, clientKeys.iv, pn, header, payloadFrames)
+	const ciphertext = keys.aeadEncrypt(aead, clientKeys.key, clientKeys.iv, pn, header, padded)
 	const packet = Buffer.concat([header, ciphertext])
 	const pnOffset = header.length - pnLen
 	keys.applyHeaderProtection(packet, clientKeys.hp, pnOffset, pnLen, true, aead)
 	return packet
 }
 
-function buildHandshake({ dstCid, srcCid, payloadFrames, pn, pnLen, clientKeys, aead = 'aes-128-gcm' }) {
+function buildHandshake({ dstCid, srcCid, payloadFrames, pn, pnLen, clientKeys, aead = 'aes-128-gcm' }: BuildHandshakeOptions): Buffer {
 	const reservedAndPnLen = (pnLen - 1) & 0x03
 	const firstByte = 0xc0 | (PACKET_TYPE.HANDSHAKE << 4) | reservedAndPnLen
-	payloadFrames = padForHeaderProtection(payloadFrames, pnLen)
+	const padded = padForHeaderProtection(payloadFrames, pnLen)
 	const version = Buffer.alloc(4); version.writeUInt32BE(VERSION_V1, 0)
 	const dstLen = Buffer.from([dstCid.length])
 	const srcLen = Buffer.from([srcCid.length])
-	const totalProtectedLen = pnLen + payloadFrames.length + 16
+	const totalProtectedLen = pnLen + padded.length + 16
 	const lengthVarint = varint.encode(totalProtectedLen)
 	const pnBytes = varint.encodeUint(pn, pnLen)
 	const header = Buffer.concat([
@@ -113,21 +217,21 @@ function buildHandshake({ dstCid, srcCid, payloadFrames, pn, pnLen, clientKeys, 
 		lengthVarint,
 		pnBytes,
 	])
-	const ciphertext = keys.aeadEncrypt(aead, clientKeys.key, clientKeys.iv, pn, header, payloadFrames)
+	const ciphertext = keys.aeadEncrypt(aead, clientKeys.key, clientKeys.iv, pn, header, padded)
 	const packet = Buffer.concat([header, ciphertext])
 	const pnOffset = header.length - pnLen
 	keys.applyHeaderProtection(packet, clientKeys.hp, pnOffset, pnLen, true, aead)
 	return packet
 }
 
-function buildOneRtt({ dstCid, payloadFrames, pn, pnLen, clientKeys, aead = 'aes-128-gcm', keyPhase = 0 }) {
+function buildOneRtt({ dstCid, payloadFrames, pn, pnLen, clientKeys, aead = 'aes-128-gcm', keyPhase = 0 }: BuildOneRttOptions): Buffer {
 	const reservedAndPnLen = (pnLen - 1) & 0x03
 	// Short header layout: 0|1|S|R|R|K|P|P  → fixed bit (0x40), spin, reserved, K (0x04), pnLen-1.
 	const firstByte = 0x40 | ((keyPhase & 0x01) << 2) | reservedAndPnLen
-	payloadFrames = padForHeaderProtection(payloadFrames, pnLen)
+	const padded = padForHeaderProtection(payloadFrames, pnLen)
 	const pnBytes = varint.encodeUint(pn, pnLen)
 	const header = Buffer.concat([Buffer.from([firstByte]), dstCid, pnBytes])
-	const ciphertext = keys.aeadEncrypt(aead, clientKeys.key, clientKeys.iv, pn, header, payloadFrames)
+	const ciphertext = keys.aeadEncrypt(aead, clientKeys.key, clientKeys.iv, pn, header, padded)
 	const packet = Buffer.concat([header, ciphertext])
 	const pnOffset = header.length - pnLen
 	keys.applyHeaderProtection(packet, clientKeys.hp, pnOffset, pnLen, false, aead)
@@ -138,8 +242,8 @@ function buildOneRtt({ dstCid, payloadFrames, pn, pnLen, clientKeys, aead = 'aes
 
 // Parse a single packet from the buffer. Returns { kind, ...parsedFields, consumed }.
 // For Initial / Handshake we need access to keys to decrypt; for 1-RTT same.
-// `keysByEpoch` is { initial: {server:{key,iv,hp}}, handshake: ..., oneRtt: ... }.
-function parsePacket(buf, offset, keysByEpoch, ourSrcCidLen) {
+// `keysByEpoch` carries the server-side key set (and post-update set) per epoch.
+function parsePacket(buf: Buffer, offset: number, keysByEpoch: KeysByEpoch, ourSrcCidLen: number): ParsedPacket | null {
 	if (offset >= buf.length) return null
 	const first = buf[offset]
 	const isLong = (first & 0x80) !== 0
@@ -156,16 +260,16 @@ function parsePacket(buf, offset, keysByEpoch, ourSrcCidLen) {
 		if (type === PACKET_TYPE.RETRY) {
 			// Retry has no length / pn — rest is integrity tag + token
 			const tail = buf.subarray(p)
-			return { kind: 'retry', version, dstCid, srcCid, retryToken: tail.subarray(0, tail.length - 16), integrityTag: tail.subarray(tail.length - 16), consumed: buf.length - offset }
+			return { kind: 'retry', version, dstCid, srcCid, retryToken: tail.subarray(0, -16), integrityTag: tail.subarray(-16), consumed: buf.length - offset }
 		}
 
-		let token = Buffer.alloc(0)
 		if (type === PACKET_TYPE.INITIAL) {
+			// The token plays no part in decryption — step over it.
 			const tk = varint.decode(buf, p); p += tk.length
-			token = buf.subarray(p, p + tk.value); p += tk.value
+			p += asNumber(tk.value)
 		}
 		const lenInfo = varint.decode(buf, p); p += lenInfo.length
-		const remaining = lenInfo.value
+		const remaining = asNumber(lenInfo.value)
 		const pnOffset = p
 		const packetEndOffset = pnOffset + remaining
 		// Need a copy to mutate during HP removal
@@ -173,11 +277,12 @@ function parsePacket(buf, offset, keysByEpoch, ourSrcCidLen) {
 		const localPnOffset = pnOffset - offset
 
 		const epoch = type === PACKET_TYPE.INITIAL ? 'initial' : (type === PACKET_TYPE.HANDSHAKE ? 'handshake' : null)
-		if (!epoch || !keysByEpoch[epoch]?.server) {
+		const epochKeys = epoch ? keysByEpoch[epoch] : undefined
+		if (!epoch || !epochKeys?.server) {
 			return { kind: 'unknown-long', type, version, consumed: packetEndOffset - offset, dstCid, srcCid }
 		}
-		const sk = keysByEpoch[epoch].server
-		const aead = keysByEpoch[epoch].aead || 'aes-128-gcm'
+		const sk = epochKeys.server
+		const aead = epochKeys.aead ?? 'aes-128-gcm'
 		const { firstByte: unprotected, pnLen, pn } = keys.removeHeaderProtection(pktSlice, sk.hp, localPnOffset, true, aead)
 		const headerBytes = pktSlice.subarray(0, localPnOffset + pnLen)
 		const ciphertext = pktSlice.subarray(localPnOffset + pnLen)
@@ -185,7 +290,7 @@ function parsePacket(buf, offset, keysByEpoch, ourSrcCidLen) {
 			const plaintext = keys.aeadDecrypt(aead, sk.key, sk.iv, pn, headerBytes, ciphertext)
 			return { kind: epoch === 'initial' ? 'initial' : 'handshake', firstByte: unprotected, version, dstCid, srcCid, pn, payload: plaintext, consumed: packetEndOffset - offset }
 		} catch (e) {
-			return { kind: 'decrypt-failed', epoch, error: e.message, consumed: packetEndOffset - offset }
+			return { kind: 'decrypt-failed', epoch, error: (e as Error).message, consumed: packetEndOffset - offset }
 		}
 	}
 
@@ -196,25 +301,25 @@ function parsePacket(buf, offset, keysByEpoch, ourSrcCidLen) {
 	if (!ek?.server) return { kind: 'unknown-short', consumed: buf.length - offset }
 	const pktSlice = Buffer.from(buf.subarray(offset))
 	const localPnOffset = 1 + ourSrcCidLen
-	const aead1 = ek.aead || 'aes-128-gcm'
-	const { firstByte: unprotected, pnLen, pn } = keys.removeHeaderProtection(pktSlice, ek.server.hp, localPnOffset, false, aead1)
+	const aead = ek.aead ?? 'aes-128-gcm'
+	const { firstByte: unprotected, pnLen, pn } = keys.removeHeaderProtection(pktSlice, ek.server.hp, localPnOffset, false, aead)
 	const headerBytes = pktSlice.subarray(0, localPnOffset + pnLen)
 	const ciphertext = pktSlice.subarray(localPnOffset + pnLen)
 	const peerPhase = (unprotected & 0x04) >> 2
 	const usingNextKeys = ek.currentPhase != null && peerPhase !== ek.currentPhase
 	const aeadKeys = usingNextKeys && ek.serverNext ? ek.serverNext : ek.server
 	try {
-		const plaintext = keys.aeadDecrypt(aead1, aeadKeys.key, aeadKeys.iv, pn, headerBytes, ciphertext)
+		const plaintext = keys.aeadDecrypt(aead, aeadKeys.key, aeadKeys.iv, pn, headerBytes, ciphertext)
 		return { kind: '1rtt', firstByte: unprotected, pn, payload: plaintext, peerPhase, usedNextKeys: usingNextKeys, consumed: buf.length - offset }
 	} catch (e) {
-		return { kind: 'decrypt-failed', epoch: '1rtt', error: e.message, peerPhase, consumed: buf.length - offset }
+		return { kind: 'decrypt-failed', epoch: '1rtt', error: (e as Error).message, peerPhase, consumed: buf.length - offset }
 	}
 }
 
 // --- Frame codec ------------------------------------------------------------
 
 // Encode a CRYPTO frame: type=0x06, offset, length, data.
-function encodeCryptoFrame(offset, data) {
+function encodeCryptoFrame(offset: number, data: Buffer): Buffer {
 	return Buffer.concat([
 		Buffer.from([FRAME_TYPE.CRYPTO]),
 		varint.encode(offset),
@@ -224,7 +329,7 @@ function encodeCryptoFrame(offset, data) {
 }
 
 // Encode a STREAM frame with type byte 0x08..0x0f. We always set OFF (0x04) and LEN (0x02) bits, optionally FIN (0x01).
-function encodeStreamFrame(streamId, offset, data, fin = false) {
+function encodeStreamFrame(streamId: number, offset: number, data: Buffer, fin = false): Buffer {
 	const typeByte = FRAME_TYPE.STREAM_BASE | 0x04 | 0x02 | (fin ? 0x01 : 0x00)
 	return Buffer.concat([
 		Buffer.from([typeByte]),
@@ -236,7 +341,7 @@ function encodeStreamFrame(streamId, offset, data, fin = false) {
 }
 
 // Encode an ACK frame. `largestAcked` and `firstAckRange` are integers; we send a single contiguous range starting from largestAcked-firstAckRange to largestAcked.
-function encodeAckFrame(largestAcked, ackDelay = 0, firstAckRange = 0) {
+function encodeAckFrame(largestAcked: number, ackDelay = 0, firstAckRange = 0): Buffer {
 	return Buffer.concat([
 		Buffer.from([FRAME_TYPE.ACK]),
 		varint.encode(largestAcked),
@@ -247,8 +352,8 @@ function encodeAckFrame(largestAcked, ackDelay = 0, firstAckRange = 0) {
 }
 
 // Decode all frames from a packet payload.
-function decodeFrames(buf) {
-	const frames = []
+function decodeFrames(buf: Buffer): QuicFrame[] {
+	const frames: QuicFrame[] = []
 	let off = 0
 	while (off < buf.length) {
 		const t = buf[off]
@@ -260,16 +365,14 @@ function decodeFrames(buf) {
 			const ad = varint.decode(buf, off); off += ad.length
 			const rc = varint.decode(buf, off); off += rc.length
 			const fr = varint.decode(buf, off); off += fr.length
-			const ranges = []
-			for (let i = 0; i < rc.value; i++) {
+			const ranges: AckRange[] = []
+			for (let i = 0; i < asNumber(rc.value); i++) {
 				const gap = varint.decode(buf, off); off += gap.length
 				const len = varint.decode(buf, off); off += len.length
 				ranges.push({ gap: gap.value, length: len.value })
 			}
 			if (t === FRAME_TYPE.ACK_ECN) {
-				const ect0 = varint.decode(buf, off); off += ect0.length
-				const ect1 = varint.decode(buf, off); off += ect1.length
-				const ce = varint.decode(buf, off); off += ce.length
+				for (let i = 0; i < 3; i++) { const v = varint.decode(buf, off); off += v.length }  // ect0, ect1, ce
 			}
 			frames.push({ type: 'ack', largestAcked: la.value, ackDelay: ad.value, firstAckRange: fr.value, ranges })
 			continue
@@ -278,7 +381,7 @@ function decodeFrames(buf) {
 			off++
 			const offV = varint.decode(buf, off); off += offV.length
 			const lenV = varint.decode(buf, off); off += lenV.length
-			const data = buf.subarray(off, off + lenV.value); off += lenV.value
+			const data = buf.subarray(off, off + asNumber(lenV.value)); off += asNumber(lenV.value)
 			frames.push({ type: 'crypto', offset: offV.value, data })
 			continue
 		}
@@ -288,19 +391,19 @@ function decodeFrames(buf) {
 			const hasOff  = (t & 0x04) !== 0
 			off++
 			const sid = varint.decode(buf, off); off += sid.length
-			let so = 0
+			let so: number | bigint = 0
 			if (hasOff) { const v = varint.decode(buf, off); so = v.value; off += v.length }
-			let dlen
+			let dlen: number | bigint
 			if (hasLen) { const v = varint.decode(buf, off); dlen = v.value; off += v.length }
 			else { dlen = buf.length - off }
-			const data = buf.subarray(off, off + dlen); off += dlen
+			const data = buf.subarray(off, off + asNumber(dlen)); off += asNumber(dlen)
 			frames.push({ type: 'stream', streamId: sid.value, offset: so, data, fin })
 			continue
 		}
 		if (t === FRAME_TYPE.NEW_TOKEN) {
 			off++
 			const lv = varint.decode(buf, off); off += lv.length
-			off += lv.value
+			off += asNumber(lv.value)
 			frames.push({ type: 'new_token' })
 			continue
 		}
@@ -342,9 +445,9 @@ function decodeFrames(buf) {
 		}
 		if (t === FRAME_TYPE.DATAGRAM || t === FRAME_TYPE.DATAGRAM_LEN) {
 			off++
-			let dlen
+			let dlen: number
 			if (t === FRAME_TYPE.DATAGRAM_LEN) {
-				const v = varint.decode(buf, off); off += v.length; dlen = v.value
+				const v = varint.decode(buf, off); off += v.length; dlen = asNumber(v.value)
 			} else {
 				dlen = buf.length - off   // runs to end of packet
 			}
@@ -359,7 +462,7 @@ function decodeFrames(buf) {
 				const ft = varint.decode(buf, off); off += ft.length
 			}
 			const rl = varint.decode(buf, off); off += rl.length
-			const reason = buf.subarray(off, off + rl.value); off += rl.value
+			const reason = buf.subarray(off, off + asNumber(rl.value)); off += asNumber(rl.value)
 			frames.push({ type: 'connection_close', errorCode: ec.value, reason: reason.toString('utf8') })
 			continue
 		}
@@ -373,22 +476,22 @@ function decodeFrames(buf) {
 // Encode a DATAGRAM frame (RFC 9221). Uses 0x31 (length-prefixed) so it can be safely
 // followed by other frames in the same packet.
 // RETIRE_CONNECTION_ID (RFC 9000 §19.16) — tells the peer to stop using a previously-issued CID.
-function encodeRetireConnectionIdFrame(seq) {
+function encodeRetireConnectionIdFrame(seq: number): Buffer {
 	return Buffer.concat([Buffer.from([0x19]), varint.encode(seq)])
 }
 
 // PATH_CHALLENGE / PATH_RESPONSE (RFC 9000 §19.17, §19.18) — both carry exactly 8 bytes.
-function encodePathChallengeFrame(data) {
+function encodePathChallengeFrame(data: Buffer): Buffer {
 	if (data.length !== 8) throw new Error('PATH_CHALLENGE data must be 8 bytes')
 	return Buffer.concat([Buffer.from([0x1a]), data])
 }
 
-function encodePathResponseFrame(data) {
+function encodePathResponseFrame(data: Buffer): Buffer {
 	if (data.length !== 8) throw new Error('PATH_RESPONSE data must be 8 bytes')
 	return Buffer.concat([Buffer.from([0x1b]), data])
 }
 
-function encodeDatagramFrame(data) {
+function encodeDatagramFrame(data: Buffer): Buffer {
 	const len = varint.encode(data.length)
 	return Buffer.concat([Buffer.from([0x31]), len, data])
 }

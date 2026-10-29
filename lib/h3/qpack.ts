@@ -12,8 +12,16 @@ import * as huffman from './huffman.ts'
 // values (Required Insert Count + Delta Base), both encoded as QPACK integers. We
 // always emit (0, 0) which means "no dynamic table dependency, base = 0".
 
+export type HeaderEntry = [name: string, value: string]
+
+export interface DecodedInt {
+	value: number
+	length: number
+	truncated?: boolean
+}
+
 // Static table (RFC 9204 Appendix A) — abbreviated to entries we actually emit.
-const STATIC_TABLE = [
+const STATIC_TABLE: HeaderEntry[] = [
 	[':authority', ''],
 	[':path', '/'],
 	['age', '0'],
@@ -116,7 +124,7 @@ const STATIC_TABLE = [
 ]
 
 // Find the static-table index for (name, value) — exact match first, then name-only.
-function findStatic(name, value) {
+function findStatic(name: string, value: string): { exact: number } | { nameOnly: number } | null {
 	let nameIdx = -1
 	for (let i = 0; i < STATIC_TABLE.length; i++) {
 		const [n, v] = STATIC_TABLE[i]
@@ -129,10 +137,10 @@ function findStatic(name, value) {
 }
 
 // QPACK integer encoding (RFC 9204 §4.1.1) — N-bit prefix on first byte.
-function encodeInt(value, prefixBits, firstBytePrefix) {
+function encodeInt(value: number, prefixBits: number, firstBytePrefix: number): Buffer {
 	const max = (1 << prefixBits) - 1
 	if (value < max) return Buffer.from([firstBytePrefix | value])
-	const out = [firstBytePrefix | max]
+	const out: number[] = [firstBytePrefix | max]
 	value -= max
 	while (value >= 128) { out.push((value & 0x7f) | 0x80); value = value >>> 7 }
 	out.push(value)
@@ -140,23 +148,23 @@ function encodeInt(value, prefixBits, firstBytePrefix) {
 }
 
 // String literal: 1-bit huffman flag (we always 0 = no huffman) + 7-bit length + bytes.
-function encodeString(str) {
+function encodeString(str: string): Buffer {
 	const b = Buffer.from(str, 'utf8')
 	return Buffer.concat([encodeInt(b.length, 7, 0x00), b])
 }
 
 // Encode a headers list (array of [name, value]) into a QPACK encoded field section.
-function encodeHeaders(headers) {
-	const out = []
+function encodeHeaders(headers: HeaderEntry[]): Buffer {
+	const out: Buffer[] = []
 	// Field section prefix: Required Insert Count = 0 (encoded as 0), Delta Base = 0 (encoded as sign=0, value=0).
 	out.push(encodeInt(0, 8, 0x00))   // Required Insert Count
 	out.push(encodeInt(0, 7, 0x00))   // Delta Base (S=0, base=0)
 	for (const [n, v] of headers) {
 		const m = findStatic(n.toLowerCase(), v)
-		if (m && typeof m.exact === 'number') {
+		if (m && 'exact' in m) {
 			// Indexed Field Line — 1Txxxxxx, T=1 (static)
 			out.push(encodeInt(m.exact, 6, 0xc0))
-		} else if (m && typeof m.nameOnly === 'number') {
+		} else if (m && 'nameOnly' in m) {
 			// Literal Field Line With Name Reference — 01NTxxxx; we set N=0, T=1 (static)
 			out.push(encodeInt(m.nameOnly, 4, 0x50))
 			out.push(encodeString(v))
@@ -171,7 +179,7 @@ function encodeHeaders(headers) {
 }
 
 // Decode a QPACK integer.
-function decodeInt(buf, offset, prefixBits) {
+function decodeInt(buf: Buffer, offset: number, prefixBits: number): DecodedInt {
 	const max = (1 << prefixBits) - 1
 	if (offset >= buf.length) return { value: 0, length: 0, truncated: true }
 	let v = buf[offset] & max
@@ -193,18 +201,17 @@ function decodeInt(buf, offset, prefixBits) {
 }
 
 // Decode QPACK encoded field section. Returns array of [name, value] tuples. We support a subset matching what we encode (no huffman, no dynamic table).
-function decodeHeaders(buf) {
+function decodeHeaders(buf: Buffer): HeaderEntry[] {
 	let off = 0
-	const required = decodeInt(buf, off, 8); off += required.length
-	const baseFirstByte = buf[off]
-	const baseSign = (baseFirstByte & 0x80) !== 0
-	const base = decodeInt(buf, off, 7); off += base.length
-	const headers = []
+	// Field-section prefix: Required Insert Count then Delta Base. Both are consumed for
+	// their length only — this decoder has no dynamic table, so there is nothing to resolve.
+	off += decodeInt(buf, off, 8).length
+	off += decodeInt(buf, off, 7).length
+	const headers: HeaderEntry[] = []
 	while (off < buf.length) {
 		const b = buf[off]
 		if ((b & 0xc0) === 0xc0) {
 			// Indexed Field Line: 1T______, T=1 static.
-			const t = (b & 0x40) !== 0
 			const idx = decodeInt(buf, off, 6); off += idx.length
 			const e = STATIC_TABLE[idx.value]
 			if (!e) break
@@ -250,45 +257,51 @@ function decodeHeaders(buf) {
 // Dynamic table (RFC 9204 §3.2). Maintained per-connection as a FIFO with a byte-size
 // budget. Each entry costs name.length + value.length + 32 bytes (RFC 7541 §4.1).
 class DynamicTable {
+	declare entries: HeaderEntry[]           // newest at end; indices grow over time (absolute)
+	declare totalInserted: number            // monotonic counter
+	declare capacity: number                 // bytes; set by Set Dynamic Table Capacity instruction
+	declare size: number                     // current byte usage
+
 	constructor() {
-		this.entries = []          // newest at end; indices grow over time (absolute)
-		this.totalInserted = 0     // monotonic counter
-		this.capacity = 0          // bytes; set by Set Dynamic Table Capacity instruction
-		this.size = 0              // current byte usage
+		this.entries = []
+		this.totalInserted = 0
+		this.capacity = 0
+		this.size = 0
 	}
 
 	// Look up by absolute (post-base) index — counted from the oldest still-resident entry.
-	getAbsolute(absIdx) {
+	getAbsolute(absIdx: number): HeaderEntry | null {
 		const oldestAbs = this.totalInserted - this.entries.length
 		const i = absIdx - oldestAbs
 		return this.entries[i] || null
 	}
 
 	// Look up by relative index (relative to base) — 0 = newest, growing into the past.
-	getRelative(base, idx) {
+	getRelative(base: number, idx: number): HeaderEntry | null {
 		const absIdx = base - idx - 1
 		return this.getAbsolute(absIdx)
 	}
 
-	getPostBase(base, idx) {
+	getPostBase(base: number, idx: number): HeaderEntry | null {
 		return this.getAbsolute(base + idx)
 	}
 
-	insert(name, value) {
-		const cost = name.length + value.length + 32
+	insert(name: string, value: string): void {
 		this.entries.push([name, value])
-		this.size += cost
+		this.size += name.length + value.length + 32
 		this.totalInserted++
-		while (this.size > this.capacity && this.entries.length > 0) {
-			const [n, v] = this.entries.shift()
-			this.size -= n.length + v.length + 32
-		}
+		this.evict()
 	}
 
-	setCapacity(cap) {
+	setCapacity(cap: number): void {
 		this.capacity = cap
+		this.evict()
+	}
+
+	// Drop oldest entries until the byte budget is respected again.
+	private evict(): void {
 		while (this.size > this.capacity && this.entries.length > 0) {
-			const [n, v] = this.entries.shift()
+			const [n, v] = this.entries.shift()!
 			this.size -= n.length + v.length + 32
 		}
 	}
@@ -296,7 +309,7 @@ class DynamicTable {
 
 // Decode a string literal at offset: 1-bit huffman flag + prefixBits length + bytes.
 // (prefixBits varies by context: 7 for "value" literal, 5 for encoder-stream name literal.)
-function decodeLiteralString(buf, off, prefixBits) {
+function decodeLiteralString(buf: Buffer, off: number, prefixBits: number): { value: string; length: number } {
 	const isHuff = (buf[off] & (1 << prefixBits)) !== 0
 	const len = decodeInt(buf, off, prefixBits)
 	off += len.length
@@ -305,12 +318,10 @@ function decodeLiteralString(buf, off, prefixBits) {
 	return { value: str, length: (len.length + len.value) }
 }
 
-// Parse incoming encoder-stream instructions and update the dynamic table.
-// Returns the new offset (so the caller can preserve any trailing partial instruction
-// for the next call). Per RFC 9204 §4.3.
 // Completeness-checked literal-string read for the encoder stream: returns null if the full string
 // is not present yet (so the caller waits for more bytes) instead of over-reading past the buffer.
-function readLiteralComplete(buf, off, prefixBits) {
+// (prefixBits varies by context, as in decodeLiteralString.)
+function readLiteralComplete(buf: Buffer, off: number, prefixBits: number): { value: string; length: number } | null {
 	if (off >= buf.length) return null
 	const isHuff = (buf[off] & (1 << prefixBits)) !== 0
 	const len = decodeInt(buf, off, prefixBits)
@@ -322,7 +333,10 @@ function readLiteralComplete(buf, off, prefixBits) {
 	return { value: str, length: len.length + len.value }
 }
 
-function parseEncoderInstructions(buf, table) {
+// Parse incoming encoder-stream instructions and update the dynamic table.
+// Returns the new offset (so the caller can preserve any trailing partial instruction
+// for the next call). Per RFC 9204 §4.3.
+function parseEncoderInstructions(buf: Buffer, table: DynamicTable): number {
 	let off = 0
 	while (off < buf.length) {
 		const start = off
@@ -343,7 +357,7 @@ function parseEncoderInstructions(buf, table) {
 				if (idx.truncated) return start
 				const val = readLiteralComplete(buf, off + idx.length, 7)
 				if (!val) return start  // whole instruction hasn't arrived — preserve it
-				let name
+				let name: string | undefined
 				if (t) { const e = STATIC_TABLE[idx.value]; if (e) name = e[0] }
 				else { const e = table.getRelative(table.totalInserted, idx.value); if (e) name = e[0] }
 				if (name != null) table.insert(name, val.value)
@@ -383,7 +397,7 @@ function parseEncoderInstructions(buf, table) {
 
 // Decode the field section prefix's encoded Required Insert Count back into the actual
 // insertion count required to decode the section (RFC 9204 §4.5.1.1).
-function decodeRequiredInsertCount(encodedRic, totalInserted, maxEntries) {
+function decodeRequiredInsertCount(encodedRic: number, totalInserted: number, maxEntries: number): number {
 	if (encodedRic === 0) return 0
 	const fullRange = 2 * maxEntries
 	const maxValue = totalInserted + maxEntries
@@ -398,7 +412,7 @@ function decodeRequiredInsertCount(encodedRic, totalInserted, maxEntries) {
 
 // Replace the static-only decodeHeaders with a dynamic-table-aware version.
 // Pass `table` (DynamicTable) and `maxEntries` (capacity / 32) to allow dynamic refs.
-function decodeHeadersWithTable(buf, table = null, maxEntries = 0) {
+function decodeHeadersWithTable(buf: Buffer, table: DynamicTable | null = null, maxEntries = 0): HeaderEntry[] {
 	let off = 0
 	const ricInfo = decodeInt(buf, off, 8); off += ricInfo.length
 	const baseFirstByte = buf[off]
@@ -408,14 +422,14 @@ function decodeHeadersWithTable(buf, table = null, maxEntries = 0) {
 	const ric = (table && maxEntries > 0) ? decodeRequiredInsertCount(ricInfo.value, table.totalInserted, maxEntries) : 0
 	const base = baseSign ? ric - baseInfo.value - 1 : ric + baseInfo.value
 
-	const headers = []
+	const headers: HeaderEntry[] = []
 	while (off < buf.length) {
 		const b = buf[off]
 		// Indexed Field Line: 1Txxxxxx — top bit is the type tag, bit 0x40 is T.
 		if ((b & 0x80) === 0x80) {
 			const t = (b & 0x40) !== 0
 			const idx = decodeInt(buf, off, 6); off += idx.length
-			let e
+			let e: HeaderEntry | null | undefined
 			if (t) e = STATIC_TABLE[idx.value]
 			else if (table) e = table.getRelative(base, idx.value)
 			if (e) headers.push([e[0], e[1]])
@@ -434,7 +448,7 @@ function decodeHeadersWithTable(buf, table = null, maxEntries = 0) {
 		if ((b & 0xc0) === 0x40) {
 			const t = (b & 0x10) !== 0
 			const idx = decodeInt(buf, off, 4); off += idx.length
-			let nameRef
+			let nameRef: string | undefined
 			if (t) nameRef = STATIC_TABLE[idx.value]?.[0]
 			else nameRef = table?.getRelative(base, idx.value)?.[0]
 			const valInfo = decodeLiteralString(buf, off, 7); off += valInfo.length

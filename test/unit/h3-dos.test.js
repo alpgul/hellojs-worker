@@ -6,7 +6,7 @@ import * as crypto from 'node:crypto'
 import test from 'node:test'
 
 import { QuicConnection, QuicStream } from '../../lib/h3/connection.js'
-import * as qpack from '../../lib/h3/qpack.js'
+import * as qpack from '../../lib/h3/qpack.ts'
 
 test('_onDatagram drops malformed/garbage datagrams without throwing', () => {
 	const c = new QuicConnection('127.0.0.1', 443)

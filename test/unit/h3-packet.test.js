@@ -5,7 +5,7 @@
 import assert from 'node:assert'
 import test from 'node:test'
 
-import * as pkt from '../../lib/h3/packet.js'
+import * as pkt from '../../lib/h3/packet.ts'
 
 const CK = { key: Buffer.alloc(16, 1), iv: Buffer.alloc(12, 2), hp: Buffer.alloc(16, 3) }
 const DST = Buffer.alloc(8, 9)
