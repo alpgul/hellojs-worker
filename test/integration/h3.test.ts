@@ -8,8 +8,9 @@ import { expect, it } from 'vitest'
 
 import { QuicConnection } from '../../lib/h3/connection.ts'
 import { H3Client } from '../../lib/h3/h3.ts'
+import { QUIC_HOST } from '../helpers/hosts.ts'
 
-const HOST = process.env.H3_HOST ?? 'cloudflare-quic.com'
+const HOST = process.env.H3_HOST ?? QUIC_HOST
 const PATH = process.env.H3_PATH ?? '/'
 
 it('handshakes over QUIC and completes an h3 GET', async () => {

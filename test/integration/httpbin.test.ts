@@ -1,6 +1,6 @@
 // Basic httpbin usage — exercises common request patterns end-to-end against a live server.
 //
-// Target: httpbingo.org (modern Go-based httpbin, TLS 1.3 + h2 + zstd).
+// Target: the shared HTTP echo host (modern Go-based httpbin, TLS 1.3 + h2 + zstd).
 // httpbin.org is TLS 1.2 only and we don't support that. Same endpoints, same response shape.
 //
 // Live network, so this lives in the `network` project and never runs under `npm test`.
@@ -8,8 +8,9 @@
 import { expect, it } from 'vitest'
 
 import request from '../../index.ts'
+import { HTTP_HOST } from '../helpers/hosts.ts'
 
-const BASE = 'https://httpbingo.org'
+const BASE = `https://${HTTP_HOST}`
 
 // httpbin answers every endpoint with its own echo document; this is the subset the checks read.
 interface HttpbinEcho {

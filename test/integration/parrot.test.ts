@@ -9,6 +9,7 @@ import { beforeAll, describe, expect, it } from 'vitest'
 
 import request from '../../index.ts'
 import * as profiles from '../../lib/profiles/index.ts'
+import { PEET_HOST } from '../helpers/hosts.ts'
 
 import type { PeetJson } from '../../lib/profiles/from-peet.ts'
 
@@ -26,21 +27,28 @@ let expected: Record<string, string | undefined> = {}
 let got: Record<string, string | undefined> = {}
 
 beforeAll(async () => {
+	// This file is the only one that needs peet.ws (peetprint exists only there), and the host
+	// blackholes bursts of fresh connections. Two attempts of backoff keep a throttle from
+	// reading as a fingerprint regression; a real one fails every attempt.
+	const retry = { limit: 2, baseDelayMs: 5_000 }
+
 	// 1. Capture a fresh peet.ws fingerprint using the DEFAULT profile.
 	const baseline = await request<PeetJson>({
-		url: 'https://tls.peet.ws/api/all',
+		url: `https://${PEET_HOST}/api/all`,
 		json: true,
 		resolveWithFullResponse: true,
+		retry,
 	})
 	expected = hashes(baseline.body)
 
 	// 2. Build a parrot profile from the same JSON, and re-request with it.
 	profiles.registerFromPeet('peet-parrot', baseline.body)
 	const after = await request<PeetJson>({
-		url: 'https://tls.peet.ws/api/all',
+		url: `https://${PEET_HOST}/api/all`,
 		json: true,
 		profile: 'peet-parrot',
 		resolveWithFullResponse: true,
+		retry,
 	})
 	got = hashes(after.body)
 })

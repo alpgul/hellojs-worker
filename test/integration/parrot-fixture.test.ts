@@ -20,6 +20,7 @@ import { beforeAll, describe, expect, it } from 'vitest'
 
 import request from '../../index.ts'
 import * as profiles from '../../lib/profiles/index.ts'
+import { PEET_HOST } from '../helpers/hosts.ts'
 
 import type { PeetJson } from '../../lib/profiles/from-peet.ts'
 
@@ -68,7 +69,7 @@ beforeAll(async () => {
 	const profile = profiles.registerFromPeet('parrot-fixture', fixture)
 
 	live = await request<PeetJson>({
-		url: 'https://tls.peet.ws/api/all',
+		url: `https://${PEET_HOST}/api/all`,
 		json: true,
 		profile: 'parrot-fixture',
 		headers: profile.headers ? { ...profile.headers } : undefined,

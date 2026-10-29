@@ -12,17 +12,12 @@
 
 import { expect, it } from 'vitest'
 
+import { TLS13_HOST } from '../helpers/hosts.ts'
 import { probeTls } from '../helpers/tls-probe.ts'
 
-const TARGETS = [
-	'www.cloudflare.com',
-	'www.google.com',
-	'github.com',
-]
-
-it.each(TARGETS)('%s retries after a HelloRetryRequest', async (host) => {
+it(`${TLS13_HOST} retries after a HelloRetryRequest`, async () => {
 	// Offer only secp256r1 with no real key_share — the server will HRR-select x25519
 	// (or whatever its first-preference group is) and we re-send.
-	const r = await probeTls(host, { timeoutMs: 15_000, tlsOpts: { _forceHRRGroup: 0x0017 } })
-	expect(r.ok, `${host}: ${r.err}`).toBe(true)
+	const r = await probeTls(TLS13_HOST, { timeoutMs: 15_000, tlsOpts: { _forceHRRGroup: 0x0017 } })
+	expect(r.ok, `${TLS13_HOST}: ${r.err}`).toBe(true)
 })

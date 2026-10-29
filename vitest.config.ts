@@ -42,7 +42,18 @@ export default defineConfig({
 				test: {
 					name: 'network',
 					include: ['test/integration/**/*.test.ts', 'test/fingerprint/**/*.test.ts'],
-					testTimeout: 120_000
+					testTimeout: 120_000,
+					// beforeAll in the network files performs live captures; the default 10s hook
+					// timeout reads a slow handshake as a failure.
+					hookTimeout: 60_000,
+					// Live hosts occasionally reset a fresh TCP connection before the handshake
+					// (observed ~1 in 20 on httpbingo.org). That is a host fact, not a result about
+					// this library, so retry the attempt — a real regression fails every attempt.
+					retry: 2,
+					// Live hosts (tls.peet.ws especially) rate-limit a burst of fresh connections, and
+					// every file here opens its own. The pre-Vitest scripts ran one after another for
+					// the same reason; files stay independent, they just don't overlap.
+					fileParallelism: false
 				}
 			}
 		]

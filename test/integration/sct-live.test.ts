@@ -6,18 +6,19 @@ import * as tls from 'node:tls'
 import { expect, it } from 'vitest'
 
 import { findSctExtension, parseSctList } from '../../lib/tls/sct.ts'
+import { TLS13_HOST } from '../helpers/hosts.ts'
 
 import type * as crypto from 'node:crypto'
 
 it('findSctExtension on a real-world cert returns the extension bytes', async () => {
-	// Fetch the cert from a real CT-enforced site (cloudflare.com) by opening a TLS socket.
+	// Fetch the cert from a real CT-enforced site by opening a TLS socket.
 	// rejectUnauthorized only because the assertion is about the SCT extension inside the
 	// cert, not about the chain; the socket is destroyed as soon as the cert is read.
 	const peer = await new Promise<crypto.X509Certificate>((resolve, reject) => {
-		const sock = tls.connect({ host: 'www.cloudflare.com', port: 443, servername: 'www.cloudflare.com', rejectUnauthorized: false }, () => {
+		const sock = tls.connect({ host: TLS13_HOST, port: 443, servername: TLS13_HOST, rejectUnauthorized: false }, () => {
 			const cert = sock.getPeerX509Certificate()
 			sock.destroy()
-			if (!cert) reject(new Error('no peer certificate from www.cloudflare.com'))
+			if (!cert) reject(new Error(`no peer certificate from ${TLS13_HOST}`))
 			else resolve(cert)
 		})
 		sock.on('error', reject)

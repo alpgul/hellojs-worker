@@ -390,14 +390,17 @@ The profile defines:
 npm run test:fingerprint
 ```
 
-Asserts JA4, Akamai HTTP/2 fingerprint, cipher list, signature_algorithms,
-supported_groups, supported_versions, extension set, HTTP/2 HEADERS flags +
-header order against `test/fixtures/chrome147-peet.json` (a real Chrome 147
-capture on macOS via [tls.peet.ws](https://tls.peet.ws)).
+Asserts JA4, cipher list, signature_algorithms, supported_groups,
+supported_versions and the extension set against
+`test/fixtures/chrome147-peet.json` (a real Chrome 147 capture on macOS via
+[tls.peet.ws](https://tls.peet.ws)), using the one live reporter that parses our
+ClientHello. The Akamai HTTP/2 fingerprint, HEADERS flags and header order are
+asserted offline against the same fixture by
+`test/unit/h2-chrome-headers.test.ts`.
 
-Expected output: `11 passed (11)`. The suite reaches `tls.peet.ws` live, so it
-can go red when that host is unreachable or rate-limiting — re-run before
-treating a failure as a fingerprint regression.
+Expected output: `8 passed (8)`. The suite reaches the reporter live, so it can
+go red when that host is unreachable or rate-limiting — re-run before treating a
+failure as a fingerprint regression.
 
 ---
 
@@ -720,7 +723,7 @@ which boots a worker from `wrangler.jsonc` and gives each test file the real
 |---|---|---|---|
 | `workers` | `test/unit/**/*.test.ts` | workerd (`cloudflare-pool`) | the library itself: handshake crypto, HKDF, HPACK/Huffman, frame codecs, parsers, profiles, fingerprint shaping |
 | `node` | `test/node/**/*.test.ts` | Node | the same lib, plus what workerd cannot host: `node:fs` fixtures, `openssl` subprocesses, loopback servers, `node:dgram`, a real trust store |
-| `network` | `test/integration/**`, `test/fingerprint/**` | Node, live internet | round-trips against public servers and the Chrome 147 fingerprint regression |
+| `network` | `test/integration/**`, `test/fingerprint/**` | Node, live internet | round-trips against public servers and the Chrome 147 fingerprint regression, over a minimal host set (`test/helpers/hosts.ts`) |
 
 ```bash
 npm test                    # workers + node — offline, the default gate
