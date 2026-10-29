@@ -59,15 +59,27 @@ class Connection {
 	}
 }
 
-function createH3(host: string, port: number): Promise<Connection> {
+function createH3(host: string, port: number, timeouts: PerPhaseTimeouts | null = null): Promise<Connection> {
 	return new Promise((resolve, reject) => {
 		const qc = new QuicConnection(host, port)
 		const conn = new Connection(null)
 		conn.quicConn = qc
 		let settled = false
+		let handshakeTimer: ReturnType<typeof setTimeout> | null = null
+		const clearTimer = () => {
+			if (handshakeTimer) { clearTimeout(handshakeTimer); handshakeTimer = null }
+		}
+		const fail = (err: Error) => {
+			if (settled) return
+			settled = true
+			clearTimer()
+			conn.close('error')
+			reject(err)
+		}
 		qc.on('ready', () => {
 			if (settled) return
 			settled = true
+			clearTimer()
 			conn.alpn = 'h3'
 			conn.h3Client = new H3Client(qc)
 			// Swallow post-handshake errors so a mid-request QUIC failure closes the
@@ -75,8 +87,18 @@ function createH3(host: string, port: number): Promise<Connection> {
 			qc.on('error', () => conn.close('error'))
 			resolve(conn)
 		})
-		qc.on('error', (e: Error) => { if (!settled) { settled = true; reject(e) } })
-		qc.connect().catch((e: Error) => { if (!settled) { settled = true; reject(e) } })
+		qc.on('error', (e: Error) => fail(e))
+		qc.connect().catch((e: Error) => fail(e))
+
+		// QUIC has no TCP connect phase to bound, so the caller's `connect` budget covers the
+		// whole handshake: Initial packets retransmit until the idle timeout (~55s) against a
+		// server that ignores UDP, and `h3: true` would wait that long before falling back.
+		if (timeouts?.connect) {
+			handshakeTimer = setTimeout(() => {
+				fail(new HellojsError(`QUIC handshake timed out after ${timeouts.connect}ms`, 'ETIMEDOUT'))
+			}, timeouts.connect)
+			handshakeTimer.unref?.()
+		}
 	})
 }
 
@@ -151,7 +173,7 @@ function createTLS(
 }
 
 function connect({ host, port = 443, profile, proxy, transport = 'tcp', verifyTLS = true, timeouts = null }: ConnectOptions): Promise<Connection> {
-	if (transport === 'quic') return createH3(host, port)
+	if (transport === 'quic') return createH3(host, port, timeouts)
 	return createTLS(host, port, profile, proxy, { verifyTLS, timeouts })
 }
 
