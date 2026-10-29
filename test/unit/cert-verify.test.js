@@ -12,7 +12,7 @@ import * as path from 'node:path'
 import test, { after } from 'node:test'
 import * as zlib from 'node:zlib'
 
-import { validateChain, trustedRoots, verifyCertVerify, parseCertificateList } from '../../lib/tls/cert-validate.js'
+import { validateChain, trustedRoots, verifyCertVerify, parseCertificateList } from '../../lib/tls/cert-validate.ts'
 
 const D = fs.mkdtempSync(path.join(os.tmpdir(), 'hjcv-'))
 const sh = (cmd) => execSync(cmd, { cwd: D, stdio: ['ignore', 'ignore', 'ignore'] })

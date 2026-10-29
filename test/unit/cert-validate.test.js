@@ -8,7 +8,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import test from 'node:test'
 
-import { validateChain, hostnameMatches, trustedRoots } from '../../lib/tls/cert-validate.js'
+import { validateChain, hostnameMatches, trustedRoots } from '../../lib/tls/cert-validate.ts'
 
 function genSelfSigned(cn, san = `DNS:${cn}`, validity = 1) {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hjcert-'))

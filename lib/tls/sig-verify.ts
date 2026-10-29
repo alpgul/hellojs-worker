@@ -22,11 +22,28 @@
 
 import * as crypto from 'node:crypto'
 
-const DIGEST_LEN = { sha1: 20, sha256: 32, sha384: 48, sha512: 64 }
+import type { KeyObject, X509Certificate } from 'node:crypto'
+
+// Padding/hash parameters for one detached signature.
+export interface SignatureSpec {
+	type: 'rsa-pkcs1' | 'rsa-pss' | 'ecdsa' | 'eddsa'
+	hash?: string | null
+	saltLength?: number
+}
+
+// Anything a call site can hand us: PEM text, a certificate, DER, or a key object.
+export type KeyMaterial = string | Uint8Array | X509Certificate | KeyObject | null | undefined
+
+interface ResolvedKey {
+	pem: string
+	keyType: string | null
+}
+
+const DIGEST_LEN: Record<string, number> = { sha1: 20, sha256: 32, sha384: 48, sha512: 64 }
 
 // Scheme -> the asymmetricKeyType a key must have for it. Bound explicitly: honoring an rsa_pss_* code
 // point against an EC key is algorithm confusion, not a signature that happened not to match.
-const KEY_TYPES = {
+const KEY_TYPES: Record<SignatureSpec['type'], string[]> = {
 	'rsa-pkcs1': ['rsa'],
 	'rsa-pss': ['rsa'],
 	ecdsa: ['ec'],
@@ -34,14 +51,14 @@ const KEY_TYPES = {
 }
 
 // 'SHA-256' (OID tables) and 'sha256' (TLS naming) both mean createVerify's 'sha256'.
-function normHash(hash) {
+function normHash(hash?: string | null): string | null {
 	return hash ? String(hash).toLowerCase().replace(/^sha-?/, 'sha') : null
 }
 
 // SPKI DER -> PEM text. Pure byte formatting, so we never depend on parsing DER back into a key.
 // The body must not keep the wrapping regex's trailing newline: a blank line before the trailer makes
 // OpenSSL's decoder answer "unsupported" instead of loading the key.
-function derToSpkiPem(der) {
+function derToSpkiPem(der: Uint8Array | string): string {
 	const b64 = Buffer.from(der).toString('base64').replaceAll(/(.{1,64})/g, '$1\n').trimEnd()
 	return `-----BEGIN PUBLIC KEY-----\n${b64}\n-----END PUBLIC KEY-----\n`
 }
@@ -50,44 +67,55 @@ function derToSpkiPem(der) {
 // rejects a KeyObject there; the PEM text is what gets handed over). Needed because a bare SPKI carries no
 // type we could otherwise see, and both runtimes happily verify an ECDSA signature under an RSA spec —
 // createVerify ignores RSA padding on an EC key instead of rejecting the combination.
-function keyTypeFromPem(pem) {
+function keyTypeFromPem(pem: string): string | null {
 	try { return crypto.createPublicKey({ key: pem, format: 'pem' }).asymmetricKeyType || null } catch { return null }
+}
+
+function keyFromCert(cert: X509Certificate): ResolvedKey {
+	const pub = cert.publicKey
+	return { pem: String(pub.export({ type: 'spki', format: 'pem' })), keyType: pub.asymmetricKeyType || null }
 }
 
 // Resolve any key-shaped input to the PEM text workerd's verify() wants, plus its key type. A buffer is
 // tried as a certificate first (node:crypto parses it) and only treated as a bare SPKI otherwise, so
 // callers can hand us whatever they have; either way the type comes back, so the scheme binding below
 // cannot be skipped by passing a different key shape.
-function resolveKey(key) {
+function resolveKey(key: KeyMaterial): ResolvedKey {
 	if (typeof key === 'string') return { pem: key, keyType: keyTypeFromPem(key) }
-	let cert
-	if (key instanceof crypto.X509Certificate) cert = key
-	else if (Buffer.isBuffer(key) || key instanceof Uint8Array) {
+	if (key instanceof crypto.X509Certificate) return keyFromCert(key)
+	let cert: X509Certificate | null
+	if (Buffer.isBuffer(key) || key instanceof Uint8Array) {
 		try { cert = new crypto.X509Certificate(Buffer.from(key)) } catch { cert = null }
 		if (cert === null) { const pem = derToSpkiPem(key); return { pem, keyType: keyTypeFromPem(pem) } }
-	} else if (key && typeof key.export === 'function') {
-		return { pem: String(key.export({ type: 'spki', format: 'pem' })), keyType: key.asymmetricKeyType || null }
-	} else {
-		throw new Error('unsupported public key material')
+		return keyFromCert(cert)
 	}
-	const pub = cert.publicKey
-	return { pem: String(pub.export({ type: 'spki', format: 'pem' })), keyType: pub.asymmetricKeyType || null }
+	const asKey = key as KeyObject
+	if (asKey && typeof asKey.export === 'function') {
+		return { pem: String(asKey.export({ type: 'spki', format: 'pem' })), keyType: asKey.asymmetricKeyType || null }
+	}
+	throw new Error('unsupported public key material')
 }
 
 // Verify `signature` over `content`. spec = { type, hash, saltLength? }.
 // Resolves to a boolean synchronously and never throws: an unknown scheme, a key-type mismatch, an
 // unparseable key or a bad signature all answer false, which is what every handshake call site expects.
-function verifySignature(spec, key, content, signature) {
-	const allowed = spec && KEY_TYPES[spec.type]
+function verifySignature(
+	spec: SignatureSpec | null | undefined,
+	key: KeyMaterial,
+	content: Uint8Array,
+	signature: Uint8Array,
+): boolean {
+	if (!spec) return false
+	const allowed = KEY_TYPES[spec.type]
 	if (!allowed) return false
-	let pem, actual
+	let pem: string, actual: string | null
 	try { ({ pem, keyType: actual } = resolveKey(key)) } catch { return false }
 	if (actual && !allowed.includes(actual)) return false
 	try {
 		if (spec.type === 'eddsa') return crypto.verify(null, content, pem, signature) === true
 		const hash = normHash(spec.hash)
-		if (!DIGEST_LEN[hash]) return false
-		const options = { key: pem }
+		if (!hash || !DIGEST_LEN[hash]) return false
+		const options: crypto.VerifyPublicKeyInput = { key: pem }
 		if (spec.type === 'rsa-pss') {
 			options.padding = crypto.constants.RSA_PKCS1_PSS_PADDING
 			// TLS 1.3 §4.2.3 fixes the salt at the digest length; callers may override for other padding rules.
@@ -102,7 +130,7 @@ function verifySignature(spec, key, content, signature) {
 // RFC 5280 §4 chain link: does `parent`'s key have a signature over `child`? Padding and curve come
 // from the child's own signatureAlgorithm, so BoringSSL/OpenSSL picks them — nothing to parse here.
 // Accepts X509Certificate instances or DER. False on any parse or verify failure.
-function verifyCertSignature(child, parent) {
+function verifyCertSignature(child: Uint8Array | X509Certificate, parent: Uint8Array | X509Certificate): boolean {
 	try {
 		const c = child instanceof crypto.X509Certificate ? child : new crypto.X509Certificate(child)
 		const p = parent instanceof crypto.X509Certificate ? parent : new crypto.X509Certificate(parent)

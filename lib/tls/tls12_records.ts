@@ -18,7 +18,37 @@
 
 import * as crypto from 'node:crypto'
 
-function recordHeader(type, length) {
+import type { CipherGCMTypes } from 'node:crypto'
+
+// A negotiated TLS 1.2 suite, as listed in lib/tls/tls12.ts.
+export interface CipherSuite12 {
+	name: string
+	aead: string | null
+	mac: string | null
+	keyLen: number
+	ivLen: number
+	macLen: number
+}
+
+// AEAD ciphers, described by the five methods the record layer uses. node types chacha's
+// setAAD as requiring a plaintextLength hint that the runtime treats as optional, so both
+// suites share this shape instead of two overload resolutions.
+interface AeadCipher {
+	setAAD(aad: Uint8Array): unknown
+	setAuthTag(tag: Uint8Array): unknown
+	getAuthTag(): Buffer
+	update(data: Uint8Array): Buffer
+	final(): Buffer
+}
+
+// One direction's keys, split out of the PRF key block. `mac` is null for AEAD suites.
+export interface RecordKeys {
+	key: Buffer
+	iv: Buffer
+	mac: Buffer | null
+}
+
+function recordHeader(type: number, length: number): Buffer {
 	const h = Buffer.alloc(5)
 	h[0] = type
 	h[1] = 0x03; h[2] = 0x03
@@ -26,14 +56,14 @@ function recordHeader(type, length) {
 	return h
 }
 
-function seqBuf(seq) {
+function seqBuf(seq: number): Buffer {
 	const b = Buffer.alloc(8)
 	b.writeUInt32BE(Math.floor(seq / 0x100000000), 0)
 	b.writeUInt32BE(seq >>> 0, 4)
 	return b
 }
 
-function aeadAAD(seq, type, plaintextLen) {
+function aeadAAD(seq: number, type: number, plaintextLen: number): Buffer {
 	const aad = Buffer.alloc(13)
 	seqBuf(seq).copy(aad, 0)
 	aad[8] = type
@@ -43,7 +73,7 @@ function aeadAAD(seq, type, plaintextLen) {
 }
 
 // Build a TLS 1.2 ciphertext record encrypting `plaintext` under AES-GCM.
-function encryptGcm(aead, key, implicitIv, seq, contentType, plaintext) {
+function encryptGcm(aead: CipherGCMTypes, key: Buffer, implicitIv: Buffer, seq: number, contentType: number, plaintext: Buffer): Buffer {
 	// explicit_nonce: 8 bytes. Easiest invariant: use the sequence number (big-endian)
 	// so it's unique per record under this key. Matches what mbedtls/openssl do.
 	const explicitNonce = seqBuf(seq)
@@ -57,7 +87,7 @@ function encryptGcm(aead, key, implicitIv, seq, contentType, plaintext) {
 	return Buffer.concat([recordHeader(contentType, fragment.length), fragment])
 }
 
-function decryptGcm(aead, key, implicitIv, seq, contentType, ciphertextRecordPayload) {
+function decryptGcm(aead: CipherGCMTypes, key: Buffer, implicitIv: Buffer, seq: number, contentType: number, ciphertextRecordPayload: Buffer): Buffer {
 	if (ciphertextRecordPayload.length < 8 + 16) throw new Error('TLS 1.2 GCM record too short')
 	const explicitNonce = ciphertextRecordPayload.subarray(0, 8)
 	const nonce = Buffer.concat([implicitIv, explicitNonce])
@@ -71,12 +101,12 @@ function decryptGcm(aead, key, implicitIv, seq, contentType, ciphertextRecordPay
 }
 
 // ChaCha20-Poly1305: no explicit nonce. Nonce = iv XOR (zero(4) || seq_be64).
-function encryptChaCha(key, implicitIv12, seq, contentType, plaintext) {
+function encryptChaCha(key: Buffer, implicitIv12: Buffer, seq: number, contentType: number, plaintext: Buffer): Buffer {
 	const nonce = Buffer.from(implicitIv12)
 	const sBuf = seqBuf(seq)
 	for (let i = 0; i < 8; i++) nonce[4 + i] ^= sBuf[i]
 	const aad = aeadAAD(seq, contentType, plaintext.length)
-	const c = crypto.createCipheriv('chacha20-poly1305', key, nonce, { authTagLength: 16 })
+	const c = crypto.createCipheriv('chacha20-poly1305', key, nonce, { authTagLength: 16 }) as unknown as AeadCipher
 	c.setAAD(aad)
 	const ct = Buffer.concat([c.update(plaintext), c.final()])
 	const tag = c.getAuthTag()
@@ -84,7 +114,7 @@ function encryptChaCha(key, implicitIv12, seq, contentType, plaintext) {
 	return Buffer.concat([recordHeader(contentType, fragment.length), fragment])
 }
 
-function decryptChaCha(key, implicitIv12, seq, contentType, ciphertextRecordPayload) {
+function decryptChaCha(key: Buffer, implicitIv12: Buffer, seq: number, contentType: number, ciphertextRecordPayload: Buffer): Buffer {
 	if (ciphertextRecordPayload.length < 16) throw new Error('TLS 1.2 ChaCha20 record too short')
 	const nonce = Buffer.from(implicitIv12)
 	const sBuf = seqBuf(seq)
@@ -92,7 +122,7 @@ function decryptChaCha(key, implicitIv12, seq, contentType, ciphertextRecordPayl
 	const tag = ciphertextRecordPayload.subarray(ciphertextRecordPayload.length - 16)
 	const ct = ciphertextRecordPayload.subarray(0, ciphertextRecordPayload.length - 16)
 	const aad = aeadAAD(seq, contentType, ct.length)
-	const d = crypto.createDecipheriv('chacha20-poly1305', key, nonce, { authTagLength: 16 })
+	const d = crypto.createDecipheriv('chacha20-poly1305', key, nonce, { authTagLength: 16 }) as unknown as AeadCipher
 	d.setAAD(aad)
 	d.setAuthTag(tag)
 	return Buffer.concat([d.update(ct), d.final()])
@@ -103,9 +133,7 @@ function decryptChaCha(key, implicitIv12, seq, contentType, ciphertextRecordPayl
 //   MAC = HMAC(macKey, seq(8) || type(1) || version(2) || content_length(2) || content)
 //   padding: padLen bytes all equal to padLen, then 1 byte = padLen. Total encrypted
 //   region is a multiple of blocksize.
-function encryptCbc(cipher, encKey, macKey, seq, contentType, plaintext) {
-	const macAlg = cipher.mac
-	const macLen = cipher.macLen
+function encryptCbc(macAlg: string, macLen: number, encKey: Buffer, macKey: Buffer, seq: number, contentType: number, plaintext: Buffer): Buffer {
 	const blockSize = 16
 
 	// MAC over seq + type + version + plaintext_length + plaintext
@@ -135,7 +163,7 @@ function encryptCbc(cipher, encKey, macKey, seq, contentType, plaintext) {
 	return Buffer.concat([recordHeader(contentType, fragment.length), fragment])
 }
 
-function decryptCbc(cipher, encKey, macKey, seq, contentType, payload) {
+function decryptCbc(macAlg: string, macLen: number, encKey: Buffer, macKey: Buffer, seq: number, contentType: number, payload: Buffer): Buffer {
 	const blockSize = 16
 	const aesAlg = encKey.length === 16 ? 'aes-128-cbc' : 'aes-256-cbc'
 	const iv = payload.subarray(0, blockSize)
@@ -145,7 +173,7 @@ function decryptCbc(cipher, encKey, macKey, seq, contentType, payload) {
 	const pt = Buffer.concat([d.update(ct), d.final()])
 
 	// Strip padding
-	const padLen = pt.at(-1)
+	const padLen = pt[pt.length - 1]
 	if (padLen + 1 > pt.length) throw new Error('CBC: invalid padding')
 	for (let i = pt.length - 1 - padLen; i < pt.length; i++) {
 		if (pt[i] !== padLen) throw new Error('CBC: bad padding byte')
@@ -153,7 +181,6 @@ function decryptCbc(cipher, encKey, macKey, seq, contentType, payload) {
 	const noPad = pt.subarray(0, pt.length - padLen - 1)
 
 	// Strip MAC and verify
-	const macLen = cipher.macLen
 	const content = noPad.subarray(0, noPad.length - macLen)
 	const mac = noPad.subarray(noPad.length - macLen)
 
@@ -163,13 +190,13 @@ function decryptCbc(cipher, encKey, macKey, seq, contentType, payload) {
 	macInput[9] = 0x03; macInput[10] = 0x03
 	macInput.writeUInt16BE(content.length, 11)
 	content.copy(macInput, 13)
-	const expected = crypto.createHmac(cipher.mac, macKey).update(macInput).digest()
+	const expected = crypto.createHmac(macAlg, macKey).update(macInput).digest()
 	if (!crypto.timingSafeEqual(mac, expected)) throw new Error('CBC: MAC mismatch')
 	return content
 }
 
 // Dispatcher: pick the right encrypt/decrypt based on cipher.aead.
-function encryptRecord(cipher, keys, seq, contentType, plaintext) {
+function encryptRecord(cipher: CipherSuite12, keys: RecordKeys, seq: number, contentType: number, plaintext: Buffer): Buffer {
 	if (cipher.aead === 'aes-128-gcm' || cipher.aead === 'aes-256-gcm') {
 		return encryptGcm(cipher.aead, keys.key, keys.iv, seq, contentType, plaintext)
 	}
@@ -177,12 +204,13 @@ function encryptRecord(cipher, keys, seq, contentType, plaintext) {
 		return encryptChaCha(keys.key, keys.iv, seq, contentType, plaintext)
 	}
 	if (cipher.mac) {   // CBC
-		return encryptCbc(cipher, keys.key, keys.mac, seq, contentType, plaintext)
+		if (!keys.mac) throw new Error('CBC suite negotiated without a MAC key')
+		return encryptCbc(cipher.mac, cipher.macLen, keys.key, keys.mac, seq, contentType, plaintext)
 	}
 	throw new Error(`encryptRecord: unsupported cipher ${cipher.name}`)
 }
 
-function decryptRecord(cipher, keys, seq, contentType, payload) {
+function decryptRecord(cipher: CipherSuite12, keys: RecordKeys, seq: number, contentType: number, payload: Buffer): Buffer {
 	if (cipher.aead === 'aes-128-gcm' || cipher.aead === 'aes-256-gcm') {
 		return decryptGcm(cipher.aead, keys.key, keys.iv, seq, contentType, payload)
 	}
@@ -190,7 +218,8 @@ function decryptRecord(cipher, keys, seq, contentType, payload) {
 		return decryptChaCha(keys.key, keys.iv, seq, contentType, payload)
 	}
 	if (cipher.mac) {
-		return decryptCbc(cipher, keys.key, keys.mac, seq, contentType, payload)
+		if (!keys.mac) throw new Error('CBC suite negotiated without a MAC key')
+		return decryptCbc(cipher.mac, cipher.macLen, keys.key, keys.mac, seq, contentType, payload)
 	}
 	throw new Error(`decryptRecord: unsupported cipher ${cipher.name}`)
 }

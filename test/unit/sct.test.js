@@ -9,7 +9,7 @@ import * as path from 'node:path'
 import test from 'node:test'
 import * as tls from 'node:tls'
 
-import { extractScts, parseSctList, findSctExtension } from '../../lib/tls/sct.js'
+import { extractScts, parseSctList, findSctExtension } from '../../lib/tls/sct.ts'
 
 test('extractScts on a cert with no SCT extension returns []', () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sct-'))

@@ -4,7 +4,7 @@ import assert from 'node:assert'
 import * as crypto from 'node:crypto'
 import test from 'node:test'
 
-import * as records from '../../lib/tls/tls12_records.js'
+import * as records from '../../lib/tls/tls12_records.ts'
 
 test('AEAD AAD layout: seq(8) + type(1) + version(2) + length(2) = 13 bytes', () => {
 	const aad = records.aeadAAD(0x1234, 0x16, 100)

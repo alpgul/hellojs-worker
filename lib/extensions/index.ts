@@ -1,5 +1,20 @@
 import * as crypto from 'node:crypto'
 
+export interface GreaseOptions {
+	useGrease?: boolean
+}
+
+export interface StatusRequestOptions {
+	certificateStatusType?: number
+	responderIdListLength?: number
+	requestExtensionsLength?: number
+}
+
+export interface SignatureAlgorithmsCertOptions {
+	raw?: Buffer
+	sigalgs?: number[]
+}
+
 // Per RFC 8701, GREASE values are 0x0A0A, 0x1A1A, ..., 0xFA FA. Pick a random valid byte (the same byte is used twice to form the 16-bit value).
 const GREASE_HIGH_NIBBLES = [0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0xa, 0xb, 0xc, 0xd, 0xe, 0xf]
 const pickGreaseByte = () => (GREASE_HIGH_NIBBLES[crypto.randomBytes(1)[0] & 0x0f] << 4) | 0x0a
@@ -17,7 +32,7 @@ const pickGreaseTriple = () => ({
 
 // CreateCompressCertificateExtension(algorithms?) — array of u16 algorithm codes
 // (RFC 8879). Defaults to [brotli] which is what Chrome 147 sends.
-const CreateCompressCertificateExtension = (algorithms = null) => {
+const CreateCompressCertificateExtension = (algorithms: number[] | null = null) => {
 	const codes = algorithms && algorithms.length ? algorithms : [0x0002]   // brotli
 	const algBuf = Buffer.alloc(codes.length * 2)
 	codes.forEach((c, i) => algBuf.writeUInt16BE(c, i * 2))
@@ -27,7 +42,7 @@ const CreateCompressCertificateExtension = (algorithms = null) => {
 	return Buffer.concat([compress_certificate, extLen, listLen, algBuf])
 }
 
-const CreateGREASEExtension = (greaseValue) => {
+const CreateGREASEExtension = (greaseValue: number) => {
 	const grease = Buffer.from([greaseValue, greaseValue])
 	const greaseLength = Buffer.alloc(2)
 
@@ -35,7 +50,7 @@ const CreateGREASEExtension = (greaseValue) => {
 	return greaseExtension
 }
 
-const CreateSNIExtension = (hostname) => {
+const CreateSNIExtension = (hostname: string) => {
 	const server_name_indication = Buffer.from([0x00, 0x00])
 	const server_name_type = Buffer.from([0x00])
 
@@ -74,7 +89,7 @@ const CreateSNIExtension = (hostname) => {
 	return Buffer.concat(SNI)
 }
 
-const CreateALPNExtension = (protocols = ['h2', 'http/1.1']) => {
+const CreateALPNExtension = (protocols: string[] | string = ['h2', 'http/1.1']) => {
 	if (!Array.isArray(protocols)) protocols = [protocols]
 	if (protocols.length === 0) throw new Error('ALPN: protocols array cannot be empty')
 	for (const p of protocols) {
@@ -117,7 +132,7 @@ const CreateALPNExtension = (protocols = ['h2', 'http/1.1']) => {
 // CreateSupportedGroupsExtension(greaseByte, supportedGroups?, opts?)
 // supportedGroups is an array of u16 group codes (no GREASE). Defaults to Chrome 147.
 // opts.useGrease (default true) controls whether a GREASE group is prepended.
-const CreateSupportedGroupsExtension = (greaseByte = 0xEA, supportedGroups = null, opts = null) => {
+const CreateSupportedGroupsExtension = (greaseByte: number = 0xEA, supportedGroups: number[] | null = null, opts: GreaseOptions | null = null) => {
 	const useGrease = !opts || opts.useGrease !== false
 	const supported_groups = Buffer.from([0x00, 0x0a])
 	const supportedGroupsLength = Buffer.alloc(2)
@@ -125,7 +140,7 @@ const CreateSupportedGroupsExtension = (greaseByte = 0xEA, supportedGroups = nul
 	const codes = supportedGroups && supportedGroups.length
 		? supportedGroups
 		: [0x11ec, 0x001d, 0x0017, 0x0018]
-	const groups = useGrease ? [Buffer.from([greaseByte, greaseByte])] : []
+	const groups: Buffer[] = useGrease ? [Buffer.from([greaseByte, greaseByte])] : []
 	for (const code of codes) {
 		const b = Buffer.alloc(2); b.writeUInt16BE(code, 0)
 		groups.push(b)
@@ -148,7 +163,7 @@ const CreateSupportedGroupsExtension = (greaseByte = 0xEA, supportedGroups = nul
 }
 
 
-const createKeyShareEntry = (group, publicRaw) => {
+const createKeyShareEntry = (group: number, publicRaw: Buffer) => {
 	const groupBuffer = Buffer.alloc(2);
 	groupBuffer.writeUInt16BE(group, 0);
 
@@ -158,7 +173,7 @@ const createKeyShareEntry = (group, publicRaw) => {
 	return Buffer.concat([groupBuffer, keyLen, publicRaw]);
 };
 
-const createKeyShareExtension = (keyShareEntries) => {
+const createKeyShareExtension = (keyShareEntries: Buffer[]) => {
 	const body = Buffer.concat(keyShareEntries);
 	const sharesLen = Buffer.alloc(2);
 	sharesLen.writeUInt16BE(body.length, 0);
@@ -176,12 +191,12 @@ const createKeyShareExtension = (keyShareEntries) => {
 
 // HRR path: rebuild key_share with exactly one entry for the server-requested group.
 // Unlike the CH1 builder, no GREASE share — CH2 must match what HRR's key_share asked for.
-const CreateKeyShareSingle = (group, publicKeyRaw) => {
+const CreateKeyShareSingle = (group: number, publicKeyRaw: Buffer) => {
 	return createKeyShareExtension([createKeyShareEntry(group, publicKeyRaw)])
 }
 
 // HRR sends back a cookie the client MUST echo verbatim in CH2 (RFC 8446 §4.2.2).
-const CreateCookieExtension = (cookieBytes) => {
+const CreateCookieExtension = (cookieBytes: Buffer) => {
 	const ext = Buffer.from([0x00, 0x2c])
 	const cookieLen = Buffer.alloc(2); cookieLen.writeUInt16BE(cookieBytes.length, 0)
 	const extLen = Buffer.alloc(2);    extLen.writeUInt16BE(cookieBytes.length + 2, 0)
@@ -191,7 +206,7 @@ const CreateCookieExtension = (cookieBytes) => {
 // Builds the key_share extension. Caller must pre-generate the MLKEM keypair
 // (since mlkem ops are async) and pass the public key in.
 // opts.useGrease (default true) controls whether a GREASE key_share entry is prepended.
-const CreateKeyShareX25519 = (greaseByte = 0xEA, mlkemPubKey, opts = null) => {
+const CreateKeyShareX25519 = (greaseByte: number = 0xEA, mlkemPubKey: Buffer | null, opts: GreaseOptions | null = null) => {
     const useGrease = !opts || opts.useGrease !== false
     const { publicKey: x25519PublicKey, privateKey: x25519PrivateKey } = crypto.generateKeyPairSync('x25519')
     const spkiDerX25519 = x25519PublicKey.export({ type: 'spki', format: 'der' })
@@ -204,7 +219,7 @@ const CreateKeyShareX25519 = (greaseByte = 0xEA, mlkemPubKey, opts = null) => {
 
     const keyShareEntryX25519 = createKeyShareEntry(0x001d, publicRawX25519)
     const keyShareEntryX25519MLKEM768 = createKeyShareEntry(0x11EC, publicRawX25519MLKEM768)
-    const entries = []
+    const entries: Buffer[] = []
     if (useGrease) {
         const greaseGroup = (greaseByte << 8) | greaseByte
         entries.push(createKeyShareEntry(greaseGroup, Buffer.from([0])))
@@ -222,7 +237,7 @@ const CreateKeyShareX25519 = (greaseByte = 0xEA, mlkemPubKey, opts = null) => {
 
 
 // CreateSignatureAlgorithmsExtension(sigalgs?) — optional override of the Chrome 147 list.
-const CreateSignatureAlgorithmsExtension = (sigalgs = null) => {
+const CreateSignatureAlgorithmsExtension = (sigalgs: number[] | null = null) => {
 	const signatureAlgorithmIds = sigalgs && sigalgs.length ? sigalgs : [
 		0x0403, // ecdsa_secp256r1_sha256
 		0x0804, // rsa_pss_rsae_sha256
@@ -253,12 +268,12 @@ const CreateSignatureAlgorithmsExtension = (sigalgs = null) => {
 // CreateSupportedVersionsExtension(greaseByte, versions?, opts?) — versions is an array of u16
 // version codes (e.g. [0x0304, 0x0303]). Defaults to TLS 1.3 + TLS 1.2.
 // opts.useGrease (default true) controls whether a GREASE version is prepended.
-const CreateSupportedVersionsExtension = (greaseByte = 0x0a, versions = null, opts = null) => {
+const CreateSupportedVersionsExtension = (greaseByte: number = 0x0a, versions: number[] | null = null, opts: GreaseOptions | null = null) => {
 	const useGrease = !opts || opts.useGrease !== false
 	const supported_versions = Buffer.from([0x00, 0x2b])
 
 	const codes = versions && versions.length ? versions : [0x0304, 0x0303]
-	const verBufs = useGrease ? [Buffer.from([greaseByte, greaseByte])] : []
+	const verBufs: Buffer[] = useGrease ? [Buffer.from([greaseByte, greaseByte])] : []
 	for (const c of codes) {
 		const b = Buffer.alloc(2); b.writeUInt16BE(c, 0)
 		verBufs.push(b)
@@ -306,7 +321,7 @@ const CreateSignedCertificateTimestampExtension = () => {
 // CreateStatusRequestExtension(opts?) — RFC 6066 §8. Defaults match Chrome (OCSP, 0/0).
 // opts.certificateStatusType / responderIdListLength / requestExtensionsLength let non-Chrome
 // parrots (Java HttpClient, middleboxes) override the shape.
-const CreateStatusRequestExtension = (opts = null) => {
+const CreateStatusRequestExtension = (opts: StatusRequestOptions | null = null) => {
 	const type = (opts?.certificateStatusType ?? 1) & 0xff
 	const ridLen = (opts?.responderIdListLength ?? 0) & 0xffff
 	const reqLen = (opts?.requestExtensionsLength ?? 0) & 0xffff
@@ -331,7 +346,7 @@ const CreateStatusRequestExtension = (opts = null) => {
 //       u8  status_type
 //       u16 responder_id_list_length || zero bytes
 //       u16 request_extensions_length || zero bytes
-const CreateStatusRequestV2Extension = (opts = null) => {
+const CreateStatusRequestV2Extension = (opts: StatusRequestOptions | null = null) => {
 	const type = (opts?.certificateStatusType ?? 2) & 0xff
 	const ridLen = (opts?.responderIdListLength ?? 0) & 0xffff
 	const reqLen = (opts?.requestExtensionsLength ?? 0) & 0xffff
@@ -354,9 +369,9 @@ const CreateStatusRequestV2Extension = (opts = null) => {
 // Accepts either:
 //   { raw: Buffer }      — emit the extension body verbatim (byte-exact round-trip)
 //   { sigalgs: number[]} — build the standard u16-length-prefixed list
-const CreateSignatureAlgorithmsCertExtension = (opts) => {
+const CreateSignatureAlgorithmsCertExtension = (opts: SignatureAlgorithmsCertOptions | null) => {
 	const hdr = Buffer.from([0x00, 0x32])
-	let body
+	let body: Buffer
 	if (opts && Buffer.isBuffer(opts.raw)) {
 		body = opts.raw
 	} else if (opts && Array.isArray(opts.sigalgs)) {
@@ -387,7 +402,7 @@ const CreatePSKExchangeModesExtension = () => {
 
 // CreateApplicationSettingsExtension(protocols?, extensionType?)
 // Defaults: protocols=['h2'], extensionType=0x44cd (ALPS v1; Chrome 147 still on v1).
-const CreateApplicationSettingsExtension = (protocols = null, extensionType = null) => {
+const CreateApplicationSettingsExtension = (protocols: string[] | null = null, extensionType: number | null = null) => {
 	const protoList = protocols && protocols.length ? protocols : ['h2']
 	const type = extensionType || 0x44cd
 	const ext = Buffer.alloc(2); ext.writeUInt16BE(type, 0)
@@ -469,7 +484,7 @@ const CreateRenegotationExtension = () => {
 // padding extension (RFC 7685, id 21). Body is `length` zero bytes. Safari emits this with
 // a length tuned so the ClientHello reaches a target wire size; Chrome 147 omits it because
 // the MLKEM key_share already pushes CH past the size threshold.
-const CreatePaddingExtension = (length = 0) => {
+const CreatePaddingExtension = (length: number = 0) => {
 	const hdr = Buffer.from([0x00, 0x15])
 	const lenBuf = Buffer.alloc(2); lenBuf.writeUInt16BE(length, 0)
 	return Buffer.concat([hdr, lenBuf, Buffer.alloc(length, 0)])
@@ -491,7 +506,7 @@ const createSessionTicketExtension = () => {
 // telemetry, unspec'd codepoints) that's all a server observer needs. Do NOT use this for
 // interactive extensions whose body must be computed per-connection (key_share) — those
 // need real builders.
-const CreateRawExtension = (id, body) => {
+const CreateRawExtension = (id: number, body: Buffer | number[] | undefined) => {
 	if (!Number.isInteger(id) || id < 0 || id > 0xffff) {
 		throw new Error(`CreateRawExtension: invalid extension id ${id}`)
 	}

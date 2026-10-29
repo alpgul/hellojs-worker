@@ -22,8 +22,8 @@
 
 import * as crypto from 'node:crypto'
 
-function pHash(hash, secret, seed, length) {
-	const out = []
+function pHash(hash: string, secret: Uint8Array, seed: Uint8Array, length: number): Buffer {
+	const out: Buffer[] = []
 	let total = 0
 	let a = seed
 	while (total < length) {
@@ -35,23 +35,23 @@ function pHash(hash, secret, seed, length) {
 	return Buffer.concat(out).subarray(0, length)
 }
 
-function prf(hash, secret, label, seed, length) {
+function prf(hash: string, secret: Uint8Array, label: string, seed: Uint8Array, length: number): Buffer {
 	return pHash(hash, secret, Buffer.concat([Buffer.from(label, 'ascii'), seed]), length)
 }
 
-function masterSecret(hash, pms, clientRandom, serverRandom) {
+function masterSecret(hash: string, pms: Uint8Array, clientRandom: Uint8Array, serverRandom: Uint8Array): Buffer {
 	return prf(hash, pms, 'master secret', Buffer.concat([clientRandom, serverRandom]), 48)
 }
 
-function extendedMasterSecret(hash, pms, sessionHash) {
+function extendedMasterSecret(hash: string, pms: Uint8Array, sessionHash: Uint8Array): Buffer {
 	return prf(hash, pms, 'extended master secret', sessionHash, 48)
 }
 
-function keyBlock(hash, ms, serverRandom, clientRandom, length) {
+function keyBlock(hash: string, ms: Uint8Array, serverRandom: Uint8Array, clientRandom: Uint8Array, length: number): Buffer {
 	return prf(hash, ms, 'key expansion', Buffer.concat([serverRandom, clientRandom]), length)
 }
 
-function finishedVerifyData(hash, ms, isClient, transcriptHash) {
+function finishedVerifyData(hash: string, ms: Uint8Array, isClient: boolean, transcriptHash: Uint8Array): Buffer {
 	const label = isClient ? 'client finished' : 'server finished'
 	return prf(hash, ms, label, transcriptHash, 12)
 }

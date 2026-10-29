@@ -5,7 +5,7 @@ import assert from 'node:assert'
 import * as crypto from 'node:crypto'
 import test from 'node:test'
 
-import * as prf from '../../lib/tls/tls12_prf.js'
+import * as prf from '../../lib/tls/tls12_prf.ts'
 
 test('P_SHA256 matches a hand-rolled HMAC chain', () => {
 	const secret = Buffer.from('secret')

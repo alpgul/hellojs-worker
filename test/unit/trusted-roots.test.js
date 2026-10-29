@@ -4,7 +4,7 @@ import assert from 'node:assert'
 import test from 'node:test'
 import * as tls from 'node:tls'
 
-import { setTrustedRoots, trustedRoots } from '../../lib/tls/cert-validate.js'
+import { setTrustedRoots, trustedRoots } from '../../lib/tls/cert-validate.ts'
 
 test('setTrustedRoots replaces the store and can restore the Node bundle', () => {
 	setTrustedRoots([])

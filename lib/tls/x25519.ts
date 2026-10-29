@@ -5,7 +5,11 @@
 // key_share can arrive in. Key generation stays in node:crypto because the ClientHello is
 // built synchronously; only the exchange itself is async.
 
-function subtle() {
+// `webcrypto` is imported as a namespace so the types are referenced as webcrypto.SubtleCrypto:
+// the global SubtleCrypto declaration is a constructor value only, with no matching type.
+import type { KeyObject, webcrypto } from 'node:crypto'
+
+function subtle(): webcrypto.SubtleCrypto {
 	const s = globalThis.crypto && globalThis.crypto.subtle
 	if (!s || typeof s.deriveBits !== 'function') {
 		throw new Error('Web Crypto X25519 is unavailable — cannot compute a shared secret')
@@ -14,7 +18,7 @@ function subtle() {
 }
 
 // privateKey: node:crypto KeyObject (x25519); peerRaw32: the peer's raw 32-byte public key.
-async function deriveX25519SharedSecret(privateKey, peerRaw32) {
+async function deriveX25519SharedSecret(privateKey: KeyObject, peerRaw32: Uint8Array): Promise<Buffer> {
 	if (!peerRaw32 || peerRaw32.length !== 32) {
 		throw new Error(`X25519 peer key must be 32 bytes, got ${peerRaw32 ? peerRaw32.length : 0}`)
 	}

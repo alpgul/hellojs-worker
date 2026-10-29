@@ -16,10 +16,38 @@
 
 import * as crypto from 'node:crypto'
 
-import { verifySignature } from './sig-verify.js'
+
+import { verifySignature } from './sig-verify.ts'
+
+import type { KeyMaterial, SignatureSpec } from './sig-verify.ts'
+import type { X509Certificate } from 'node:crypto'
+
+interface Tlv {
+	tag: number
+	length: number
+	value: Buffer
+	headerLen: number
+	end: number
+}
+
+export type CertStatusName = 'good' | 'revoked' | 'unknown'
+
+// OCSPResponse fields the handshake and callers read. Only responseStatus/statuses/raw are
+// always present; the rest are filled once a successful response body has been parsed.
+export interface ParsedOcspResponse {
+	responseStatus: string | null
+	statuses: CertStatusName[]
+	raw: Buffer
+	signatureVerified: boolean
+	leafMatched: boolean
+	tbsBytes?: Buffer
+	sigAlgOid?: Buffer
+	signature?: Buffer
+	embeddedCerts?: Buffer[]
+}
 
 // Minimal DER walker. Each call returns { tag, length, value, headerLen } and advances `offset`.
-function readTLV(buf, offset = 0) {
+function readTLV(buf: Buffer, offset = 0): Tlv {
 	if (offset >= buf.length) throw new Error('OCSP: short DER')
 	const tag = buf[offset]
 	let i = offset + 1
@@ -36,7 +64,7 @@ function readTLV(buf, offset = 0) {
 	return { tag, length: len, value: buf.subarray(i, i + len), headerLen: i - offset, end: i + len }
 }
 
-const OCSP_STATUS = {
+const OCSP_STATUS: Record<number, string> = {
 	0: 'successful',
 	1: 'malformedRequest',
 	2: 'internalError',
@@ -48,7 +76,7 @@ const OCSP_STATUS = {
 // OID 1.3.6.1.5.5.7.48.1.1 (basic ocsp response). DER-encoded as bytes:
 const BASIC_OCSP_OID_BYTES = Buffer.from([0x06, 0x09, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x01, 0x01])
 
-function decodeCertStatus(seq) {
+function decodeCertStatus(seq: Buffer): CertStatusName {
 	// CertStatus is a CHOICE with tags [0]=good, [1]=revoked, [2]=unknown.
 	// All IMPLICIT, so the tag byte is 0x80, 0xa1 (constructed), or 0x82 / 0x80, 0x81, 0x82.
 	// In practice servers send: [0] IMPLICIT NULL → 0x80 0x00; [1] IMPLICIT RevokedInfo → 0xa1 ...;
@@ -62,21 +90,21 @@ function decodeCertStatus(seq) {
 }
 
 // Walk all top-level TLVs under a SEQUENCE/SET body and return them as an array.
-function tlvSequence(buf) {
-	const out = []
+function tlvSequence(buf: Buffer): Tlv[] {
+	const items: Tlv[] = []
 	let off = 0
 	while (off < buf.length) {
 		const t = readTLV(buf, off)
-		out.push(t)
+		items.push(t)
 		off = t.end
 	}
-	return out
+	return items
 }
 
 // Compute SHA-1 over a cert's subject public key (the BIT STRING bytes after the leading
 // 0x00 "unused bits" byte). RFC 6960 §4.1.1: CertID.issuerKeyHash is the SHA-1 of the
 // issuer's subjectPublicKey (BIT STRING content, excluding the unused-bits byte).
-function issuerKeyHashSha1(issuerCert) {
+function issuerKeyHashSha1(issuerCert: X509Certificate): Buffer {
 	// Get the issuer cert's SPKI (raw DER) via X509Certificate.publicKey export ('spki', 'der').
 	// SubjectPublicKeyInfo ::= SEQUENCE { algorithm AlgorithmIdentifier, subjectPublicKey BIT STRING }
 	const spkiDer = issuerCert.publicKey.export({ type: 'spki', format: 'der' })
@@ -96,7 +124,7 @@ function issuerKeyHashSha1(issuerCert) {
 // We pull it directly from the issuer cert's `subject` DER (X509Certificate doesn't expose
 // the raw subject DER, so we re-encode from .subject — but that's lossy). Use the leaf's
 // `issuer` DER instead via the cert's DER bytes.
-function issuerNameHashSha1FromLeaf(leafCert) {
+function issuerNameHashSha1FromLeaf(leafCert: X509Certificate): Buffer {
 	const leafDer = Buffer.from(leafCert.raw)
 	// TBSCertificate ::= SEQUENCE { version, serial, sigAlg, issuer, validity, subject, ... }
 	const cert = readTLV(leafDer, 0)
@@ -119,8 +147,8 @@ function issuerNameHashSha1FromLeaf(leafCert) {
 	return crypto.createHash('sha1').update(issuerDer).digest()
 }
 
-function parseOcspResponse(der) {
-	const result = { responseStatus: null, statuses: [], raw: der, signatureVerified: false, leafMatched: false }
+function parseOcspResponse(der: Buffer): ParsedOcspResponse {
+	const result: ParsedOcspResponse = { responseStatus: null, statuses: [], raw: der, signatureVerified: false, leafMatched: false }
 	if (!der || der.length === 0) return result
 	const outer = readTLV(der, 0)
 	if ((outer.tag & 0x1f) !== 0x10) throw new Error('OCSP: outer not a SEQUENCE')
@@ -175,7 +203,7 @@ function parseOcspResponse(der) {
 			const certsSeq = readTLV(ec.value, 0)
 			if ((certsSeq.tag & 0x1f) === 0x10) {
 				const certsBytes = certsSeq.value
-				const certsList = []
+				const certsList: Buffer[] = []
 				let cpos = 0
 				while (cpos < certsBytes.length) {
 					const c = readTLV(certsBytes, cpos)
@@ -223,7 +251,7 @@ function parseOcspResponse(der) {
 
 // Map OCSP signatureAlgorithm OIDs to sig-verify specs.
 // OID bytes are the *content* (after the 0x06 OID tag + length prefix).
-const SIG_ALG_OIDS = {
+const SIG_ALG_OIDS: Record<string, SignatureSpec> = {
 	'2a864886f70d01010b': { hash: 'SHA-256', type: 'rsa-pkcs1' },  // sha256WithRSAEncryption
 	'2a864886f70d01010c': { hash: 'SHA-384', type: 'rsa-pkcs1' },  // sha384WithRSAEncryption
 	'2a864886f70d01010d': { hash: 'SHA-512', type: 'rsa-pkcs1' },  // sha512WithRSAEncryption
@@ -232,20 +260,20 @@ const SIG_ALG_OIDS = {
 	'2a8648ce3d040304': { hash: 'SHA-512', type: 'ecdsa' },        // ecdsa-with-SHA512
 }
 
-function sigInfoFromOid(oidBytes) {
+function sigInfoFromOid(oidBytes: Buffer): SignatureSpec | null {
 	return SIG_ALG_OIDS[Buffer.from(oidBytes).toString('hex')] || null
 }
 
 // Verify the OCSP response signature using the issuer (or a delegated responder). Returns true on
 // success. Best-effort: soft-fail (false) is acceptable for callers matching Chrome's policy.
-function verifyOcspSignature(parsed, issuerCert) {
+function verifyOcspSignature(parsed: ParsedOcspResponse, issuerCert: X509Certificate | Buffer): boolean {
 	if (!parsed.tbsBytes || !parsed.signature || !parsed.sigAlgOid) return false
 	const sigInfo = sigInfoFromOid(parsed.sigAlgOid)
 	if (!sigInfo) return false
 
 	// Every candidate: the issuer first (RFC 6960 §2.2 default case), then any embedded delegated
 	// responder certificates. sig-verify takes certificates directly — node:crypto resolves the key.
-	const candidates = [issuerCert]
+	const candidates: KeyMaterial[] = [issuerCert]
 	if (parsed.embeddedCerts) {
 		for (const der of parsed.embeddedCerts) candidates.push(Buffer.from(der))
 	}
@@ -259,7 +287,7 @@ function verifyOcspSignature(parsed, issuerCert) {
 // We match by serial number (RFC 6960 CertID.serialNumber). Issuer-name-hash + issuer-key-hash
 // matching would be stricter but is intentionally not required here — most operators only ever
 // staple OCSP for the cert they're presenting, so a serial match is a strong-enough signal.
-function leafMatchesOcsp(parsed, leafCert) {
+function leafMatchesOcsp(parsed: ParsedOcspResponse, leafCert: X509Certificate): boolean {
 	if (!parsed.tbsBytes) return false
 	// Re-parse tbsResponseData → responses → SingleResponse → certID.serialNumber
 	try {
@@ -268,7 +296,7 @@ function leafMatchesOcsp(parsed, leafCert) {
 		const items = tlvSequence(rd)
 		// Find the `responses` SEQUENCE: it's the SEQUENCE of SEQUENCEs (each SingleResponse).
 		// Walk items, picking the one whose value parses as a SEQUENCE of SEQUENCEs.
-		let responses = null
+		let responses: Tlv[] | null = null
 		for (const it of items) {
 			if ((it.tag & 0x1f) !== 0x10) continue
 			// Try to decode as SEQUENCE OF SEQUENCE

@@ -3,7 +3,7 @@
 import assert from 'node:assert'
 import test from 'node:test'
 
-import { CreateStatusRequestExtension, CreateStatusRequestV2Extension, CreateSignatureAlgorithmsCertExtension, CreateSupportedGroupsExtension, CreateSupportedVersionsExtension } from '../../lib/extensions/index.js'
+import { CreateStatusRequestExtension, CreateStatusRequestV2Extension, CreateSignatureAlgorithmsCertExtension, CreateSupportedGroupsExtension, CreateSupportedVersionsExtension } from '../../lib/extensions/index.ts'
 
 test('status_request (5): default (Chrome) shape — type=1, 0/0', () => {
 	const ext = CreateStatusRequestExtension()

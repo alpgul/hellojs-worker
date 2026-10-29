@@ -23,8 +23,8 @@ import * as packet from '../../lib/h3/packet.js'
 import * as qpack from '../../lib/h3/qpack.js'
 import * as tp from '../../lib/h3/transport-params.js'
 import * as varint from '../../lib/h3/varint.ts'
-import { validateChain } from '../../lib/tls/cert-validate.js'
-import * as records from '../../lib/tls/tls12_records.js'
+import { validateChain } from '../../lib/tls/cert-validate.ts'
+import * as records from '../../lib/tls/tls12_records.ts'
 
 const ITERATIONS = parseInt(process.env.FUZZ_ITERATIONS || '1000', 10)
 const TIMEOUT_MS = 30_000

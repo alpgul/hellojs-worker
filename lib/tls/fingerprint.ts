@@ -14,14 +14,33 @@
 
 import * as crypto from 'node:crypto'
 
+export interface ClientHelloExtension {
+	id: number
+	body: Buffer
+}
+
+// Structural view of a ClientHello, as needed by the JA3/JA4 specs.
+export interface ParsedClientHello {
+	legacyVersion: number
+	chosenVersion: number
+	ciphers: number[]
+	extensions: ClientHelloExtension[]
+	extMap: Record<number, Buffer>
+	groups: number[]
+	ecPointFormats: number[]
+	sigalgs: number[]
+	alpnFirst: string | null
+	sni: boolean
+}
+
 // 0x0a0a, 0x1a1a, 0x2a2a, … 0xfafa.
-function isGrease(u16) {
+function isGrease(u16: number): boolean {
 	return (u16 & 0x0f0f) === 0x0a0a && ((u16 >> 8) & 0x0f) === (u16 & 0x0f)
 }
 
 // Parse a TLS record carrying a ClientHello (record header + handshake header + body).
 // Returns the structural pieces JA3/JA4 need.
-function parseClientHello(rec) {
+function parseClientHello(rec: Buffer): ParsedClientHello {
 	if (rec.length < 5 || rec[0] !== 0x16) throw new Error('parseClientHello: not a handshake record')
 	const recLen = rec.readUInt16BE(3)
 	if (rec.length < 5 + recLen) throw new Error('parseClientHello: short record')
@@ -33,14 +52,14 @@ function parseClientHello(rec) {
 	o += 32                                            // random
 	const sidLen = hs[o]; o += 1 + sidLen
 	const csLen = hs.readUInt16BE(o); o += 2
-	const ciphers = []
+	const ciphers: number[] = []
 	for (let i = 0; i < csLen; i += 2) ciphers.push(hs.readUInt16BE(o + i))
 	o += csLen
 	const cmLen = hs[o]; o += 1 + cmLen
 	const extsLen = hs.readUInt16BE(o); o += 2
 	const extEnd = o + extsLen
-	const extensions = []     // [{ id, body }] in wire order
-	const extMap = {}
+	const extensions: ClientHelloExtension[] = []     // [{ id, body }] in wire order
+	const extMap: Record<number, Buffer> = {}
 	while (o < extEnd) {
 		const id = hs.readUInt16BE(o); o += 2
 		const len = hs.readUInt16BE(o); o += 2
@@ -64,7 +83,7 @@ function parseClientHello(rec) {
 	}
 
 	// supported_groups (10)
-	const groups = []
+	const groups: number[] = []
 	if (extMap[10]) {
 		const sg = extMap[10]
 		const listLen = sg.readUInt16BE(0)
@@ -72,7 +91,7 @@ function parseClientHello(rec) {
 	}
 
 	// ec_point_formats (11)
-	const ecPointFormats = []
+	const ecPointFormats: number[] = []
 	if (extMap[11]) {
 		const ec = extMap[11]
 		const listLen = ec[0]
@@ -80,7 +99,7 @@ function parseClientHello(rec) {
 	}
 
 	// signature_algorithms (13)
-	const sigalgs = []
+	const sigalgs: number[] = []
 	if (extMap[13]) {
 		const sa = extMap[13]
 		const listLen = sa.readUInt16BE(0)
@@ -104,7 +123,7 @@ function parseClientHello(rec) {
 }
 
 // JA3 = MD5("version,ciphers,extensions,groups,point_formats"), GREASE excluded.
-function ja3(ch) {
+function ja3(ch: ParsedClientHello): { str: string; hash: string } {
 	const ver = ch.legacyVersion
 	const ciphers = ch.ciphers.filter(c => !isGrease(c)).join('-')
 	const exts = ch.extensions.filter(e => !isGrease(e.id)).map(e => e.id).join('-')
@@ -116,7 +135,7 @@ function ja3(ch) {
 
 // JA4 = "t<ver>d<#ciphers><#extensions><alpn>_<sha256(ciphers-sorted)>:12_<sha256(extensions-sorted-w/o-sni-or-alpn,sig_algs)>:12"
 // Per the FoxIO spec — see the doc linked at the top.
-function ja4(ch) {
+function ja4(ch: ParsedClientHello): { str: string; ja4_a: string; ja4_b: string; ja4_c: string } {
 	const protoChar = 't'                                   // tcp (we don't run quic from this path)
 	let verCode
 	switch (ch.chosenVersion) {
@@ -144,7 +163,7 @@ function ja4(ch) {
 	}
 	const ja4_a = `${protoChar}${verCode}${sniChar}${cipherCount}${extCount}${alpnTag}`
 
-	const cipherHex = (n) => n.toString(16).padStart(4, '0')
+	const cipherHex = (n: number) => n.toString(16).padStart(4, '0')
 	const sortedCiphers = ciphersNoGrease.slice().sort((a, b) => a - b).map(cipherHex).join(',')
 	const ja4_b = crypto.createHash('sha256').update(sortedCiphers).digest('hex').slice(0, 12)
 

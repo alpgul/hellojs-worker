@@ -4,7 +4,7 @@
 import assert from 'node:assert'
 import test from 'node:test'
 
-import { parseOcspResponse } from '../../lib/tls/ocsp.js'
+import { parseOcspResponse } from '../../lib/tls/ocsp.ts'
 
 // Build a SEQUENCE prefixed with tag 0x30 + length.
 function seq(content) {

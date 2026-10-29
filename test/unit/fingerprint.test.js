@@ -1,4 +1,4 @@
-// Tests for lib/tls/fingerprint.js — parseClientHello + ja3 + ja4. Plus an end-to-end check
+// Tests for lib/tls/fingerprint.ts — parseClientHello + ja3 + ja4. Plus an end-to-end check
 // that the JA3 hellojs computes from the CH it just emitted matches the middlebox parrot's
 // stated JA3 hash (so users can run profiles.verify(...) without round-tripping through peet).
 
@@ -9,7 +9,7 @@ import { Writable } from 'node:stream'
 import test from 'node:test'
 
 import * as profiles from '../../lib/profiles/index.ts'
-import { parseClientHello, ja3, ja4, isGrease } from '../../lib/tls/fingerprint.js'
+import { parseClientHello, ja3, ja4, isGrease } from '../../lib/tls/fingerprint.ts'
 import { TLS } from '../../lib/tls/tls.js'
 
 test('isGrease: recognises GREASE codepoints', () => {

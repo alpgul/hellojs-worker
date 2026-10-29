@@ -1,4 +1,4 @@
-// lib/tls/sig-verify.js — the synchronous verifier the handshake relies on.
+// lib/tls/sig-verify.ts — the synchronous verifier the handshake relies on.
 //
 // What this guards, in the order it bit us:
 //   - chain links verify through X509Certificate.verify(pkey), so the padding comes from the
@@ -18,7 +18,7 @@ import * as path from 'node:path'
 import test from 'node:test'
 import * as tls from 'node:tls'
 
-import { verifySignature, verifyCertSignature, resolveKey, derToSpkiPem, normHash } from '../../lib/tls/sig-verify.js'
+import { verifySignature, verifyCertSignature, resolveKey, derToSpkiPem, normHash } from '../../lib/tls/sig-verify.ts'
 
 const K = crypto.constants
 const roots = tls.rootCertificates.map(pem => new crypto.X509Certificate(pem))
@@ -118,7 +118,7 @@ test('verifySignature: the scheme is bound to the key type, so no algorithm conf
 	assert.strictEqual(verifySignature(null, f.rsa.publicKey, f.content, f.pss), false)
 	assert.strictEqual(verifySignature({ type: 'rsa-pkcs1', hash: 'md5' }, f.rsa.publicKey, f.content, f.pkcs1), false,
 		'an unusable digest is false, not a thrown error')
-	// Same binding with the certificate nowhere in sight: a bare SPKI is what sct.js hands us for a log
+	// Same binding with the certificate nowhere in sight: a bare SPKI is what sct.ts hands us for a log
 	// key, and node:crypto happily verifies an ECDSA DER signature under an RSA spec (it ignores the
 	// padding options rather than rejecting the combination) unless the type is resolved from the SPKI.
 	const ecSpkiDer = f.ec.publicKey.export({ type: 'spki', format: 'der' })

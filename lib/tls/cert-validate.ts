@@ -21,10 +21,20 @@
 import * as crypto from 'node:crypto'
 import * as tls from 'node:tls'
 
-import { extractScts } from './sct.js'
-import { verifySignature as nodeVerify, verifyCertSignature } from './sig-verify.js'
 
-let _trustedRoots = null   // [{cert: X509Certificate, subject, issuer, fingerprint256}]
+import { extractScts } from './sct.ts'
+import { verifySignature as nodeVerify, verifyCertSignature } from './sig-verify.ts'
+
+import type { CertificateTimestamp } from './sct.ts'
+import type { KeyMaterial, SignatureSpec } from './sig-verify.ts'
+import type { X509Certificate } from 'node:crypto'
+
+// A chain either terminates in a trusted root or explains why it did not.
+export type ChainResult =
+	| { ok: false; reason: string }
+	| { ok: true; root: string; scts: CertificateTimestamp[] }
+
+let _trustedRoots: X509Certificate[] | null = null   // [{cert: X509Certificate, subject, issuer, fingerprint256}]
 function trustedRoots() {
 	if (_trustedRoots) return _trustedRoots
 	_trustedRoots = []
@@ -39,7 +49,7 @@ function trustedRoots() {
 
 // Replace the bundled store. workerd's node:tls ships no roots, so a Worker
 // must install its own Mozilla/NSS PEM bundle before the first handshake.
-function setTrustedRoots(pems) {
+function setTrustedRoots(pems?: string[]): void {
 	_trustedRoots = []
 	for (const pem of pems || []) {
 		try {
@@ -49,7 +59,7 @@ function setTrustedRoots(pems) {
 }
 
 // Match a leaf cert against a hostname per RFC 6125.
-function hostnameMatches(cert, hostname) {
+function hostnameMatches(cert: X509Certificate, hostname: string): boolean {
 	const host = String(hostname).toLowerCase()
 	// Subject Alternative Name (DNS:) — modern path, what browsers use.
 	const san = cert.subjectAltName || ''
@@ -66,7 +76,7 @@ function hostnameMatches(cert, hostname) {
 	return false
 }
 
-function matchHostname(pattern, host) {
+function matchHostname(pattern: string, host: string): boolean {
 	if (pattern === host) return true
 	// Wildcard: *.example.com matches foo.example.com but not example.com or foo.bar.example.com
 	if (pattern.startsWith('*.')) {
@@ -81,7 +91,11 @@ function matchHostname(pattern, host) {
 
 // Validate the chain against the trust store. Returns { ok, reason }.
 // Chain order: leaf, intermediate1, intermediate2, ... (server-supplied order).
-function validateChain(chainDerOrCerts, hostname, { now = Date.now() } = {}) {
+function validateChain(
+	chainDerOrCerts: Array<Uint8Array | X509Certificate>,
+	hostname: string,
+	{ now = Date.now() }: { now?: number } = {},
+): ChainResult {
 	const chain = chainDerOrCerts.map(x => x instanceof crypto.X509Certificate ? x : new crypto.X509Certificate(x))
 	if (chain.length === 0) return { ok: false, reason: 'empty chain' }
 	const leaf = chain[0]
@@ -139,14 +153,14 @@ function validateChain(chainDerOrCerts, hostname, { now = Date.now() } = {}) {
 		}
 	}
 	if (!trustedRoot) {
-		const top = chain.at(-1)
+		const top = chain[chain.length - 1]
 		return { ok: false, reason: `chain does not terminate in a trusted root (top issuer="${top.issuer}")` }
 	}
 
 	// Best-effort: extract embedded SCT(s) for downstream policy inspection. We don't enforce
 	// here — Chrome requires CT for certs issued post-2018 but verifying SCT signatures requires
 	// shipping the CT log key list, which we expose as an opt-in via tls.options.ctLogKeys.
-	let scts = []
+	let scts: CertificateTimestamp[] = []
 	try {
 		scts = extractScts(Buffer.from(leaf.raw))
 	} catch { /* parse failure is non-fatal */ }
@@ -157,7 +171,7 @@ function validateChain(chainDerOrCerts, hostname, { now = Date.now() } = {}) {
 // --- TLS 1.3 server CertificateVerify (RFC 8446 §4.4.3) ----------------------------------------
 
 // SignatureScheme code points (RFC 8446 §4.2.3) -> verification parameters.
-const SIG_SCHEMES = {
+const SIG_SCHEMES: Record<number, SignatureSpec> = {
 	0x0401: { type: 'rsa-pkcs1', hash: 'sha256' },
 	0x0501: { type: 'rsa-pkcs1', hash: 'sha384' },
 	0x0601: { type: 'rsa-pkcs1', hash: 'sha512' },
@@ -179,7 +193,7 @@ const SIG_SCHEMES = {
 
 // Verify a detached signature made with the key in `leaf` (an X509Certificate or its DER).
 // Returns a boolean; an unknown scheme or a key-type mismatch is false, never an exception.
-function verifySignature(scheme, leaf, content, signature) {
+function verifySignature(scheme: number, leaf: KeyMaterial, content: Uint8Array, signature: Uint8Array): boolean {
 	const s = SIG_SCHEMES[scheme]
 	if (!s) return false
 	// sig-verify binds the scheme to the key's own type, because workerd silently ignored RSA padding
@@ -192,7 +206,15 @@ function verifySignature(scheme, leaf, content, signature) {
 // hash up to AND INCLUDING the server Certificate (or CompressedCertificate) message. Returns true
 // iff the signature is valid for the leaf's public key over the RFC 8446 §4.4.3 signed content
 // (64 0x20 octets || context-string || 0x00 || transcriptHash).
-function verifyCertVerify({ scheme, signature, leaf, transcriptHash, context = 'TLS 1.3, server CertificateVerify' }) {
+export interface CertVerifyInput {
+	scheme: number
+	signature: Uint8Array
+	leaf: KeyMaterial
+	transcriptHash: Uint8Array
+	context?: string
+}
+
+function verifyCertVerify({ scheme, signature, leaf, transcriptHash, context = 'TLS 1.3, server CertificateVerify' }: CertVerifyInput): boolean {
 	const content = Buffer.concat([Buffer.alloc(64, 0x20), Buffer.from(context, 'ascii'), Buffer.from([0x00]), transcriptHash])
 	return verifySignature(scheme, leaf, content, signature)
 }
@@ -200,7 +222,8 @@ function verifyCertVerify({ scheme, signature, leaf, transcriptHash, context = '
 // Parse a TLS 1.3 Certificate message body (RFC 8446 §4.4.2): 1-byte cert_request_context length +
 // context + 3-byte CertificateList length + entries (3-byte cert length + DER + 2-byte ext length +
 // extensions). Returns an array of DER Buffers; throws on malformed/truncated input.
-function parseCertificateList(body) {
+function parseCertificateList(body: Buffer): Buffer[] {
+	const certs: Buffer[] = []
 	let p = 0
 	if (body.length < 4) throw new Error('certificate message too short')
 	const ctxLen = body[p++]; p += ctxLen
@@ -208,7 +231,6 @@ function parseCertificateList(body) {
 	const listLen = (body[p] << 16) | (body[p + 1] << 8) | body[p + 2]; p += 3
 	const end = p + listLen
 	if (end > body.length) throw new Error('CertificateList length exceeds message')
-	const certs = []
 	while (p < end) {
 		if (p + 3 > end) throw new Error('truncated certificate entry length')
 		const clen = (body[p] << 16) | (body[p + 1] << 8) | body[p + 2]; p += 3

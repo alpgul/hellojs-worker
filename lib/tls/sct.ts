@@ -23,14 +23,47 @@
 
 import * as crypto from 'node:crypto'
 
-import { verifySignature } from './sig-verify.js'
+
+import { verifySignature } from './sig-verify.ts'
+
+import type { SignatureSpec } from './sig-verify.ts'
+import type { KeyObject } from 'node:crypto'
+
+interface Tlv {
+	tag: number
+	length: number
+	value: Buffer
+	headerLen: number
+	end: number
+}
+
+// RFC 6962 §3.2 SignedCertificateTimestamp, as parsed off the wire.
+export interface CertificateTimestamp {
+	version: number
+	logId: Buffer
+	timestamp: number
+	extensions: Buffer
+	sigAlg: { hash: number; key: number }
+	signature: Buffer
+}
+
+export interface SctVerifyResult {
+	verified: boolean
+	reason: string | null
+}
+
+// A CT log key as published: SPKI DER bytes, PEM text, or an already-loaded key.
+type LogKeyMaterial = string | Uint8Array | KeyObject
+
+// CT log public keys, keyed by hex logID.
+type LogKeyMap = Record<string, LogKeyMaterial>
 
 const SCT_OID = '1.3.6.1.4.1.11129.2.4.2'
 // SCT extension OID DER bytes (the inner OID encoding, no tag/length prefix):
 const SCT_OID_DER = Buffer.from('2B06010401D679020402', 'hex')
 
-// Minimal DER walker (shared shape with ocsp.js — kept local to avoid coupling).
-function readTLV(buf, offset = 0) {
+// Minimal DER walker (shared shape with ocsp.ts — kept local to avoid coupling).
+function readTLV(buf: Buffer, offset = 0): Tlv {
 	if (offset >= buf.length) throw new Error('SCT: short DER')
 	const tag = buf[offset]
 	let i = offset + 1
@@ -50,7 +83,7 @@ function readTLV(buf, offset = 0) {
 // Locate the SCT extension within a cert's TBSCertificate.extensions.
 // Returns the OCTET STRING content (the serialized SCT list with its 2-byte outer length),
 // or null if not present.
-function findSctExtension(certDer) {
+function findSctExtension(certDer: Buffer): Buffer | null {
 	const cert = readTLV(certDer, 0)
 	const tbs = readTLV(cert.value, 0)
 	const body = tbs.value
@@ -90,11 +123,11 @@ function findSctExtension(certDer) {
 
 // Parse the SignedCertificateTimestampList → array of SCT descriptors.
 // Format: u16 total-length | (u16 sct-length | SCT)*
-function parseSctList(buf) {
+function parseSctList(buf: Buffer): CertificateTimestamp[] {
+	const out: CertificateTimestamp[] = []
 	if (!buf || buf.length < 2) return []
 	const total = buf.readUInt16BE(0)
 	if (total + 2 > buf.length) return []
-	const out = []
 	let p = 2
 	const end = 2 + total
 	while (p < end) {
@@ -123,7 +156,7 @@ function parseSctList(buf) {
 }
 
 // Public entry: extract + parse SCTs from a leaf cert DER. Returns [{logId,timestamp,...}].
-function extractScts(certDer) {
+function extractScts(certDer: Buffer): CertificateTimestamp[] {
 	const ext = findSctExtension(certDer)
 	if (!ext) return []
 	return parseSctList(ext)
@@ -148,18 +181,18 @@ function extractScts(certDer) {
 // Verifying embedded SCTs requires reconstructing that TBSCertificate, which is non-trivial.
 // We only verify x509_entry SCTs here (the format used in OCSP-stapled SCTs and TLS-extension
 // SCTs). Embedded SCTs return false and caller should soft-fail.
-function verifySct(sct, leafCertDer, logKeys) {
+function verifySct(sct: CertificateTimestamp, leafCertDer: Buffer, logKeys: LogKeyMap): SctVerifyResult {
 	const logHex = sct.logId.toString('hex')
-	const pubKey = logKeys[logHex]
+	const pubKey: LogKeyMaterial | undefined = logKeys[logHex]
 	if (!pubKey) return { verified: false, reason: 'no key for log' }
 
 	// Build signed_struct for x509_entry. Embedded-SCT (precert_entry) verification is out
 	// of scope here for the reasons in the function doc; callers verifying embedded SCTs
 	// should use a CT-library or implement the precert reconstruction.
-	const HASH_MAP = { 2: 'SHA-1', 4: 'SHA-256', 5: 'SHA-384', 6: 'SHA-512' }   // md5/sha224: no verifier for them here
+	const HASH_MAP: Record<number, string> = { 2: 'SHA-1', 4: 'SHA-256', 5: 'SHA-384', 6: 'SHA-512' }   // md5/sha224: no verifier for them here
 	const hash = HASH_MAP[sct.sigAlg.hash]
 	if (!hash) return { verified: false, reason: 'unsupported hash' }
-	const KEY_MAP = { 1: 'rsa-pkcs1', 3: 'ecdsa', 4: 'eddsa' }   // SignatureAlgorithm from RFC 5246
+	const KEY_MAP: Record<number, SignatureSpec['type']> = { 1: 'rsa-pkcs1', 3: 'ecdsa', 4: 'eddsa' }   // SignatureAlgorithm from RFC 5246
 	const type = KEY_MAP[sct.sigAlg.key]
 	if (!type) return { verified: false, reason: 'unsupported key algorithm' }
 
@@ -178,8 +211,8 @@ function verifySct(sct, leafCertDer, logKeys) {
 		extLen, sct.extensions,
 	])
 
-	let spki
-	try { spki = toSpkiDer(pubKey) } catch (e) { return { verified: false, reason: e.message } }
+	let spki: Buffer
+	try { spki = toSpkiDer(pubKey) } catch (e) { return { verified: false, reason: e instanceof Error ? e.message : String(e) } }
 	// sig-verify runs the streaming node:crypto verifier, so this stays synchronous — the reason
 	// the handshake parsers do not have to pause for it.
 	const ok = verifySignature({ type, hash }, spki, signed, sct.signature)
@@ -187,11 +220,10 @@ function verifySct(sct, leafCertDer, logKeys) {
 }
 
 // CT log keys are published as SPKI DER or PEM; a KeyObject is accepted too.
-function toSpkiDer(key) {
-	if (typeof key === 'string' || (key && typeof key.export === 'function')) {
-		return crypto.createPublicKey(key).export({ type: 'spki', format: 'der' })
-	}
-	return Buffer.from(key)
+function toSpkiDer(key: LogKeyMaterial): Buffer {
+	// DER bytes already are an SPKI; PEM text and a KeyObject have to be re-exported.
+	if (key instanceof Uint8Array) return Buffer.from(key)
+	return crypto.createPublicKey(key).export({ type: 'spki', format: 'der' })
 }
 
 export { SCT_OID, extractScts, parseSctList, findSctExtension, verifySct }
