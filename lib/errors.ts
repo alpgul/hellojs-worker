@@ -25,7 +25,9 @@ const CATEGORY = Object.freeze({
 	HTTP:      'http',
 	BODY:      'body',
 	TIMEOUT:   'timeout',
-})
+} as const)
+
+export type ErrorCategory = (typeof CATEGORY)[keyof typeof CATEGORY]
 
 const CODES = Object.freeze({
 	// Usage
@@ -62,14 +64,20 @@ const CODES = Object.freeze({
 
 	// Timeout
 	ETIMEDOUT:       { category: CATEGORY.TIMEOUT,   msg: 'phase deadline exceeded' },
-})
+} as const)
+
+export type ErrorCode = keyof typeof CODES
+
+const CODE_TABLE: Record<string, { category: ErrorCategory; msg: string }> = CODES
 
 class HellojsError extends Error {
-	constructor(message, code, cause) {
+	code: ErrorCode | string
+	category: ErrorCategory
+	constructor(message: string, code: ErrorCode | string, cause?: unknown) {
 		super(message)
 		this.name = 'HellojsError'
 		this.code = code
-		this.category = CODES[code]?.category ?? CATEGORY.PROTOCOL
+		this.category = CODE_TABLE[code]?.category ?? CATEGORY.PROTOCOL
 		if (cause) this.cause = cause
 	}
 }
@@ -77,19 +85,20 @@ class HellojsError extends Error {
 // Promote an arbitrary thrown value into a HellojsError with a best-guess code.
 // Useful at user-facing boundaries where we catch unknown errors and want a
 // stable shape.
-function wrap(err, fallbackCode = 'EPROTO') {
+function wrap(err: unknown, fallbackCode: ErrorCode | string = 'EPROTO'): HellojsError {
 	if (err instanceof HellojsError) return err
 	if (!err) return new HellojsError(String(err), fallbackCode)
 	// Already has a stable Node error code we recognize? Promote it.
-	const nodeCode = err.code
-	if (typeof nodeCode === 'string' && CODES[nodeCode]) {
-		return new HellojsError(err.message || CODES[nodeCode].msg, nodeCode, err)
+	const e = err as { code?: unknown; message?: string }
+	const nodeCode = e.code
+	if (typeof nodeCode === 'string' && CODE_TABLE[nodeCode]) {
+		return new HellojsError(e.message || CODE_TABLE[nodeCode].msg, nodeCode, err)
 	}
 	// Node socket codes we want to surface as-is.
 	if (nodeCode === 'ECONNREFUSED' || nodeCode === 'ECONNRESET' || nodeCode === 'ENOTFOUND' || nodeCode === 'ETIMEDOUT') {
-		return new HellojsError(err.message || nodeCode, nodeCode, err)
+		return new HellojsError(e.message || nodeCode, nodeCode, err)
 	}
-	return new HellojsError(err.message || String(err), fallbackCode, err)
+	return new HellojsError(e.message || String(err), fallbackCode, err)
 }
 
 export { HellojsError, CODES, CATEGORY, wrap }

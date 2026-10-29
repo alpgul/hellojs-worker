@@ -4,7 +4,7 @@ import assert from 'node:assert'
 import * as crypto from 'node:crypto'
 import test from 'node:test'
 
-import * as HKDF from '../../lib/utils/hkdf.js'
+import * as HKDF from '../../lib/utils/hkdf.ts'
 
 test('Extract is HMAC(salt, IKM)', () => {
 	const salt = Buffer.alloc(32, 0)

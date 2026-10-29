@@ -1,7 +1,7 @@
 import request from './lib/client.js'
 import * as udp from './lib/h3/udp.js'
-import { observability } from './lib/observability.js'
-import * as profiles from './lib/profiles/index.js'
+import { observability } from './lib/observability.ts'
+import * as profiles from './lib/profiles/index.ts'
 import { setTrustedRoots } from './lib/tls/cert-validate.js'
 import { TLS } from './lib/tls/tls.js'
 

@@ -3,8 +3,8 @@
 import assert from 'node:assert'
 import test from 'node:test'
 
-import { fromPeet } from '../../lib/profiles/from-peet.js'
-import * as profiles from '../../lib/profiles/index.js'
+import { fromPeet } from '../../lib/profiles/from-peet.ts'
+import * as profiles from '../../lib/profiles/index.ts'
 
 const SAMPLE = {
 	user_agent: 'Mozilla/5.0 ... Chrome/147.0.0.0 Safari/537.36',

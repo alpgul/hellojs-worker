@@ -18,11 +18,11 @@ import test from 'node:test'
 
 import * as frame from '../../lib/h2/frame.js'
 import * as hpack from '../../lib/h2/hpack.js'
-import * as huffman from '../../lib/h3/huffman.js'
+import * as huffman from '../../lib/h3/huffman.ts'
 import * as packet from '../../lib/h3/packet.js'
 import * as qpack from '../../lib/h3/qpack.js'
 import * as tp from '../../lib/h3/transport-params.js'
-import * as varint from '../../lib/h3/varint.js'
+import * as varint from '../../lib/h3/varint.ts'
 import { validateChain } from '../../lib/tls/cert-validate.js'
 import * as records from '../../lib/tls/tls12_records.js'
 

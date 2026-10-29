@@ -6,7 +6,7 @@
 // faithful clone of the input.
 
 import request from '../../index.js'
-import * as profiles from '../../lib/profiles/index.js'
+import * as profiles from '../../lib/profiles/index.ts'
 
 ;(async () => {
 	console.log('Parrot end-to-end test\n')

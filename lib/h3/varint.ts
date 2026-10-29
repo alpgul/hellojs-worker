@@ -7,7 +7,12 @@
 //   0b11 → 8 bytes (62-bit value, 0..2^62-1)
 // The length-prefix bits are the MSBs of the first byte.
 
-function encode(value) {
+export interface DecodedVarint {
+	value: number | bigint
+	length: number
+}
+
+function encode(value: number | bigint): Buffer {
 	const v = BigInt(value)
 	if (v < 0n) throw new Error('varint: negative')
 	if (v < 64n) {
@@ -31,13 +36,13 @@ function encode(value) {
 	throw new Error('varint: value too large')
 }
 
-function decode(buf, offset = 0) {
+function decode(buf: Uint8Array, offset = 0): DecodedVarint {
 	if (offset >= buf.length) throw new Error('varint: short buffer')
 	const first = buf[offset]
 	const prefix = first >> 6
 	const len = 1 << prefix
 	if (offset + len > buf.length) throw new Error('varint: truncated')
-	let value
+	let value: number | bigint
 	if (len === 1) {
 		value = first & 0x3f
 	} else if (len === 2) {
@@ -60,13 +65,13 @@ function decode(buf, offset = 0) {
 }
 
 // Encode a fixed-length big-endian uint with the supplied byte count (used for QUIC packet numbers, which are NOT varints; they're 1-4 byte fixed BE).
-function encodeUint(value, byteLen) {
+function encodeUint(value: number, byteLen: number): Buffer {
 	const b = Buffer.alloc(byteLen)
 	for (let i = byteLen - 1; i >= 0; i--) { b[i] = value & 0xff; value >>>= 8 }
 	return b
 }
 
-function decodeUint(buf, offset, byteLen) {
+function decodeUint(buf: Uint8Array, offset: number, byteLen: number): number {
 	let v = 0
 	for (let i = 0; i < byteLen; i++) v = (v << 8) | buf[offset + i]
 	return v >>> 0

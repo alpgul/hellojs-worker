@@ -8,7 +8,7 @@ import * as path from 'node:path'
 import { Writable } from 'node:stream'
 import test from 'node:test'
 
-import * as profiles from '../../lib/profiles/index.js'
+import * as profiles from '../../lib/profiles/index.ts'
 import { parseClientHello, ja3, ja4, isGrease } from '../../lib/tls/fingerprint.js'
 import { TLS } from '../../lib/tls/tls.js'
 

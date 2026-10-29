@@ -4,8 +4,8 @@
 import assert from 'node:assert'
 import test from 'node:test'
 
-import { buildH1Headers, buildH2Headers, mergeProfileHeaders } from '../../lib/headers.js'
-import chrome from '../../lib/profiles/chrome147-mac.js'
+import { buildH1Headers, buildH2Headers, mergeProfileHeaders } from '../../lib/headers.ts'
+import chrome from '../../lib/profiles/chrome147-mac.ts'
 
 const PROFILE_ORDER = Object.keys(chrome.headers)
 

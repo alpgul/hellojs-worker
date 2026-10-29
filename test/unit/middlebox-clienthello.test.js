@@ -8,7 +8,7 @@ import * as path from 'node:path'
 import { Writable } from 'node:stream'
 import test from 'node:test'
 
-import * as profiles from '../../lib/profiles/index.js'
+import * as profiles from '../../lib/profiles/index.ts'
 import { TLS } from '../../lib/tls/tls.js'
 
 const SAMPLE_PATH = path.join(import.meta.dirname, '../fixtures/middlebox-tls12-peet.json')

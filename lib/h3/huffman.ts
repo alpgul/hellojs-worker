@@ -5,10 +5,17 @@
 // lookup table once (256 entries × 2 directions of branching) — straightforward
 // 8-bit DFA approach.
 
+type HuffmanEntry = [code: number, bitLength: number]
+
+interface TreeNode {
+	children: [TreeNode | null, TreeNode | null]
+	symbol?: number
+}
+
 // Code table: [symbol]: [code (hex), bit_length]. EOS = 256 with 30-bit code 0x3fffffff.
-const TABLE = (() => {
-	const t = new Array(257)
-	const data = [
+const TABLE: HuffmanEntry[] = (() => {
+	const t: HuffmanEntry[] = new Array(257)
+	const data: HuffmanEntry[] = [
 		[0x1ff8, 13], [0x7fffd8, 23], [0xfffffe2, 28], [0xfffffe3, 28], [0xfffffe4, 28], [0xfffffe5, 28], [0xfffffe6, 28], [0xfffffe7, 28],
 		[0xfffffe8, 28], [0xffffea, 24], [0x3ffffffc, 30], [0xfffffe9, 28], [0xfffffea, 28], [0x3ffffffd, 30], [0xfffffeb, 28], [0xfffffec, 28],
 		[0xfffffed, 28], [0xfffffee, 28], [0xfffffef, 28], [0xffffff0, 28], [0xffffff1, 28], [0xffffff2, 28], [0x3ffffffe, 30], [0xffffff3, 28],
@@ -50,26 +57,30 @@ const TABLE = (() => {
 // Build a flat lookup map: codeBits (left-aligned in MSB) → symbol.
 // Decode is bit-by-bit accumulation into a buffer; on each bit, check all entries with that prefix length.
 // More efficient: build a 1-bit tree.
-let _tree = null
-function buildTree() {
-	const tree = { children: [null, null] }
+let _tree: TreeNode | null = null
+function buildTree(): TreeNode {
+	const tree: TreeNode = { children: [null, null] }
 	for (let sym = 0; sym < 256; sym++) {
 		const [code, len] = TABLE[sym]
 		let node = tree
 		for (let i = len - 1; i >= 0; i--) {
 			const bit = (code >> i) & 1
-			if (!node.children[bit]) node.children[bit] = { children: [null, null] }
-			node = node.children[bit]
+			let next = node.children[bit]
+			if (!next) {
+				next = { children: [null, null] }
+				node.children[bit] = next
+			}
+			node = next
 		}
 		node.symbol = sym
 	}
 	return tree
 }
 
-function decode(buf) {
+function decode(buf: Uint8Array): Buffer {
 	if (!_tree) _tree = buildTree()
-	const out = []
-	let node = _tree
+	const out: number[] = []
+	let node: TreeNode | null = _tree
 	const bitsTotal = buf.length * 8
 	for (let i = 0; i < bitsTotal; i++) {
 		const byte = buf[i >> 3]
@@ -89,11 +100,11 @@ function decode(buf) {
 // Pads the final byte with 1-bits (EOS prefix) so the decoder discards them safely.
 // Uses BigInt for the bit accumulator — RFC codes are up to 30 bits, and JS bitwise
 // operators are 32-bit which is too narrow when paired with a residual high-bit carry.
-function encode(input) {
+function encode(input: string | Uint8Array): Buffer {
 	const bytes = typeof input === 'string' ? Buffer.from(input, 'utf8') : input
 	let buf = 0n
 	let bits = 0
-	const out = []
+	const out: number[] = []
 	for (const byte of bytes) {
 		const [code, len] = TABLE[byte]
 		buf = (buf << BigInt(len)) | BigInt(code)

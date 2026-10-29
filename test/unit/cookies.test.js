@@ -3,7 +3,7 @@
 import assert from 'node:assert'
 import test from 'node:test'
 
-import { Jar, parseSetCookie, domainMatch, pathMatch } from '../../lib/cookies.js'
+import { Jar, parseSetCookie, domainMatch, pathMatch } from '../../lib/cookies.ts'
 
 test('parseSetCookie: name/value + attributes', () => {
 	const r = parseSetCookie('SID=abc; Domain=example.com; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=3600')

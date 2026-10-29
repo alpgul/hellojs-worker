@@ -12,18 +12,40 @@
 //   ENV=development                            — legacy alias for `trace`
 //
 // In-process:
-//   require('./log').setLevel('info')
-//   require('./log').setJsonMode(true)
+//   import log from './log.ts'
+//   log.setLevel('info')
+//   log.setJsonMode(true)
 //
 // Level ordering (each level shows itself + everything more severe):
 //   off (0) < error (1) < warn (2) < info (3) < debug (4) < trace (5)
 
-const LEVELS = { off: 0, error: 1, warn: 2, info: 3, debug: 4, trace: 5 }
+const LEVELS = { off: 0, error: 1, warn: 2, info: 3, debug: 4, trace: 5 } as const
 
-function resolveInitialLevel() {
+type LevelName = keyof typeof LEVELS
+
+export interface Logger {
+	error: (...m: unknown[]) => false
+	warn: (...m: unknown[]) => void
+	success: (...m: unknown[]) => true
+	notify: (...m: unknown[]) => void
+	pretty: (...m: unknown[]) => void
+	debug: (...m: unknown[]) => void
+	trace: (...m: unknown[]) => void
+}
+
+interface LoggerFactory {
+	(prefix?: string): Logger
+	setLevel(level: number | string): void
+	getLevel(): number
+	setJsonMode(enabled: unknown): void
+	getJsonMode(): boolean
+	LEVELS: typeof LEVELS
+}
+
+function resolveInitialLevel(): number {
 	const v = process.env.HELLOJS_LOG
 	if (v && Object.prototype.hasOwnProperty.call(LEVELS, v.toLowerCase())) {
-		return LEVELS[v.toLowerCase()]
+		return LEVELS[v.toLowerCase() as LevelName]
 	}
 	const argv = Array.isArray(process.argv) ? process.argv : []
 	if (process.env.HELLOJS_DEBUG === '1' || argv.includes('-d') || process.env.ENV === 'development') {
@@ -35,27 +57,27 @@ function resolveInitialLevel() {
 let currentLevel = resolveInitialLevel()
 let jsonMode = process.env.HELLOJS_LOG_JSON === '1'
 
-function setLevel(level) {
+function setLevel(level: number | string): void {
 	if (typeof level === 'number') { currentLevel = level; return }
-	const n = LEVELS[String(level).toLowerCase()]
+	const n = LEVELS[String(level).toLowerCase() as LevelName]
 	if (n != null) currentLevel = n
 }
 
-function getLevel() { return currentLevel }
+function getLevel(): number { return currentLevel }
 
-function setJsonMode(enabled) { jsonMode = !!enabled }
-function getJsonMode() { return jsonMode }
+function setJsonMode(enabled: unknown): void { jsonMode = !!enabled }
+function getJsonMode(): boolean { return jsonMode }
 
-const ts = () => {
+const ts = (): string => {
 	const d = new Date()
-	const pad = (n, w = 2) => String(n).padStart(w, '0')
+	const pad = (n: number, w = 2): string => String(n).padStart(w, '0')
 	return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
 		`${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}:${pad(d.getMilliseconds(), 3)}`
 }
 
-const colored = (color, prefix, msg) => `\x1B[${color}m[${ts()}] ${prefix}${msg.join(' ')}\x1B[0m`
+const colored = (color: string, prefix: string, msg: unknown[]): string => `\x1B[${color}m[${ts()}] ${prefix}${msg.join(' ')}\x1B[0m`
 
-function jsonLine(level, prefix, args) {
+function jsonLine(level: string, prefix: string, args: unknown[]): string {
 	const rec = {
 		ts: new Date().toISOString(),
 		level,
@@ -65,25 +87,26 @@ function jsonLine(level, prefix, args) {
 	return JSON.stringify(rec)
 }
 
-const logger = (prefix = '') => {
+const logger = ((prefix = '') => {
 	if (prefix !== '') prefix = `${prefix} `
 
-	const emit = (level, color, label) => (...m) => {
+	const emit = (level: LevelName, color: string, label: string) => (...m: unknown[]): void => {
 		if (currentLevel < LEVELS[level]) return
 		if (jsonMode) console.log(jsonLine(level, prefix, m))
 		else console.log(colored(color, label + prefix, m))
 	}
 
-	const log = {}
-	log.error   = (...m) => { emit('error', '31', '')(...m); return false }
-	log.warn    = emit('warn', '33', '')
-	log.success = (...m) => { emit('info', '32', '')(...m); return true }
-	log.notify  = emit('info', '36', '')
-	log.pretty  = emit('debug', '35', '')
-	log.debug   = emit('debug', '1;37;40', '[DEBUG] ')
-	log.trace   = emit('trace', '90', '[TRACE] ')
+	const log: Logger = {
+		error: (...m) => { emit('error', '31', '')(...m); return false },
+		warn: emit('warn', '33', ''),
+		success: (...m) => { emit('info', '32', '')(...m); return true },
+		notify: emit('info', '36', ''),
+		pretty: emit('debug', '35', ''),
+		debug: emit('debug', '1;37;40', '[DEBUG] '),
+		trace: emit('trace', '90', '[TRACE] '),
+	}
 	return log
-}
+}) as LoggerFactory
 
 logger.setLevel = setLevel
 logger.getLevel = getLevel

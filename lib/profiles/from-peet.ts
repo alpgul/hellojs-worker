@@ -1,6 +1,6 @@
 // Build a hellojs profile by pasting a peet.ws (https://tls.peet.ws/api/all) response.
 //
-//   const profiles = require('@unreleased/hellojs').profiles
+//   import { profiles } from '@unreleased/hellojs'
 //   const json = JSON.parse(fs.readFileSync('./captured.json', 'utf8'))
 //   profiles.register('chrome148-mac', profiles.fromPeet(json))
 //   request({ url: '...', profile: 'chrome148-mac' })
@@ -35,18 +35,66 @@
 // What we can verify: paste the JSON, build the profile, run a request, and the resulting
 // JA4 / JA3 / akamai_fingerprint hashes will match the input.
 
-import { CIPHERS } from '../utils/config.js'
+import { CIPHERS } from '../utils/config.ts'
+
+import type { Http2Settings, Profile } from './types.ts'
+
+interface PeetStatusRequest {
+	certificate_status_type?: string
+	responder_id_list_length?: number
+	request_extensions_length?: number
+}
+
+interface PeetExtension {
+	name: string
+	data?: string
+	supported_groups?: string[]
+	protocols?: string[]
+	versions?: string[]
+	signature_algorithms?: string[]
+	PSK_Key_Exchange_Mode?: string
+	shared_keys?: Array<Record<string, unknown>>
+	algorithms?: string[]
+	padding_data_length?: number
+	status_request?: PeetStatusRequest
+}
+
+interface PeetFrame {
+	frame_type: string
+	settings?: string[]
+	increment?: number
+	flags?: string[]
+	priority?: { weight: number; exclusive?: boolean; depends_on?: number }
+	headers?: string[]
+}
+
+export interface PeetJson {
+	user_agent?: string
+	tls?: {
+		ciphers?: string[]
+		extensions?: PeetExtension[]
+		ja3_hash?: string
+		ja4?: string
+		peetprint_hash?: string
+	}
+	http2?: {
+		sent_frames?: PeetFrame[]
+		akamai_fingerprint_hash?: string
+	}
+}
+
+type CodeResult = { code: number; grease?: undefined } | { code?: undefined; grease: true }
+type IdResult = { id: number; grease?: undefined } | { id?: undefined; grease: true }
 
 // Build a name → numeric code lookup for ciphers. peet.ws prints names like
 // "TLS_AES_128_GCM_SHA256" and hex like "(0x1a1a)".
-const CIPHER_BY_NAME = {}
-for (const [name, code] of Object.entries(CIPHERS)) CIPHER_BY_NAME[name] = code
+const CIPHER_BY_NAME: Record<string, number> = Object.fromEntries(Object.entries(CIPHERS))
 // peet.ws prints the RFC 5746 SCSV without the trailing _SCSV; accept the alias.
 CIPHER_BY_NAME['TLS_EMPTY_RENEGOTIATION_INFO'] = 0x00FF
 
 // IANA TLS extension name → ID (https://www.iana.org/assignments/tls-extensiontype-values/).
 // peet.ws annotates them like "supported_groups (10)" — we use the trailing number when present.
-const EXTENSION_NAME_TO_ID = {
+const EXTENSION_NAME_TO_ID: Record<string, number> = {
 	server_name: 0,
 	status_request: 5,
 	supported_groups: 10,
@@ -69,7 +117,7 @@ const EXTENSION_NAME_TO_ID = {
 }
 
 // signature_algorithms (RFC 8446 §4.2.3.1) — IANA TLS SignatureScheme registry.
-const SIGALG_BY_NAME = {
+const SIGALG_BY_NAME: Record<string, number> = {
 	// SHA-1 legacy
 	rsa_pkcs1_sha1:         0x0201,
 	ecdsa_sha1:             0x0203,
@@ -95,7 +143,7 @@ const SIGALG_BY_NAME = {
 }
 
 // supported_groups (RFC 8446)
-const GROUP_BY_NAME = {
+const GROUP_BY_NAME: Record<string, number> = {
 	'P-256':                 0x0017,
 	'P-384':                 0x0018,
 	'P-521':                 0x0019,
@@ -110,16 +158,10 @@ const GROUP_BY_NAME = {
 }
 
 // cert-compression algorithm names per RFC 8879
-const CERT_COMPRESS_BY_NAME = {
+const CERT_COMPRESS_BY_NAME: Record<string, number> = {
 	zlib:   1,
 	brotli: 2,
 	zstd:   3,
-}
-
-// PSK key-exchange-mode names → numeric (RFC 8446 §4.2.9)
-const PSK_KEM_BY_NAME = {
-	psk_ke:     0,
-	psk_dhe_ke: 1,
 }
 
 // Helpers for parsing peet.ws's annotated strings:
@@ -129,35 +171,35 @@ const PSK_KEM_BY_NAME = {
 //   "supported_groups (10)"
 //   "extensionEncryptedClientHello (boringssl) (65037)"
 
-function isGreaseLabel(label) {
+function isGreaseLabel(label: string): boolean {
 	return /^TLS_GREASE\b|\bGREASE\b/i.test(label)
 }
 
 // Parse the trailing "(0x..)" or "(N)" from a label. Returns null when nothing parses.
-function extractHex(label) {
+function extractHex(label: string): number | null {
 	const m = label.match(/\(0x([0-9a-fA-F]+)\)/)
 	if (m) return Number.parseInt(m[1], 16)
 	return null
 }
-function extractNum(label) {
+function extractNum(label: string): number | null {
 	const m = label.match(/\((\d+)\)$/) || label.match(/\((\d+)\)\s*$/)
-	if (m) return parseInt(m[1], 10)
+	if (m) return Number.parseInt(m[1], 10)
 	return null
 }
 
 // Last-resort numeric coercion: accept bare-hex ("0x402") or bare-decimal ("16") labels.
 // peet emits these for codepoints it has no friendly name for (legacy DSA sigalgs etc.).
-function extractBare(label) {
+function extractBare(label: string): number | null {
 	const t = String(label).trim()
 	let m = t.match(/^0x([0-9a-fA-F]+)$/)
 	if (m) return Number.parseInt(m[1], 16)
 	m = t.match(/^(\d+)$/)
-	if (m) return parseInt(m[1], 10)
+	if (m) return Number.parseInt(m[1], 10)
 	return null
 }
 
 // Centralized: name lookup → trailing-paren → bare-hex/decimal. Returns null if all fail.
-function toCode(label, byName) {
+function toCode(label: string, byName: Record<string, number> | null): number | null {
 	if (byName) {
 		const exact = byName[label]
 		if (exact != null) return exact
@@ -173,35 +215,35 @@ function toCode(label, byName) {
 	return null
 }
 
-function cipherFromLabel(label) {
+function cipherFromLabel(label: string): CodeResult {
 	if (isGreaseLabel(label)) return { grease: true }
 	const code = toCode(label, CIPHER_BY_NAME)
 	if (code != null) return { code }
 	throw new Error(`fromPeet: unknown cipher ${JSON.stringify(label)}`)
 }
 
-function groupFromLabel(label) {
+function groupFromLabel(label: string): CodeResult {
 	if (isGreaseLabel(label)) return { grease: true }
 	const code = toCode(label, GROUP_BY_NAME)
 	if (code != null) return { code }
 	throw new Error(`fromPeet: unknown group ${JSON.stringify(label)}`)
 }
 
-function versionFromLabel(label) {
+function versionFromLabel(label: string): CodeResult {
 	if (isGreaseLabel(label)) return { grease: true }
-	const map = { 'TLS 1.3': 0x0304, 'TLS 1.2': 0x0303, 'TLS 1.1': 0x0302, 'TLS 1.0': 0x0301 }
+	const map: Record<string, number> = { 'TLS 1.3': 0x0304, 'TLS 1.2': 0x0303, 'TLS 1.1': 0x0302, 'TLS 1.0': 0x0301 }
 	const code = toCode(label, map)
 	if (code != null) return { code }
 	throw new Error(`fromPeet: unknown TLS version ${JSON.stringify(label)}`)
 }
 
-function sigalgFromLabel(label) {
+function sigalgFromLabel(label: string): number {
 	const code = toCode(label, SIGALG_BY_NAME)
 	if (code != null) return code
 	throw new Error(`fromPeet: unknown signature_algorithm ${JSON.stringify(label)}`)
 }
 
-function extensionIdFromLabel(label) {
+function extensionIdFromLabel(label: string): IdResult {
 	// "supported_groups (10)" → 10. "TLS_GREASE (0x6a6a)" → mark grease.
 	if (isGreaseLabel(label)) return { grease: true }
 	const id = toCode(label, EXTENSION_NAME_TO_ID)
@@ -210,11 +252,11 @@ function extensionIdFromLabel(label) {
 	// "Unknown extension 0xNNNN". Accept both — the ID goes into extensionOrder and the
 	// caller (fromPeet) captures the raw `data` blob for CreateRawExtension to emit.
 	const m = String(label).match(/^Unknown extension\s+(?:0x([0-9a-fA-F]+)|(\d+))$/)
-	if (m) return { id: m[1] ? Number.parseInt(m[1], 16) : parseInt(m[2], 10) }
+	if (m) return { id: m[1] ? Number.parseInt(m[1], 16) : Number.parseInt(m[2], 10) }
 	throw new Error(`fromPeet: unknown extension ${JSON.stringify(label)}`)
 }
 
-function fromPeet(json, opts = {}) {
+function fromPeet(json: PeetJson, opts: { name?: string } = {}): Profile {
 	if (!json || !json.tls || !json.http2) {
 		throw new Error('fromPeet: input does not look like a peet.ws response (missing tls / http2)')
 	}
@@ -226,8 +268,8 @@ function fromPeet(json, opts = {}) {
 	let useGrease = false
 
 	// ---- TLS ciphers (order + GREASE positions) ----
-	const cipherCodes = []
-	for (const c of json.tls.ciphers) {
+	const cipherCodes: number[] = []
+	for (const c of json.tls.ciphers || []) {
 		const r = cipherFromLabel(c)
 		if (r.grease) { useGrease = true; continue }
 		cipherCodes.push(r.code)
@@ -245,13 +287,13 @@ function fromPeet(json, opts = {}) {
 	// hashes (JA4 / peetprint) that encode 18 extensions will come out as 17 instead on a
 	// cold handshake — this is expected and matches what a cold Chrome does on first contact.
 	const INTERACTIVE_EXT_IDS = new Set([41, 42])
-	const extensionOrder = []      // [{id} | {grease:true}] preserving the wire order seen
+	const extensionOrder: IdResult[] = []      // [{id} | {grease:true}] preserving the wire order seen
 	// Captured verbatim bodies for extensions that have no first-class builder. Keyed by
 	// numeric extension ID. tls.js registers a CreateRawExtension-based builder for each
 	// entry so the CH emits the exact bytes peet observed. Passive fingerprint extensions
 	// (Chrome experiments, telemetry) round-trip byte-exact; interactive extensions still
 	// need their own real builder (this map isn't consulted for the well-known IDs above).
-	const rawExtensionBodies = {}
+	const rawExtensionBodies: Record<number, Buffer> = {}
 	for (const ext of extensions) {
 		const r = extensionIdFromLabel(ext.name)
 		if (r.grease) useGrease = true
@@ -265,7 +307,7 @@ function fromPeet(json, opts = {}) {
 	}
 
 	// Lookup helpers for specific extensions:
-	const findExt = (idOrPredicate) =>
+	const findExt = (idOrPredicate: number | ((id: number, e: PeetExtension) => boolean)): PeetExtension | undefined =>
 		extensions.find(e => {
 			const r = extensionIdFromLabel(e.name)
 			if (r.grease) return false
@@ -275,7 +317,7 @@ function fromPeet(json, opts = {}) {
 	// supported_groups (10)
 	const groupsExt = findExt(10)
 	if (!groupsExt) throw new Error('fromPeet: supported_groups extension missing from input')
-	const supportedGroups = []
+	const supportedGroups: number[] = []
 	for (const g of groupsExt.supported_groups || []) {
 		const r = groupFromLabel(g)
 		if (r.grease) { useGrease = true; continue }
@@ -288,7 +330,7 @@ function fromPeet(json, opts = {}) {
 
 	// supported_versions (43)
 	const versionsExt = findExt(43)
-	const supportedVersions = []
+	const supportedVersions: number[] = []
 	if (versionsExt) {
 		for (const v of versionsExt.versions || []) {
 			const r = versionFromLabel(v)
@@ -299,20 +341,20 @@ function fromPeet(json, opts = {}) {
 
 	// signature_algorithms (13)
 	const sigExt = findExt(13)
-	const signatureAlgorithms = []
+	const signatureAlgorithms: number[] = []
 	if (sigExt) for (const s of sigExt.signature_algorithms || []) signatureAlgorithms.push(sigalgFromLabel(s))
 
 	// psk_key_exchange_modes (45)
 	const pskExt = findExt(45)
-	let pskKemModes = [1] // psk_dhe_ke default
+	let pskKemModes: number[] = [1] // psk_dhe_ke default
 	if (pskExt && pskExt.PSK_Key_Exchange_Mode) {
 		const m = pskExt.PSK_Key_Exchange_Mode.match(/\((\d+)\)/)
-		if (m) pskKemModes = [parseInt(m[1], 10)]
+		if (m) pskKemModes = [Number.parseInt(m[1], 10)]
 	}
 
 	// key_share (51) — peet shows the offered groups; ignore the random key bytes.
 	const ksExt = findExt(51)
-	const keyShareGroups = []
+	const keyShareGroups: number[] = []
 	if (ksExt && Array.isArray(ksExt.shared_keys)) {
 		for (const entry of ksExt.shared_keys) {
 			const label = Object.keys(entry)[0]
@@ -332,7 +374,7 @@ function fromPeet(json, opts = {}) {
 
 	// compress_certificate (27)
 	const ccExt = findExt(27)
-	const certCompressionAlgorithms = []
+	const certCompressionAlgorithms: number[] = []
 	if (ccExt) for (const a of ccExt.algorithms || []) {
 		const aname = a.replace(/\s*\(.*$/, '').trim()
 		const code = CERT_COMPRESS_BY_NAME[aname] ?? extractNum(a) ?? extractHex(a)
@@ -347,8 +389,8 @@ function fromPeet(json, opts = {}) {
 	// We keep both: a Buffer of the raw body for byte-exact emission, and a parsed sigalg list
 	// (best-effort) for callers that want to introspect.
 	const sigCertExt = findExt(50)
-	let signatureAlgorithmsCertRaw = null
-	let signatureAlgorithmsCert = null
+	let signatureAlgorithmsCertRaw: Buffer | null = null
+	let signatureAlgorithmsCert: number[] | null = null
 	if (sigCertExt) {
 		if (typeof sigCertExt.data === 'string' && /^[0-9a-fA-F]*$/.test(sigCertExt.data)) {
 			signatureAlgorithmsCertRaw = Buffer.from(sigCertExt.data, 'hex')
@@ -390,11 +432,11 @@ function fromPeet(json, opts = {}) {
 	// Pick the first SETTINGS frame that actually has settings; fall back to the first.
 	const settingsFrames = (h2.sent_frames || []).filter(f => f.frame_type === 'SETTINGS')
 	const sentSettings = settingsFrames.find(f => Array.isArray(f.settings) && f.settings.length) || settingsFrames[0]
-	const settings = {}
+	const settings: Http2Settings = {}
 	if (sentSettings) {
 		for (const s of sentSettings.settings || []) {
 			const [name, val] = s.split('=').map(x => x.trim())
-			const v = parseInt(val, 10)
+			const v = Number.parseInt(val, 10)
 			if (name === 'HEADER_TABLE_SIZE') settings.headerTableSize = v
 			else if (name === 'ENABLE_PUSH') settings.enablePush = v !== 0
 			else if (name === 'INITIAL_WINDOW_SIZE') settings.initialWindowSize = v
@@ -416,9 +458,9 @@ function fromPeet(json, opts = {}) {
 	// Header order: pseudo-headers come first (peet preserves order). Build:
 	//   pseudoHeaderOrder = first run of ':*' headers
 	//   defaultHeaders   = remaining headers, in order, as { lowerKey: value }
-	const pseudoHeaderOrder = []
-	const defaultHeaders = {}
-	let userAgent = null
+	const pseudoHeaderOrder: string[] = []
+	const defaultHeaders: Record<string, string> = {}
+	let userAgent: string | null = null
 	if (headersFrame && Array.isArray(headersFrame.headers)) {
 		let pseudoPhase = true
 		for (const h of headersFrame.headers) {

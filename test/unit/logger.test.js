@@ -3,7 +3,7 @@
 import assert from 'node:assert'
 import test from 'node:test'
 
-import logger from '../../lib/models/log.js'
+import logger from '../../lib/models/log.ts'
 
 function captureLogs(fn) {
 	const orig = console.log

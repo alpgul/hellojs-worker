@@ -100,7 +100,15 @@ export default tseslint.config(
 	},
 	{
 		files: ['**/*.ts'],
-		extends: [...tseslint.configs.recommended, importX.flatConfigs.typescript],
+		extends: [...tseslint.configs.recommended],
+		// importX.flatConfigs.typescript is deliberately not extended: it installs the
+		// eslint-import-resolver-typescript resolver, which reports "invalid interface" here,
+		// and every rule that needs module resolution is off.
+		settings: {
+			'import-x/resolver': {
+				node: { extensions: ['.js', '.mjs', '.cjs', '.ts', '.mts', '.cts', '.json'] },
+			},
+		},
 		rules: {
 			'no-undef': 'off',
 			'no-unused-vars': 'off',

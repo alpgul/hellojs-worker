@@ -5,7 +5,7 @@
 import assert from 'node:assert'
 import test from 'node:test'
 
-import { buildH1Headers, buildH2Headers } from '../../lib/headers.js'
+import { buildH1Headers, buildH2Headers } from '../../lib/headers.ts'
 
 function hostLines(block) {
 	return block.split('\r\n').filter((l) => /^host:/i.test(l))

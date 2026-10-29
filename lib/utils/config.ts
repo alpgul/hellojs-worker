@@ -14,7 +14,7 @@ const MESSAGE_TYPES = {
 	FINISHED: 0x14,
 	APPLICATION_DATA: 0x17,
 	ALERT: 0x15,
-}
+} as const
 
 
 const CIPHERS = {
@@ -42,14 +42,14 @@ const CIPHERS = {
 	TLS_RSA_WITH_3DES_EDE_CBC_SHA: 0x000A,
 	// RFC 5746 signaling SCSV — TLS-1.2 clients that don't send the renegotiation_info
 	// extension include this in their cipher list instead. peet labels it without the
-	// _SCSV suffix; from-peet.js accepts the alias.
+	// _SCSV suffix; from-peet.ts accepts the alias.
 	TLS_EMPTY_RENEGOTIATION_INFO_SCSV: 0x00FF,
-}
+} as const
 
 const TLS_VERSIONS = {
 	TLS1_2: 0x0303,
 	TLS1_3: 0x0304,
-}
+} as const
 
 // supported_groups (RFC 8446 §4.2.7)
 const GROUPS = {
@@ -60,7 +60,7 @@ const GROUPS = {
 	P521: 0x0019,
 	FFDHE2048: 0x0100,
 	FFDHE3072: 0x0101,
-}
+} as const
 
 // signature_algorithms (RFC 8446 §4.2.3)
 const SIGNATURE_ALGORITHMS = {
@@ -75,7 +75,7 @@ const SIGNATURE_ALGORITHMS = {
 	RSA_PKCS1_SHA512: 0x0601,
 	ECDSA_SHA1: 0x0203,
 	RSA_PKCS1_SHA1: 0x0201,
-}
+} as const
 
 // TLS extension types (IANA registry)
 const EXTENSIONS = {
@@ -100,22 +100,30 @@ const EXTENSIONS = {
 	APPLICATION_SETTINGS_V2: 0x446d, // ALPS v2
 	ENCRYPTED_CLIENT_HELLO: 65037,
 	RENEGOTIATION_INFO: 65281,
-}
+} as const
 
 // compress_certificate algorithms (RFC 8879)
 const CERT_COMPRESSION = {
 	ZLIB: 0x0001,
 	BROTLI: 0x0002,
 	ZSTD: 0x0003,
-}
+} as const
 
 // status_request / status_request_v2 certificate status types (RFC 6066, RFC 6961)
 const CERTIFICATE_STATUS_TYPE = {
 	OCSP: 1,
 	OCSP_MULTI: 2,
+} as const
+
+export interface HashInfo {
+	hash: string
+	aead: string
+	keyLen: number
+	hashLen: number
+	ivLen: number
 }
 
-const HASHES = {
+const HASHES: Record<string, HashInfo> = {
 	"1301": {
 		hash: "sha256",
 		aead: 'aes-128-gcm',

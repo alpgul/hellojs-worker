@@ -1,7 +1,7 @@
 import assert from 'node:assert'
 import test from 'node:test'
 
-import * as v from '../../lib/h3/varint.js'
+import * as v from '../../lib/h3/varint.ts'
 
 // RFC 9000 Appendix A.1 test vectors
 test('varint encode/decode round-trip', () => {

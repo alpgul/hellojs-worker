@@ -2,16 +2,18 @@
 // Firefox 147 impersonation values (cipher/groups/sigalg lists, extension order,
 // settings, pseudo-header order) with the macOS navigation header set.
 
-import { CIPHERS, TLS_VERSIONS, GROUPS, SIGNATURE_ALGORITHMS, EXTENSIONS, CERTIFICATE_STATUS_TYPE, CERT_COMPRESSION } from '../utils/config.js'
+import { CIPHERS, TLS_VERSIONS, GROUPS, SIGNATURE_ALGORITHMS, EXTENSIONS, CERTIFICATE_STATUS_TYPE, CERT_COMPRESSION } from '../utils/config.ts'
+
+import type { Profile } from './types.ts'
 
 // Wire encodings for captured raw extension bodies.
-function u16Vector(values) {
+function u16Vector(values: number[]): Buffer {
 	const buf = Buffer.alloc(2 + values.length * 2)
 	buf.writeUInt16BE(values.length * 2, 0)
 	values.forEach((v, i) => buf.writeUInt16BE(v, 2 + i * 2))
 	return buf
 }
-function u16(value) {
+function u16(value: number): Buffer {
 	const buf = Buffer.alloc(2)
 	buf.writeUInt16BE(value, 0)
 	return buf
@@ -34,7 +36,7 @@ const FIREFOX_147_HEADERS = Object.freeze({
 	'te': 'trailers',
 })
 
-export default {
+const profile = {
 	name: 'firefox147',
 
 	tls: {
@@ -165,4 +167,6 @@ export default {
 	// Identity header: callers may not replace the UA, mirroring a browser.
 	fixedHeaders: ['user-agent'],
 	userAgent: FIREFOX_147_UA,
-}
+} satisfies Profile
+
+export default profile

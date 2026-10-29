@@ -22,15 +22,40 @@
 
 import { URL } from 'node:url'
 
-function parseSetCookie(s) {
+export interface Cookie {
+	name: string
+	value: string
+	domain: string
+	path: string
+	secure: boolean
+	httponly: boolean
+	samesite: string | null
+	expiresAt: number | null
+	hostOnly: boolean
+	creation: number
+}
+
+export interface ParsedSetCookie {
+	name: string
+	value: string
+	attrs: Record<string, string>
+}
+
+export type PublicSuffixList = Set<string> | ((host: string) => boolean)
+
+export interface JarOptions {
+	maxCookies?: number
+}
+
+function parseSetCookie(s: string): ParsedSetCookie | null {
 	const parts = s.split(';')
-	const first = parts.shift()
+	const first = parts.shift() ?? ''
 	const eq = first.indexOf('=')
 	if (eq < 0) return null
 	const name = first.slice(0, eq).trim()
 	const value = first.slice(eq + 1).trim()
 	if (!name) return null
-	const attrs = {}
+	const attrs: Record<string, string> = {}
 	for (const a of parts) {
 		const idx = a.indexOf('=')
 		const k = (idx < 0 ? a : a.slice(0, idx)).trim().toLowerCase()
@@ -41,14 +66,14 @@ function parseSetCookie(s) {
 	return { name, value, attrs }
 }
 
-function isIp(host) {
+function isIp(host: string): boolean {
 	// Conservative: IPv4 dotted decimal or IPv6 (contains ':').
 	if (/^[0-9.]+$/.test(host)) return true
 	if (host.includes(':')) return true
 	return false
 }
 
-function domainMatch(cookieDomain, hostname) {
+function domainMatch(cookieDomain: string, hostname: string): boolean {
 	// RFC 6265 §5.1.3: cookie-domain matches a host if:
 	//   - exact match, OR
 	//   - hostname ends with `.cookieDomain` AND hostname is not an IP address
@@ -59,7 +84,7 @@ function domainMatch(cookieDomain, hostname) {
 	return h.endsWith('.' + d)
 }
 
-function pathMatch(cookiePath, requestPath) {
+function pathMatch(cookiePath: string, requestPath: string): boolean {
 	// RFC 6265 §5.1.4
 	if (cookiePath === requestPath) return true
 	if (!cookiePath.endsWith('/') && requestPath.startsWith(cookiePath + '/')) return true
@@ -67,7 +92,7 @@ function pathMatch(cookiePath, requestPath) {
 	return false
 }
 
-function defaultPath(reqPath) {
+function defaultPath(reqPath: string): string {
 	// RFC 6265 §5.1.4: default-path is the request URI path up to and including the LAST '/'.
 	// If no '/' or path is empty, default to '/'.
 	if (!reqPath || reqPath[0] !== '/') return '/'
@@ -77,19 +102,23 @@ function defaultPath(reqPath) {
 }
 
 class Jar {
-	constructor(opts = {}) {
+	cookies: Cookie[]
+	maxCookies: number
+	publicSuffixList: PublicSuffixList | null
+
+	constructor(opts: JarOptions = {}) {
 		// cookies: array of { name, value, domain, path, secure, httponly, samesite, expiresAt, hostOnly, creation }
 		this.cookies = []
 		this.maxCookies = opts.maxCookies ?? 3000   // RFC 6265bis suggests 3000 total
 		this.publicSuffixList = null
 	}
 
-	setPublicSuffixList(setOrFn) {
+	setPublicSuffixList(setOrFn: PublicSuffixList | null): void {
 		// Either a Set<string> or a function(host) -> boolean (true if `host` is a public suffix).
 		this.publicSuffixList = setOrFn
 	}
 
-	_isPublicSuffix(d) {
+	_isPublicSuffix(d: string): boolean {
 		const psl = this.publicSuffixList
 		if (!psl) return false
 		if (typeof psl === 'function') return psl(d)
@@ -99,10 +128,10 @@ class Jar {
 
 	// Accept Set-Cookie header value(s) — either a single string or an array — applied to a
 	// request URL. RFC 6265 §5.3 storage algorithm (slimmed).
-	setCookie(setCookieValue, requestUrlOrHost) {
+	setCookie(setCookieValue: string | string[], requestUrlOrHost: string): void {
 		const arr = Array.isArray(setCookieValue) ? setCookieValue : [setCookieValue]
 		// Caller may pass a full URL or just a host string. Try to URL-parse first.
-		let u
+		let u: URL | null
 		try { u = typeof requestUrlOrHost === 'string' && requestUrlOrHost.includes('://') ? new URL(requestUrlOrHost) : null } catch { u = null }
 		const reqHost = (u ? u.hostname : (requestUrlOrHost.split(':')[0] || '')).toLowerCase()
 		const reqPath = u ? (u.pathname || '/') : '/'
@@ -131,9 +160,9 @@ class Jar {
 			const samesite = (parsed.attrs.samesite || '').toLowerCase() || null
 
 			// Expiry: Max-Age wins over Expires (RFC 6265 §5.3).
-			let expiresAt = null
+			let expiresAt: number | null = null
 			if (parsed.attrs['max-age']) {
-				const n = parseInt(parsed.attrs['max-age'], 10)
+				const n = Number.parseInt(parsed.attrs['max-age'], 10)
 				if (!Number.isNaN(n)) expiresAt = n <= 0 ? 0 : (now + n * 1000)
 			} else if (parsed.attrs.expires) {
 				const t = Date.parse(parsed.attrs.expires)
@@ -148,7 +177,7 @@ class Jar {
 			const idx = this.cookies.findIndex(c =>
 				c.name === parsed.name && c.domain === domain && c.path === path
 			)
-			const entry = {
+			const entry: Cookie = {
 				name: parsed.name, value: parsed.value, domain, path, secure, httponly,
 				samesite, expiresAt, hostOnly, creation: idx >= 0 ? this.cookies[idx].creation : now,
 			}
@@ -169,15 +198,15 @@ class Jar {
 		}
 	}
 
-	getCookies(requestUrlOrHost) {
-		let u
+	getCookies(requestUrlOrHost: string): Cookie[] {
+		let u: URL | null
 		try { u = typeof requestUrlOrHost === 'string' && requestUrlOrHost.includes('://') ? new URL(requestUrlOrHost) : null } catch { u = null }
 		const host = (u ? u.hostname : (requestUrlOrHost.split(':')[0] || '')).toLowerCase()
 		const path = u ? (u.pathname || '/') : '/'
 		const scheme = u ? u.protocol.replace(':', '') : 'https'
 		const now = Date.now()
 
-		const out = []
+		const out: Cookie[] = []
 		for (const c of this.cookies) {
 			if (c.expiresAt !== null && c.expiresAt <= now) continue
 			if (c.secure && scheme !== 'https') continue
@@ -194,12 +223,12 @@ class Jar {
 		return out
 	}
 
-	getCookieString(requestUrlOrHost) {
+	getCookieString(requestUrlOrHost: string): string {
 		return this.getCookies(requestUrlOrHost).map(c => `${c.name}=${c.value}`).join('; ')
 	}
 
 	// Drop expired cookies. Callers can run this periodically to bound memory.
-	gc() {
+	gc(): void {
 		const now = Date.now()
 		this.cookies = this.cookies.filter(c => c.expiresAt === null || c.expiresAt > now)
 	}

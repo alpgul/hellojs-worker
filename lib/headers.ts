@@ -11,18 +11,23 @@
 //
 // A profile can extend the fixed set with a `fixedHeaders` array of lowercase names.
 
-import { HellojsError } from './errors.js'
+import { HellojsError } from './errors.ts'
+
+import type { Profile } from './profiles/types.ts'
+
+export type HeaderValue = string | string[] | number | boolean | null | undefined
+export type HeaderMap = Record<string, HeaderValue>
 
 const DEFAULT_FIXED_HEADERS = ['user-agent', 'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform']
 
 const DEFAULT_PSEUDO_ORDER = [':method', ':authority', ':scheme', ':path']
 
-function pseudoOrderFromProfile(profile) {
+function pseudoOrderFromProfile(profile?: Profile | null): string[] {
 	const o = profile?.http2?.pseudoHeaderOrder
 	return Array.isArray(o) && o.length ? o : DEFAULT_PSEUDO_ORDER
 }
 
-function fixedHeadersFor(profile) {
+function fixedHeadersFor(profile?: Profile | null): Set<string> {
 	const names = profile && Array.isArray(profile.fixedHeaders) ? profile.fixedHeaders : DEFAULT_FIXED_HEADERS
 	return new Set(names.map((n) => String(n).toLowerCase()))
 }
@@ -30,16 +35,16 @@ function fixedHeadersFor(profile) {
 // Merge caller headers into the profile's header block. Profile headers keep their declared
 // order; overriding an existing name updates its value in place. Names the profile does not
 // define append in caller order, except Cookie, which Chrome emits just before `priority`.
-function mergeProfileHeaders(userHeaders, profile) {
+function mergeProfileHeaders(userHeaders: HeaderMap | null | undefined, profile?: Profile | null): HeaderMap {
 	const defaults = (profile && profile.headers) || {}
 	const fixed = fixedHeadersFor(profile)
-	const out = {}
-	const index = new Map()
-	for (const [k, v] of Object.entries(defaults)) {
+	const out: HeaderMap = {}
+	const index = new Map<string, string>()
+	for (const [k, v] of Object.entries<HeaderValue>(defaults)) {
 		out[k] = v
 		index.set(k.toLowerCase(), k)
 	}
-	for (const [k, v] of Object.entries(userHeaders || {})) {
+	for (const [k, v] of Object.entries<HeaderValue>(userHeaders || {})) {
 		const lk = k.toLowerCase()
 		if (lk === 'host') continue
 		const existing = index.get(lk)
@@ -72,14 +77,22 @@ function mergeProfileHeaders(userHeaders, profile) {
 // profile-defined order, then the profile header block (caller overrides applied in place),
 // then caller-only headers. Connection-specific headers are illegal in H2 (RFC 7540 §8.1.2.2)
 // and are dropped even if the caller passes them.
-function buildH2Headers({ method, host, path, userHeaders, profile }) {
+export interface H2HeaderInput {
+	method: string
+	host: string
+	path: string
+	userHeaders?: HeaderMap | null
+	profile?: Profile | null
+}
+
+function buildH2Headers({ method, host, path, userHeaders, profile }: H2HeaderInput): HeaderMap {
 	const order = pseudoOrderFromProfile(profile)
 	// A caller-supplied Host header overrides :authority and is NEVER emitted as a regular h2
 	// header — Chrome carries the origin only in :authority, so a stray `host` header is a tell.
-	let hostOverride
+	let hostOverride: HeaderValue
 	if (userHeaders) for (const k of Object.keys(userHeaders)) if (k.toLowerCase() === 'host') hostOverride = userHeaders[k]
-	const pseudoVals = { ':method': method, ':authority': hostOverride != null ? hostOverride : host, ':scheme': 'https', ':path': path }
-	const h = {}
+	const pseudoVals: Record<string, HeaderValue> = { ':method': method, ':authority': hostOverride ?? host, ':scheme': 'https', ':path': path }
+	const h: HeaderMap = {}
 	for (const k of order) {
 		if (pseudoVals[k] != null) h[k] = pseudoVals[k]
 	}
@@ -99,12 +112,18 @@ function buildH2Headers({ method, host, path, userHeaders, profile }) {
 // HTTP/1.1 header block builder. Returns a CRLF-joined header section (no leading request line).
 // Host is builder-managed (RFC 7230 §5.4 — exactly one Host, first) so a caller-supplied Host
 // overrides the URL-derived value rather than producing a duplicate line.
-function buildH1Headers({ host, userHeaders, profile }) {
-	let hostOverride
-	if (userHeaders) for (const [k, v] of Object.entries(userHeaders)) {
+export interface H1HeaderInput {
+	host: string
+	userHeaders?: HeaderMap | null
+	profile?: Profile | null
+}
+
+function buildH1Headers({ host, userHeaders, profile }: H1HeaderInput): string {
+	let hostOverride: HeaderValue
+	if (userHeaders) for (const [k, v] of Object.entries<HeaderValue>(userHeaders)) {
 		if (k.toLowerCase() === 'host') { hostOverride = v; break }
 	}
-	const hostValue = hostOverride != null ? hostOverride : host
+	const hostValue = hostOverride ?? host
 	const lines = [`Host: ${hostValue}`]
 	for (const [k, v] of Object.entries(mergeProfileHeaders(userHeaders, profile))) {
 		lines.push(`${k}: ${v}`)

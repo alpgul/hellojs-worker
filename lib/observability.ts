@@ -2,7 +2,7 @@
 // need for SLO tracking, distributed tracing, and metrics.
 //
 // Usage:
-//   const request = require('@unreleased/hellojs')
+//   import request from '@unreleased/hellojs'
 //   request.observability.on('request:start', (ev) => { ... })
 //   request.observability.on('handshake:end', (ev) => { ... })
 //
@@ -30,14 +30,14 @@ class ObservabilityEmitter extends EventEmitter {
 		// Default max listeners is 10; production users with multiple observers will trip this.
 		this.setMaxListeners(50)
 	}
-	safeEmit(evt, payload) {
-		try { super.emit(evt, payload) } catch { /* never fail the request because a hook threw */ }
+	safeEmit(event: string | symbol, payload: unknown): void {
+		try { super.emit(event, payload) } catch { /* never fail the request because a hook threw */ }
 	}
 }
 
 const observability = new ObservabilityEmitter()
 
 let _nextId = 1
-function nextRequestId() { return _nextId++ }
+function nextRequestId(): number { return _nextId++ }
 
 export { observability, nextRequestId }

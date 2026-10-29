@@ -4,7 +4,7 @@ import assert from 'node:assert'
 import { randomBytes } from 'node:crypto'
 import test from 'node:test'
 
-import * as huffman from '../../lib/h3/huffman.js'
+import * as huffman from '../../lib/h3/huffman.ts'
 
 test('RFC 7541 Appendix C.4.1 vector: www.example.com', () => {
 	const got = huffman.encode('www.example.com')

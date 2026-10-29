@@ -1,7 +1,9 @@
 // Chrome 147 on macOS profile — pinned values that produce a fingerprint identical to
 // the real browser captured in test/fixtures/chrome147-peet.json.
 
-import { CIPHERS, GROUPS, SIGNATURE_ALGORITHMS, EXTENSIONS, CERT_COMPRESSION } from '../utils/config.js'
+import { CIPHERS, GROUPS, SIGNATURE_ALGORITHMS, EXTENSIONS, CERT_COMPRESSION } from '../utils/config.ts'
+
+import type { Profile } from './types.ts'
 
 const CHROME_147_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36'
 
@@ -22,7 +24,7 @@ const CHROME_147_HEADERS = Object.freeze({
 	'priority': 'u=0, i',
 })
 
-export default {
+const profile = {
 	name: 'chrome147-mac',
 
 	tls: {
@@ -102,4 +104,6 @@ export default {
 	// Identity headers: callers may not replace these, mirroring a browser.
 	fixedHeaders: ['user-agent', 'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform'],
 	userAgent: CHROME_147_UA,
-}
+} satisfies Profile
+
+export default profile

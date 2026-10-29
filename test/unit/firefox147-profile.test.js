@@ -3,9 +3,9 @@
 import assert from 'node:assert'
 import test from 'node:test'
 
-import { buildH2Headers } from '../../lib/headers.js'
-import firefox from '../../lib/profiles/firefox147.js'
-import * as profiles from '../../lib/profiles/index.js'
+import { buildH2Headers } from '../../lib/headers.ts'
+import firefox from '../../lib/profiles/firefox147.ts'
+import * as profiles from '../../lib/profiles/index.ts'
 
 test('firefox147 is registered', () => {
 	assert.strictEqual(profiles.get('firefox147').name, 'firefox147')

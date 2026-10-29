@@ -3,7 +3,7 @@
 import assert from 'node:assert'
 import test from 'node:test'
 
-import { HellojsError, CODES, CATEGORY, wrap } from '../../lib/errors.js'
+import { HellojsError, CODES, CATEGORY, wrap } from '../../lib/errors.ts'
 
 test('HellojsError has stable name + code + category', () => {
 	const e = new HellojsError('boom', 'EHTTP')
