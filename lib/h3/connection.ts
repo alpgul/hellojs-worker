@@ -124,6 +124,7 @@ class QuicConnection extends EventEmitter {
 
 	// CRYPTO stream offsets
 	declare cryptoOffsetOut: EpochMap<number>
+	declare cryptoOffsetIn: EpochMap<number>
 	declare cryptoBufIn: EpochMap<Buffer>
 
 	// Retry handling state
@@ -163,6 +164,7 @@ class QuicConnection extends EventEmitter {
 	// TLS state
 	declare clientRandom: Buffer | null
 	declare clientPrivateKey: crypto.KeyObject | null
+	declare peerAddr: { address: string; port: number } | null
 	declare clientPubRaw32: Buffer | null
 	declare transcript: Buffer[]
 	declare handshakeSecret: Buffer | null
@@ -210,6 +212,7 @@ class QuicConnection extends EventEmitter {
 		this.needAck = { initial: false, handshake: false, oneRtt: false }
 
 		this.cryptoOffsetOut = { initial: 0, handshake: 0, oneRtt: 0 }
+		this.cryptoOffsetIn = { initial: 0, handshake: 0, oneRtt: 0 }
 		this.cryptoBufIn = { initial: Buffer.alloc(0), handshake: Buffer.alloc(0), oneRtt: Buffer.alloc(0) }
 
 		this.retryToken = Buffer.alloc(0)
@@ -248,6 +251,7 @@ class QuicConnection extends EventEmitter {
 
 		this.clientRandom = null
 		this.clientPrivateKey = null
+		this.peerAddr = null
 		this.clientPubRaw32 = null
 		this.transcript = []
 		this.handshakeSecret = null
@@ -268,7 +272,13 @@ class QuicConnection extends EventEmitter {
 	async connect(): Promise<void> {
 		const socket = dgram.createSocket('udp4')
 		this.socket = socket
-		socket.on('message', (msg: Buffer) => this._onDatagram(msg))
+		socket.on('message', (msg: Buffer, rinfo: { address: string; port: number }) => {
+			// Pin the peer to the address that answered: send() on a hostname re-resolves per call,
+			// so a multi-A-record host can answer from one address and receive our replies on another,
+			// which stalls the handshake once the server retransmits.
+			if (!this.peerAddr) this.peerAddr = { address: rinfo.address, port: rinfo.port }
+			this._onDatagram(msg)
+		})
 		socket.on('error', (e: Error) => this.emit('error', e))
 
 		// Resolve and bind
@@ -374,16 +384,20 @@ class QuicConnection extends EventEmitter {
 		this._sendInitial(cryptoFrame)
 	}
 
-	_sendInitial(cryptoFrame: Buffer): void {
+	_padInitialPayload(payload: Buffer): Buffer {
 		// Pad the UDP datagram to ≥1200 bytes (RFC 9000 §14.1).
 		const TARGET = 1200
 		const tokenLen = this.retryToken.length
 		const headerOverheadGuess = 1 + 4 + 1 + this.dstCid.length + 1 + this.srcCid.length + (tokenLen > 0 ? 2 : 1) + tokenLen + 2 + 4
-		let payload: Buffer = cryptoFrame
 		const padTarget = TARGET - headerOverheadGuess - 16
 		if (payload.length < padTarget) {
-			payload = Buffer.concat([payload, Buffer.alloc(padTarget - payload.length, 0x00)])
+			return Buffer.concat([payload, Buffer.alloc(padTarget - payload.length, 0x00)])
 		}
+		return payload
+	}
+
+	_sendInitial(cryptoFrame: Buffer): void {
+		const payload = this._padInitialPayload(cryptoFrame)
 		const packet = pkt.buildInitial({
 			dstCid: this.dstCid,
 			srcCid: this.srcCid,
@@ -402,7 +416,10 @@ class QuicConnection extends EventEmitter {
 
 	_sendDatagram(buf: Buffer): void {
 		if (this._closed) return
-		try { this.socket?.send(buf, this.port, this.host) } catch {}
+		try {
+			if (this.peerAddr) this.socket?.send(buf, this.peerAddr.port, this.peerAddr.address)
+			else this.socket?.send(buf, this.port, this.host)
+		} catch {}
 	}
 
 	_onDatagram(msg: Buffer): void {
@@ -475,6 +492,7 @@ class QuicConnection extends EventEmitter {
 		this.largestRecv.initial = -1
 		this.needAck.initial = false
 		this.cryptoOffsetOut.initial = 0
+		this.cryptoOffsetIn.initial = 0
 		this.cryptoBufIn.initial = Buffer.alloc(0)
 		this.sentPackets.initial = new Map()
 		// Re-emit ClientHello (already in transcript[0])
@@ -523,8 +541,16 @@ class QuicConnection extends EventEmitter {
 			return
 		}
 		if (f.type === 'crypto') {
-			// Append to the appropriate CRYPTO recv buffer at the indicated offset. We assume in-order delivery and bail if not.
-			this.cryptoBufIn[epoch] = Buffer.concat([this.cryptoBufIn[epoch], f.data])
+			// CRYPTO frames carry a stream offset but can arrive retransmitted, duplicated, or with a
+			// gap. The buffer holds the unparsed tail, so the contiguous point is its end; keep only
+			// the new suffix and drop anything that would start past a gap (the peer retransmits it).
+			const expected = this.cryptoOffsetIn[epoch] + this.cryptoBufIn[epoch].length
+			const end = f.offset + f.data.length
+			if (f.offset > expected || end <= expected) return
+			this.cryptoBufIn[epoch] = Buffer.concat([
+				this.cryptoBufIn[epoch],
+				f.data.subarray(Math.max(0, expected - f.offset)),
+			])
 			this._processCryptoBuffer(epoch)
 			return
 		}
@@ -664,6 +690,7 @@ class QuicConnection extends EventEmitter {
 			off += 4 + len
 			this._onTlsHandshakeMessage(epoch, type, body, full)
 		}
+		this.cryptoOffsetIn[epoch] += off
 		this.cryptoBufIn[epoch] = buf.subarray(off)
 	}
 
@@ -795,6 +822,7 @@ class QuicConnection extends EventEmitter {
 		])
 		const cryptoFrame = pkt.encodeCryptoFrame(0, finishedMsg)
 		const ackFrame = this.largestRecv.handshake >= 0 ? pkt.encodeAckFrame(this.largestRecv.handshake) : Buffer.alloc(0)
+		if (ackFrame.length) this.needAck.handshake = false
 		const payload = Buffer.concat([ackFrame, cryptoFrame])
 		const packet = pkt.buildHandshake({
 			dstCid: this.dstCid,
@@ -849,12 +877,37 @@ class QuicConnection extends EventEmitter {
 	}
 
 	_maybeSendAcks(epoch: Epoch): void {
-		// Send ACK on the same epoch when something inbound demanded one.
-		// For Initial epoch, an ACK is bundled with the next outgoing CRYPTO; for handshake same.
-		// For 1-RTT we send standalone ack packets if needed.
+		// Send an ACK on the epoch the packet arrived on. Initial and Handshake ACKs used to be
+		// left to the next outgoing CRYPTO, but a server whose flight outgrows the 3x
+		// anti-amplification budget (a large certificate chain) stops mid-flight and waits for an
+		// ACK that never comes, so those epochs need standalone ACKs too.
 		if (!this.needAck[epoch]) return
 		this.needAck[epoch] = false
-		if (epoch === 'oneRtt' && this.appKeys) {
+		if (epoch === 'initial' && this.initialKeys) {
+			const packet = pkt.buildInitial({
+				dstCid: this.dstCid,
+				srcCid: this.srcCid,
+				token: this.retryToken,
+				payloadFrames: this._padInitialPayload(pkt.encodeAckFrame(this.largestRecv.initial)),
+				pn: this.pn.initial,
+				pnLen: 4,
+				clientKeys: this.initialKeys.client,
+			})
+			this.pn.initial++
+			this._sendDatagram(packet)
+		} else if (epoch === 'handshake' && this.handshakeKeys) {
+			const packet = pkt.buildHandshake({
+				dstCid: this.dstCid,
+				srcCid: this.srcCid,
+				payloadFrames: pkt.encodeAckFrame(this.largestRecv.handshake),
+				pn: this.pn.handshake,
+				pnLen: 4,
+				clientKeys: this.handshakeKeys.client,
+				aead: this.cipher.aead,
+			})
+			this.pn.handshake++
+			this._sendDatagram(packet)
+		} else if (epoch === 'oneRtt' && this.appKeys) {
 			const ack = pkt.encodeAckFrame(this.largestRecv.oneRtt)
 			const packet = pkt.buildOneRtt({
 				dstCid: this.dstCid,
