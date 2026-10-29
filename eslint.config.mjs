@@ -12,6 +12,7 @@ export default defineConfig(
 		'node_modules/**',
 		'dist/**',
 		'coverage/**',
+		'.wrangler/**',
 		'test/fixtures/**',
 		'chrome-response-*.json',
 		'leaf*.pem',
