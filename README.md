@@ -436,7 +436,7 @@ await conn.connect()
 ### UDP transport
 
 QUIC is the only part of hellojs that needs a datagram socket, and `node:dgram` is
-reached exclusively through the seam at `lib/h3/udp.js` (`request.udp`). It exports the
+reached exclusively through the seam at `lib/h3/udp.ts` (`request.udp`). It exports the
 same `createSocket(type)` surface as `node:dgram`, so the QUIC code never notices the
 swap. Runtimes without a UDP API — worker/edge sandboxes — can take HTTP/3 out of reach
 without deleting the QUIC code:

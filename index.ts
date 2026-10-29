@@ -1,5 +1,5 @@
 import request from './lib/client.ts'
-import * as udp from './lib/h3/udp.js'
+import * as udp from './lib/h3/udp.ts'
 import { observability } from './lib/observability.ts'
 import * as profiles from './lib/profiles/index.ts'
 import { setTrustedRoots } from './lib/tls/cert-validate.ts'

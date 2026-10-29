@@ -2,7 +2,7 @@
 import assert from 'node:assert'
 import test from 'node:test'
 
-import * as k from '../../lib/h3/keys.js'
+import * as k from '../../lib/h3/keys.ts'
 
 // RFC 9001 §A.1: Server chose dst CID = 0x8394c8f03e515708.
 // Expected derived values for the client side:

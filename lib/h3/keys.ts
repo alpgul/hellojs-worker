@@ -12,9 +12,22 @@ const INITIAL_SALT_V1 = Buffer.from('38762cf7f55934b34d179ae6a4c80cadccbb7f0a', 
 
 const HASH_LEN_SHA256 = 32
 
+// One direction's protection material for an epoch.
+export interface PacketKeys {
+	secret: Buffer
+	key: Buffer
+	iv: Buffer
+	hp: Buffer
+}
+
+export interface EpochKeys {
+	client: PacketKeys
+	server: PacketKeys
+}
+
 // Returns { client: {key, iv, hp, secret}, server: {key, iv, hp, secret} } for the Initial epoch.
 // AEAD = AES-128-GCM, hash = SHA-256, key length 16, iv length 12, hp key length 16.
-function deriveInitialKeys(dstConnectionId) {
+function deriveInitialKeys(dstConnectionId: Buffer): EpochKeys {
 	const initialSecret = HKDF.Extract('sha256', INITIAL_SALT_V1, dstConnectionId)
 	const clientInitialSecret = HKDF.ExpandLabel(initialSecret, 'client in', Buffer.alloc(0), HASH_LEN_SHA256, 'sha256', HASH_LEN_SHA256)
 	const serverInitialSecret = HKDF.ExpandLabel(initialSecret, 'server in', Buffer.alloc(0), HASH_LEN_SHA256, 'sha256', HASH_LEN_SHA256)
@@ -24,7 +37,7 @@ function deriveInitialKeys(dstConnectionId) {
 	}
 }
 
-function deriveKeysFromSecret(secret, hash, keyLen, ivLen) {
+function deriveKeysFromSecret(secret: Buffer, hash: string, keyLen: number, ivLen: number): PacketKeys {
 	return {
 		secret,
 		key: HKDF.ExpandLabel(secret, 'quic key', Buffer.alloc(0), keyLen, hash, secret.length),
@@ -35,7 +48,13 @@ function deriveKeysFromSecret(secret, hash, keyLen, ivLen) {
 
 // RFC 9001 §6.1: next-phase 1-RTT traffic secret. HP key is unchanged across key updates;
 // only the AEAD key + iv rotate.
-function deriveKeyUpdate(currentSecret, hash, keyLen, ivLen, hpKeyFromPrev) {
+function deriveKeyUpdate(
+	currentSecret: Buffer,
+	hash: string,
+	keyLen: number,
+	ivLen: number,
+	hpKeyFromPrev: Buffer
+): PacketKeys {
 	const next = HKDF.ExpandLabel(currentSecret, 'quic ku', Buffer.alloc(0), currentSecret.length, hash, currentSecret.length)
 	return {
 		secret: next,
@@ -46,7 +65,7 @@ function deriveKeyUpdate(currentSecret, hash, keyLen, ivLen, hpKeyFromPrev) {
 }
 
 // Build the AEAD nonce for a given packet number: pad pn to iv length and XOR with iv.
-function nonceForPacketNumber(iv, pn) {
+function nonceForPacketNumber(iv: Buffer, pn: number): Buffer {
 	const out = Buffer.from(iv)
 	const pnBuf = Buffer.alloc(8)
 	pnBuf.writeBigUInt64BE(BigInt(pn), 0)
@@ -57,7 +76,7 @@ function nonceForPacketNumber(iv, pn) {
 // Encrypt the packet payload (everything after the packet number bytes). Returns the
 // ciphertext+tag. The AAD is the unprotected packet header (everything from the first byte
 // up to and including the packet number bytes).
-function aeadEncrypt(aead, key, iv, pn, header, payload) {
+function aeadEncrypt(aead: crypto.CipherGCMTypes, key: Buffer, iv: Buffer, pn: number, header: Buffer, payload: Buffer): Buffer {
 	const nonce = nonceForPacketNumber(iv, pn)
 	const cipher = crypto.createCipheriv(aead, key, nonce, { authTagLength: 16 })
 	cipher.setAAD(header)
@@ -65,10 +84,10 @@ function aeadEncrypt(aead, key, iv, pn, header, payload) {
 	return Buffer.concat([ct, cipher.getAuthTag()])
 }
 
-function aeadDecrypt(aead, key, iv, pn, header, ciphertext) {
+function aeadDecrypt(aead: crypto.CipherGCMTypes, key: Buffer, iv: Buffer, pn: number, header: Buffer, ciphertext: Buffer): Buffer {
 	const nonce = nonceForPacketNumber(iv, pn)
-	const tag = ciphertext.subarray(ciphertext.length - 16)
-	const ct = ciphertext.subarray(0, ciphertext.length - 16)
+	const tag = ciphertext.subarray(-16)
+	const ct = ciphertext.subarray(0, -16)
 	const dec = crypto.createDecipheriv(aead, key, nonce, { authTagLength: 16 })
 	dec.setAAD(header)
 	dec.setAuthTag(tag)
@@ -76,7 +95,7 @@ function aeadDecrypt(aead, key, iv, pn, header, ciphertext) {
 }
 
 // Header protection: RFC 9001 §5.4. AES variants: mask = AES-ECB(hp, sample). ChaCha20: per §5.4.4 use ChaCha20 stream with counter=sample[0:4] LE, nonce=sample[4:16], encrypt 5 zero bytes.
-function aesHeaderProtectionMask(hpKey, sample) {
+function aesHeaderProtectionMask(hpKey: Buffer, sample: Buffer): Buffer {
 	if (sample.length !== 16) throw new Error('hp sample must be 16 bytes')
 	const ecb = hpKey.length === 16 ? 'aes-128-ecb' : 'aes-256-ecb'
 	const c = crypto.createCipheriv(ecb, hpKey, null)
@@ -85,7 +104,7 @@ function aesHeaderProtectionMask(hpKey, sample) {
 }
 
 // ChaCha20 header-protection mask. Node's crypto exposes ChaCha20 via `chacha20-poly1305` AEAD only — for raw ChaCha20 we use the 'chacha20' cipher (stream cipher mode).
-function chacha20HeaderProtectionMask(hpKey, sample) {
+function chacha20HeaderProtectionMask(hpKey: Buffer, sample: Buffer): Buffer {
 	if (sample.length !== 16) throw new Error('hp sample must be 16 bytes')
 	if (hpKey.length !== 32) throw new Error('chacha20 hp key must be 32 bytes')
 	// Construct an IV: counter (4 bytes LE from sample[0:4]) + nonce (12 bytes from sample[4:16]).
@@ -97,12 +116,19 @@ function chacha20HeaderProtectionMask(hpKey, sample) {
 	return enc
 }
 
-function headerProtectionMask(hpKey, sample, aead) {
+function headerProtectionMask(hpKey: Buffer, sample: Buffer, aead: string): Buffer {
 	if (aead === 'chacha20-poly1305') return chacha20HeaderProtectionMask(hpKey, sample)
 	return aesHeaderProtectionMask(hpKey, sample)
 }
 
-function applyHeaderProtection(packet, hpKey, pnOffset, pnLen, longHeader, aead) {
+function applyHeaderProtection(
+	packet: Buffer,
+	hpKey: Buffer,
+	pnOffset: number,
+	pnLen: number,
+	longHeader: boolean,
+	aead: string
+): void {
 	const sample = packet.subarray(pnOffset + 4, pnOffset + 4 + 16)
 	const mask = headerProtectionMask(hpKey, sample, aead)
 	const lowBits = longHeader ? 0x0f : 0x1f
@@ -110,7 +136,13 @@ function applyHeaderProtection(packet, hpKey, pnOffset, pnLen, longHeader, aead)
 	for (let i = 0; i < pnLen; i++) packet[pnOffset + i] ^= mask[1 + i]
 }
 
-function removeHeaderProtection(packet, hpKey, pnOffset, longHeader, aead) {
+function removeHeaderProtection(
+	packet: Buffer,
+	hpKey: Buffer,
+	pnOffset: number,
+	longHeader: boolean,
+	aead: string
+): { firstByte: number; pnLen: number; pn: number } {
 	const sample = packet.subarray(pnOffset + 4, pnOffset + 4 + 16)
 	const mask = headerProtectionMask(hpKey, sample, aead)
 	const lowBits = longHeader ? 0x0f : 0x1f

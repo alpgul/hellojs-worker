@@ -9,7 +9,7 @@ import test from 'node:test'
 let seamGeneration = 0
 function freshSeam() {
 	seamGeneration++
-	return import(`../../lib/h3/udp.js?fresh=${seamGeneration}`)
+	return import(`../../lib/h3/udp.ts?fresh=${seamGeneration}`)
 }
 
 test('dgram is the default provider and opens a usable socket', async () => {

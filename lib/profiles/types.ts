@@ -1,5 +1,5 @@
 // Structural shape of a fingerprint profile. `lib/headers.ts`, `lib/tls/tls.ts` and
-// `lib/h3/transport-params.js` consume these fields; anything extra is profile-specific
+// `lib/h3/transport-params.ts` consume these fields; anything extra is profile-specific
 // and simply carried along.
 
 export interface PrioritySettings {
