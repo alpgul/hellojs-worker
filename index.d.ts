@@ -10,15 +10,23 @@ import { EventEmitter } from 'node:events'
 import type { Duplex } from 'node:stream'
 
 export interface CookieJar {
-	getCookieString(host: string): string
-	setCookie(setCookieHeader: string | string[], host: string): void
+	getCookieString(requestUrlOrHost: string): string
+	setCookie(setCookieHeader: string | string[], requestUrlOrHost: string): void
+}
+
+/** `request.jar()`'s own jar: the CookieJar seam plus the maintenance hooks it exposes. */
+export interface Jar extends CookieJar {
+	/** Narrow which hosts count as public suffixes; `null` restores the bundled list. */
+	setPublicSuffixList(list: Set<string> | ((host: string) => boolean) | null): void
+	/** Drop expired cookies — call periodically on a long-lived jar. */
+	gc(): void
 }
 
 export interface RetryPolicy {
 	limit?: number
 	methods?: string[]
 	statusCodes?: number[]
-	baseDelay?: number
+	baseDelayMs?: number
 }
 
 export interface PerPhaseTimeouts {
@@ -36,13 +44,13 @@ export interface RequestOptions {
 	json?: boolean | unknown
 	form?: Record<string, string | number>
 	qs?: Record<string, string | number | (string | number)[]>
-	jar?: CookieJar | true
+	jar?: CookieJar | null
 	gzip?: boolean
 	followRedirect?: boolean
 	maxRedirects?: number
 	timeout?: number
-	timeouts?: PerPhaseTimeouts
-	proxy?: string
+	timeouts?: PerPhaseTimeouts | null
+	proxy?: string | null
 	resolveWithFullResponse?: boolean
 	simple?: boolean
 	retry?: RetryPolicy
@@ -53,6 +61,8 @@ export interface RequestOptions {
 	h3?: boolean
 	/** When true, resolve as soon as headers arrive and expose the body as a Node Readable. */
 	stream?: boolean
+	/** Profile name, or an inline profile object shaped like lib/profiles/types.ts `Profile`. */
+	profile?: string | Record<string, unknown>
 }
 
 export interface Response<TBody = unknown> {
@@ -60,14 +70,15 @@ export interface Response<TBody = unknown> {
 	status: number
 	headers: Record<string, string | string[]>
 	body: TBody
-	rawBody: Buffer
+	/** Wire bytes as read; with `stream: true` this is the same Readable as `body`. */
+	rawBody: TBody | Buffer
 }
 
 export type HellojsErrorCategory =
 	| 'usage' | 'transport' | 'tls' | 'protocol' | 'http' | 'body' | 'timeout'
 
 export type HellojsErrorCode =
-	| 'EBADOPTS' | 'EBADARG'
+	| 'EBADOPTS' | 'EBADARG' | 'EHEADERFIXED'
 	| 'ECONNREFUSED' | 'ECONNRESET' | 'ENOTFOUND' | 'EPROXY'
 	| 'ETLS_ALERT' | 'ETLS_HANDSHAKE' | 'ETLS_CERT_VERIFY' | 'ETLS_VERSION'
 	| 'EH2STREAM' | 'EH2GOAWAY' | 'EH3STREAM' | 'EH3CONN' | 'EPROTO'
@@ -88,20 +99,34 @@ export type Callback<TBody = unknown> = (
 	body: TBody | undefined,
 ) => void
 
-export interface RequestFn {
-	<TBody = unknown>(opts: RequestOptions, cb?: Callback<TBody>): Promise<Response<TBody> | TBody>
-	(url: string, cb?: Callback): Promise<unknown>
-	get<T = unknown>(opts: RequestOptions | string, cb?: Callback<T>): Promise<Response<T> | T>
-	post<T = unknown>(opts: RequestOptions | string, cb?: Callback<T>): Promise<Response<T> | T>
-	put<T = unknown>(opts: RequestOptions | string, cb?: Callback<T>): Promise<Response<T> | T>
-	del<T = unknown>(opts: RequestOptions | string, cb?: Callback<T>): Promise<Response<T> | T>
-	delete<T = unknown>(opts: RequestOptions | string, cb?: Callback<T>): Promise<Response<T> | T>
-	patch<T = unknown>(opts: RequestOptions | string, cb?: Callback<T>): Promise<Response<T> | T>
-	head<T = unknown>(opts: RequestOptions | string, cb?: Callback<T>): Promise<Response<T> | T>
-	options<T = unknown>(opts: RequestOptions | string, cb?: Callback<T>): Promise<Response<T> | T>
+// Both the root export and the `defaults()`-derived entry point (and every shortcut) resolve
+// the same way: the full Response when `resolveWithFullResponse: true` is passed as a literal,
+// otherwise the body — a string, the raw Buffer, or the parsed value for `json: true`.
+interface Invokable {
+	<TBody = unknown>(opts: RequestOptions & { resolveWithFullResponse: true }, cb?: Callback<TBody>): Promise<Response<TBody>>
+	<TBody = unknown>(opts: RequestOptions | string, cb?: Callback<TBody>): Promise<TBody>
+}
 
-	defaults(defaults: Partial<RequestOptions>): RequestFn
-	jar(): CookieJar
+interface Shortcuts {
+	get: Invokable
+	post: Invokable
+	put: Invokable
+	del: Invokable
+	delete: Invokable
+	patch: Invokable
+	head: Invokable
+	options: Invokable
+	jar(): Jar
+}
+
+/** What `request.defaults(...)` returns: the callable, its shortcuts and a further `defaults()`. */
+export interface DefaultsFn extends Invokable, Shortcuts {
+	defaults(more?: Partial<RequestOptions>): DefaultsFn
+}
+
+export interface RequestFn extends Invokable, Shortcuts {
+	defaults(defaults?: Partial<RequestOptions>): DefaultsFn
+
 	HellojsError: typeof HellojsError
 
 	/** Exported for advanced users. */
@@ -109,6 +134,12 @@ export interface RequestFn {
 
 	/** Install a Mozilla/NSS PEM bundle when the runtime has no built-in roots. */
 	setTrustedRoots(pems: string[]): void
+
+	/** Request lifecycle events — see [Observability](README.md#observability). */
+	observability: Observability
+
+	/** Fingerprint profile registry. */
+	profiles: ProfileRegistry
 
 	/** QUIC's UDP seam — see [UDP transport](README.md#udp-transport). */
 	udp: UdpTransport

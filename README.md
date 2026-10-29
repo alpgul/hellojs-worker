@@ -701,7 +701,7 @@ try {
 
 | Category | Codes | Meaning |
 |---|---|---|
-| `usage` | `EBADOPTS`, `EBADARG` | Caller passed bad options (programmer error) |
+| `usage` | `EBADOPTS`, `EBADARG`, `EHEADERFIXED` | Caller passed bad options (programmer error) |
 | `transport` | `ECONNREFUSED`, `ECONNRESET`, `ENOTFOUND`, `EPROXY` | TCP / DNS / proxy issues |
 | `tls` | `ETLS_ALERT`, `ETLS_HANDSHAKE`, `ETLS_CERT_VERIFY`, `ETLS_VERSION` | Handshake or cert problem |
 | `protocol` | `EH2STREAM`, `EH2GOAWAY`, `EH3STREAM`, `EH3CONN`, `EPROTO` | h2 / h3 / QUIC protocol-level failure |
