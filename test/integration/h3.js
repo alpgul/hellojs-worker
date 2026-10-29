@@ -1,8 +1,8 @@
 // HTTP/3 integration test: open a real QUIC connection against a public h3 server,
 // complete the TLS 1.3-in-QUIC handshake, send a GET, decode the response.
 
-import { QuicConnection } from '../../lib/h3/connection.js'
-import { H3Client } from '../../lib/h3/h3.js'
+import { QuicConnection } from '../../lib/h3/connection.ts'
+import { H3Client } from '../../lib/h3/h3.ts'
 
 const HOST = process.env.H3_HOST || 'cloudflare-quic.com'
 const PATH = process.env.H3_PATH || '/'

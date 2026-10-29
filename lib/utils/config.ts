@@ -116,8 +116,9 @@ const CERTIFICATE_STATUS_TYPE = {
 } as const
 
 export interface HashInfo {
-	hash: string
-	aead: string
+	hash: 'sha256' | 'sha384'
+	// The three AEADs the TLS 1.3 suites run — QUIC packet protection switches on this.
+	aead: 'aes-128-gcm' | 'aes-256-gcm' | 'chacha20-poly1305'
 	keyLen: number
 	hashLen: number
 	ivLen: number

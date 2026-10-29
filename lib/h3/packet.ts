@@ -18,9 +18,7 @@
 import * as keys from './keys.ts'
 import * as varint from './varint.ts'
 
-import type * as crypto from 'node:crypto'
-
-type Aead = crypto.CipherGCMTypes
+type Aead = keys.Aead
 
 // Varints decode to `number` up to 2^53 and `bigint` beyond; offsets and lengths on the
 // wire always fit the narrow side, so the arithmetic below narrows explicitly.
@@ -58,9 +56,10 @@ const FRAME_TYPE = {
 	PATH_RESPONSE:        0x1b,
 }
 
-// One direction's keys for an epoch, plus the AEAD they belong to.
-export interface EpochKeys {
-	server: keys.PacketKeys
+// The keys a parser may use to decrypt inbound packets of one epoch. `server` is absent
+// until that epoch's keys exist, which is when the packet is reported as undecryptable.
+export interface PeerEpochKeys {
+	server?: keys.PacketKeys
 	// Post-key-update set, consulted when the peer's K bit differs from `currentPhase`.
 	serverNext?: keys.PacketKeys
 	aead?: Aead
@@ -68,9 +67,9 @@ export interface EpochKeys {
 }
 
 export interface KeysByEpoch {
-	initial?: EpochKeys
-	handshake?: EpochKeys
-	oneRtt?: EpochKeys
+	initial?: PeerEpochKeys
+	handshake?: PeerEpochKeys
+	oneRtt?: PeerEpochKeys
 }
 
 export interface BuildInitialOptions {
@@ -103,56 +102,40 @@ export interface BuildOneRttOptions {
 	keyPhase?: number
 }
 
-export type PacketKind =
-	| 'initial' | 'handshake' | '1rtt' | 'retry'
-	| 'unknown-long' | 'unknown-short' | 'decrypt-failed'
+// A parsed packet, discriminated on `kind` — decryptable packets carry a payload, the rest
+// only whatever the header exposed before protection was removed.
+export type ParsedPacket =
+	| { kind: 'initial'; version: number; dstCid: Buffer; srcCid: Buffer; firstByte: number; pn: number; payload: Buffer; consumed: number }
+	| { kind: 'handshake'; version: number; dstCid: Buffer; srcCid: Buffer; firstByte: number; pn: number; payload: Buffer; consumed: number }
+	| { kind: '1rtt'; firstByte: number; pn: number; payload: Buffer; peerPhase: number; usedNextKeys: boolean; consumed: number }
+	| { kind: 'retry'; version: number; dstCid: Buffer; srcCid: Buffer; retryToken: Buffer; integrityTag: Buffer; consumed: number }
+	| { kind: 'unknown-long'; type: number; version: number; dstCid: Buffer; srcCid: Buffer; consumed: number }
+	| { kind: 'unknown-short'; consumed: number }
+	| { kind: 'decrypt-failed'; epoch: 'initial' | 'handshake' | '1rtt' | null; error: string; peerPhase?: number; consumed: number }
 
-export interface ParsedPacket {
-	kind: PacketKind
-	consumed: number
-	version?: number
-	dstCid?: Buffer
-	srcCid?: Buffer
-	firstByte?: number
-	pn?: number
-	payload?: Buffer
-	type?: number
-	epoch?: string | null
-	error?: string
-	retryToken?: Buffer
-	integrityTag?: Buffer
-	peerPhase?: number
-	usedNextKeys?: boolean
-}
+export interface AckRange { gap: number; length: number }
 
-export type FrameType =
-	| 'ping' | 'ack' | 'crypto' | 'stream' | 'new_token' | 'handshake_done' | 'flow_control'
-	| 'max_stream_data' | 'path_challenge' | 'path_response' | 'new_connection_id'
-	| 'retire_connection_id' | 'datagram' | 'connection_close' | 'unknown'
+// Decoded frames, discriminated on `type` so a handler only sees the fields its own frame
+// carries. Wire varints narrow to `number` here: every field below is an offset, stream ID,
+// packet number or size, all of which a consumer has to fit in a JS number to use anyway.
+export type QuicFrame =
+	| { type: 'ping' }
+	| { type: 'ack'; largestAcked: number; ackDelay: number; firstAckRange: number; ranges: AckRange[] }
+	| { type: 'crypto'; offset: number; data: Buffer }
+	| { type: 'stream'; streamId: number; offset: number; data: Buffer; fin: boolean }
+	| { type: 'new_token' }
+	| { type: 'handshake_done' }
+	| { type: 'flow_control'; subtype: number; value: number }
+	| { type: 'max_stream_data'; streamId: number; value: number }
+	| { type: 'path_challenge'; data: Buffer }
+	| { type: 'path_response'; data: Buffer }
+	| { type: 'new_connection_id'; seq: number; retirePriorTo: number; cid: Buffer; statelessResetToken: Buffer }
+	| { type: 'retire_connection_id'; seq: number }
+	| { type: 'datagram'; data: Buffer }
+	| { type: 'connection_close'; errorCode: number; reason: string }
+	| { type: 'unknown'; frameType: number; raw: Buffer }
 
-export interface AckRange { gap: number | bigint; length: number | bigint }
-
-export interface QuicFrame {
-	type: FrameType
-	data?: Buffer
-	offset?: number | bigint
-	streamId?: number | bigint
-	fin?: boolean
-	largestAcked?: number | bigint
-	ackDelay?: number | bigint
-	firstAckRange?: number | bigint
-	ranges?: AckRange[]
-	subtype?: number
-	value?: number | bigint
-	seq?: number | bigint
-	retirePriorTo?: number | bigint
-	cid?: Buffer
-	statelessResetToken?: Buffer
-	errorCode?: number | bigint
-	reason?: string
-	frameType?: number
-	raw?: Buffer
-}
+export type FrameType = QuicFrame['type']
 
 // --- Builders ---------------------------------------------------------------
 
@@ -369,12 +352,12 @@ function decodeFrames(buf: Buffer): QuicFrame[] {
 			for (let i = 0; i < asNumber(rc.value); i++) {
 				const gap = varint.decode(buf, off); off += gap.length
 				const len = varint.decode(buf, off); off += len.length
-				ranges.push({ gap: gap.value, length: len.value })
+				ranges.push({ gap: asNumber(gap.value), length: asNumber(len.value) })
 			}
 			if (t === FRAME_TYPE.ACK_ECN) {
 				for (let i = 0; i < 3; i++) { const v = varint.decode(buf, off); off += v.length }  // ect0, ect1, ce
 			}
-			frames.push({ type: 'ack', largestAcked: la.value, ackDelay: ad.value, firstAckRange: fr.value, ranges })
+			frames.push({ type: 'ack', largestAcked: asNumber(la.value), ackDelay: asNumber(ad.value), firstAckRange: asNumber(fr.value), ranges })
 			continue
 		}
 		if (t === FRAME_TYPE.CRYPTO) {
@@ -382,7 +365,7 @@ function decodeFrames(buf: Buffer): QuicFrame[] {
 			const offV = varint.decode(buf, off); off += offV.length
 			const lenV = varint.decode(buf, off); off += lenV.length
 			const data = buf.subarray(off, off + asNumber(lenV.value)); off += asNumber(lenV.value)
-			frames.push({ type: 'crypto', offset: offV.value, data })
+			frames.push({ type: 'crypto', offset: asNumber(offV.value), data })
 			continue
 		}
 		if (t >= 0x08 && t <= 0x0f) {
@@ -391,13 +374,13 @@ function decodeFrames(buf: Buffer): QuicFrame[] {
 			const hasOff  = (t & 0x04) !== 0
 			off++
 			const sid = varint.decode(buf, off); off += sid.length
-			let so: number | bigint = 0
-			if (hasOff) { const v = varint.decode(buf, off); so = v.value; off += v.length }
-			let dlen: number | bigint
-			if (hasLen) { const v = varint.decode(buf, off); dlen = v.value; off += v.length }
+			let so = 0
+			if (hasOff) { const v = varint.decode(buf, off); so = asNumber(v.value); off += v.length }
+			let dlen: number
+			if (hasLen) { const v = varint.decode(buf, off); dlen = asNumber(v.value); off += v.length }
 			else { dlen = buf.length - off }
-			const data = buf.subarray(off, off + asNumber(dlen)); off += asNumber(dlen)
-			frames.push({ type: 'stream', streamId: sid.value, offset: so, data, fin })
+			const data = buf.subarray(off, off + dlen); off += dlen
+			frames.push({ type: 'stream', streamId: asNumber(sid.value), offset: so, data, fin })
 			continue
 		}
 		if (t === FRAME_TYPE.NEW_TOKEN) {
@@ -411,14 +394,14 @@ function decodeFrames(buf: Buffer): QuicFrame[] {
 		if (t === FRAME_TYPE.MAX_DATA || t === FRAME_TYPE.MAX_STREAMS_BIDI || t === FRAME_TYPE.MAX_STREAMS_UNI) {
 			off++
 			const v = varint.decode(buf, off); off += v.length
-			frames.push({ type: 'flow_control', subtype: t, value: v.value })
+			frames.push({ type: 'flow_control', subtype: t, value: asNumber(v.value) })
 			continue
 		}
 		if (t === FRAME_TYPE.MAX_STREAM_DATA) {
 			off++
 			const sid = varint.decode(buf, off); off += sid.length
 			const v = varint.decode(buf, off); off += v.length
-			frames.push({ type: 'max_stream_data', streamId: sid.value, value: v.value })
+			frames.push({ type: 'max_stream_data', streamId: asNumber(sid.value), value: asNumber(v.value) })
 			continue
 		}
 		if (t === FRAME_TYPE.PATH_CHALLENGE || t === FRAME_TYPE.PATH_RESPONSE) {
@@ -434,13 +417,13 @@ function decodeFrames(buf: Buffer): QuicFrame[] {
 			const clen = buf[off++]
 			const cid = buf.subarray(off, off + clen); off += clen
 			const token = buf.subarray(off, off + 16); off += 16
-			frames.push({ type: 'new_connection_id', seq: seq.value, retirePriorTo: retire.value, cid: Buffer.from(cid), statelessResetToken: Buffer.from(token) })
+			frames.push({ type: 'new_connection_id', seq: asNumber(seq.value), retirePriorTo: asNumber(retire.value), cid: Buffer.from(cid), statelessResetToken: Buffer.from(token) })
 			continue
 		}
 		if (t === FRAME_TYPE.RETIRE_CONNECTION_ID) {
 			off++
 			const seq = varint.decode(buf, off); off += seq.length
-			frames.push({ type: 'retire_connection_id', seq: seq.value })
+			frames.push({ type: 'retire_connection_id', seq: asNumber(seq.value) })
 			continue
 		}
 		if (t === FRAME_TYPE.DATAGRAM || t === FRAME_TYPE.DATAGRAM_LEN) {
@@ -463,7 +446,7 @@ function decodeFrames(buf: Buffer): QuicFrame[] {
 			}
 			const rl = varint.decode(buf, off); off += rl.length
 			const reason = buf.subarray(off, off + asNumber(rl.value)); off += asNumber(rl.value)
-			frames.push({ type: 'connection_close', errorCode: ec.value, reason: reason.toString('utf8') })
+			frames.push({ type: 'connection_close', errorCode: asNumber(ec.value), reason: reason.toString('utf8') })
 			continue
 		}
 		// Unknown frame type — log and skip to end (defensive)

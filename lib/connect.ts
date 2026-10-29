@@ -2,8 +2,8 @@
 // and closes it once the response completes — there is no pooling or reuse.
 
 import { HellojsError } from './errors.ts'
-import { QuicConnection } from './h3/connection.js'
-import { H3Client } from './h3/h3.js'
+import { QuicConnection } from './h3/connection.ts'
+import { H3Client } from './h3/h3.ts'
 import { TLS } from './tls/tls.ts'
 
 import type { H2Session } from './h2/session.ts'

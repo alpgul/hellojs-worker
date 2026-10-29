@@ -1,6 +1,6 @@
 // Smoke test h3 handshake against several public h3 endpoints.
-import { QuicConnection } from '../../lib/h3/connection.js'
-import { H3Client } from '../../lib/h3/h3.js'
+import { QuicConnection } from '../../lib/h3/connection.ts'
+import { H3Client } from '../../lib/h3/h3.ts'
 
 const targets = [
 	{ host: 'cloudflare-quic.com', path: '/' },

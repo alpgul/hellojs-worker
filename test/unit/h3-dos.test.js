@@ -5,7 +5,7 @@ import assert from 'node:assert'
 import * as crypto from 'node:crypto'
 import test from 'node:test'
 
-import { QuicConnection, QuicStream } from '../../lib/h3/connection.js'
+import { QuicConnection, QuicStream } from '../../lib/h3/connection.ts'
 import * as qpack from '../../lib/h3/qpack.ts'
 
 test('_onDatagram drops malformed/garbage datagrams without throwing', () => {

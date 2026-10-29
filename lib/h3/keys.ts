@@ -12,6 +12,9 @@ const INITIAL_SALT_V1 = Buffer.from('38762cf7f55934b34d179ae6a4c80cadccbb7f0a', 
 
 const HASH_LEN_SHA256 = 32
 
+// AEADs QUIC v1 can run a TLS 1.3 suite over (RFC 9001 §5, suites 0x1301/0x1302/0x1303).
+export type Aead = 'aes-128-gcm' | 'aes-256-gcm' | 'chacha20-poly1305'
+
 // One direction's protection material for an epoch.
 export interface PacketKeys {
 	secret: Buffer
@@ -76,19 +79,40 @@ function nonceForPacketNumber(iv: Buffer, pn: number): Buffer {
 // Encrypt the packet payload (everything after the packet number bytes). Returns the
 // ciphertext+tag. The AAD is the unprotected packet header (everything from the first byte
 // up to and including the packet number bytes).
-function aeadEncrypt(aead: crypto.CipherGCMTypes, key: Buffer, iv: Buffer, pn: number, header: Buffer, payload: Buffer): Buffer {
-	const nonce = nonceForPacketNumber(iv, pn)
-	const cipher = crypto.createCipheriv(aead, key, nonce, { authTagLength: 16 })
+//
+// AEAD handles, described by the five methods packet protection uses. node splits GCM and
+// chacha20-poly1305 into separate constructor overloads — and types chacha's setAAD as
+// requiring a plaintextLength hint the runtime treats as optional — so both suites are
+// reached through the generic constructor and share this shape (as in the TLS 1.2 records).
+interface AeadCipher {
+	setAAD(aad: Uint8Array): unknown
+	setAuthTag(tag: Uint8Array): unknown
+	getAuthTag(): Buffer
+	update(data: Uint8Array): Buffer
+	final(): Buffer
+}
+
+const AEAD_OPTIONS: crypto.CipherGCMOptions = { authTagLength: 16 }
+
+function createSealer(aead: Aead, key: Buffer, nonce: Buffer): AeadCipher {
+	return crypto.createCipheriv(aead, key, nonce, AEAD_OPTIONS) as unknown as AeadCipher
+}
+
+function createOpener(aead: Aead, key: Buffer, nonce: Buffer): AeadCipher {
+	return crypto.createDecipheriv(aead, key, nonce, AEAD_OPTIONS) as unknown as AeadCipher
+}
+
+function aeadEncrypt(aead: Aead, key: Buffer, iv: Buffer, pn: number, header: Buffer, payload: Buffer): Buffer {
+	const cipher = createSealer(aead, key, nonceForPacketNumber(iv, pn))
 	cipher.setAAD(header)
 	const ct = Buffer.concat([cipher.update(payload), cipher.final()])
 	return Buffer.concat([ct, cipher.getAuthTag()])
 }
 
-function aeadDecrypt(aead: crypto.CipherGCMTypes, key: Buffer, iv: Buffer, pn: number, header: Buffer, ciphertext: Buffer): Buffer {
-	const nonce = nonceForPacketNumber(iv, pn)
+function aeadDecrypt(aead: Aead, key: Buffer, iv: Buffer, pn: number, header: Buffer, ciphertext: Buffer): Buffer {
+	const dec = createOpener(aead, key, nonceForPacketNumber(iv, pn))
 	const tag = ciphertext.subarray(-16)
 	const ct = ciphertext.subarray(0, -16)
-	const dec = crypto.createDecipheriv(aead, key, nonce, { authTagLength: 16 })
 	dec.setAAD(header)
 	dec.setAuthTag(tag)
 	return Buffer.concat([dec.update(ct), dec.final()])
@@ -116,7 +140,7 @@ function chacha20HeaderProtectionMask(hpKey: Buffer, sample: Buffer): Buffer {
 	return enc
 }
 
-function headerProtectionMask(hpKey: Buffer, sample: Buffer, aead: string): Buffer {
+function headerProtectionMask(hpKey: Buffer, sample: Buffer, aead: Aead): Buffer {
 	if (aead === 'chacha20-poly1305') return chacha20HeaderProtectionMask(hpKey, sample)
 	return aesHeaderProtectionMask(hpKey, sample)
 }
@@ -127,7 +151,7 @@ function applyHeaderProtection(
 	pnOffset: number,
 	pnLen: number,
 	longHeader: boolean,
-	aead: string
+	aead: Aead
 ): void {
 	const sample = packet.subarray(pnOffset + 4, pnOffset + 4 + 16)
 	const mask = headerProtectionMask(hpKey, sample, aead)
@@ -141,7 +165,7 @@ function removeHeaderProtection(
 	hpKey: Buffer,
 	pnOffset: number,
 	longHeader: boolean,
-	aead: string
+	aead: Aead
 ): { firstByte: number; pnLen: number; pn: number } {
 	const sample = packet.subarray(pnOffset + 4, pnOffset + 4 + 16)
 	const mask = headerProtectionMask(hpKey, sample, aead)

@@ -829,9 +829,9 @@ lib/
 │   └── session.ts             H2Session + H2Stream (replaces Node's http2,
 │                              with CONTINUATION + per-stream flow control)
 ├── h3/
-│   ├── connection.js          QUIC v1 connection + NewReno + key updates + NCID
+│   ├── connection.ts          QUIC v1 connection + NewReno + key updates + NCID
 │   ├── udp.ts                 UDP transport seam (dgram by default, swappable/off)
-│   ├── h3.js                  HTTP/3 layer (control + encoder + decoder streams)
+│   ├── h3.ts                  HTTP/3 layer (control + encoder + decoder streams)
 │   ├── packet.ts              QUIC packet build/parse + frame codec
 │   ├── keys.ts                Initial + traffic key derivation + AEAD helpers
 │   ├── qpack.ts               QPACK static + dynamic-table decode

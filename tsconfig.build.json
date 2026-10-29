@@ -7,6 +7,6 @@
     "declaration": false,
     "sourceMap": false
   },
-  "include": ["index.ts", "lib/**/*.js", "lib/**/*.ts"],
+  "include": ["index.ts", "lib/**/*.ts"],
   "exclude": ["node_modules", "dist", "test", "examples"]
 }

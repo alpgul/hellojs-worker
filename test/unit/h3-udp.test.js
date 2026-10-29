@@ -33,7 +33,7 @@ test('setUdpProvider(null) passiveizes the transport', async () => {
 	assert.throws(() => udp.createSocket(), (e) => e.code === 'EUDPUNAVAILABLE')
 })
 
-test('a custom provider replaces dgram without touching connection.js', async () => {
+test('a custom provider replaces dgram without touching connection.ts', async () => {
 	const udp = await freshSeam()
 	const stub = { on() {}, bind() {}, send() {}, close() {}, destroyed: false }
 	udp.setUdpProvider((type) => { stub.type = type; return stub })
