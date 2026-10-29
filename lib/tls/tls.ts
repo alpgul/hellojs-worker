@@ -1535,7 +1535,10 @@ class TLS extends EventEmitter {
 		// and sends an empty key_share — server MUST HRR demanding P-256. CH2 must keep the
 		// same supported_groups (RFC 8446 §4.1.2 forbids changing it).
 		if (this._forceHRRGroup) {
-			namedExts.supported_groups = (() => {
+			// Keyed by numeric ID like the rest of the map: a named key would land beside the
+			// builder's entry and put the extension on the wire twice, which servers reject
+			// as illegal_parameter/decode_error before any handshake happens.
+			namedExts['10'] = (() => {
 				const groups = Buffer.concat([
 					Buffer.from([grease.c, grease.c]),
 					Buffer.from([0x00, 0x17]), // P-256
@@ -1549,7 +1552,7 @@ class TLS extends EventEmitter {
 			})()
 			if (!hrrCtx) {
 				// Empty client_shares on CH1; CH2 carries the real single entry via hrrCtx.
-				namedExts.key_share = (() => {
+				namedExts['51'] = (() => {
 					const sharesLen = Buffer.alloc(2)
 					sharesLen.writeUInt16BE(0, 0)
 					const extLen = Buffer.alloc(2)
