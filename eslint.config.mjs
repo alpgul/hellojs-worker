@@ -15,6 +15,8 @@ export default defineConfig(
 		'.wrangler/**',
 		'test/fixtures/**',
 		'chrome-response-*.json',
+		// No JSON/JSONC parser is configured, and both are data rather than source.
+		'*.jsonc',
 		'leaf*.pem',
 		'leaf*.der',
 	]),

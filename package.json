@@ -22,9 +22,14 @@
     "SECURITY.md"
   ],
   "scripts": {
-    "test": "node --test test/unit/*.test.js",
-    "test:fingerprint": "node test/fingerprint/chrome147.js",
-    "test:integration": "node test/integration/httpbin.js && node test/integration/multi-server.js && node test/integration/api.js",
+    "test": "vitest run --project=workers --project=node",
+    "test:watch": "vitest --project=workers --project=node",
+    "test:workers": "vitest run --project=workers",
+    "test:node": "vitest run --project=node",
+    "test:network": "vitest run --project=network",
+    "test:all": "vitest run",
+    "test:fingerprint": "vitest run --project=network test/fingerprint",
+    "test:integration": "vitest run --project=network test/integration",
     "test:soak": "node --expose-gc test/soak/soak.js",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
@@ -35,7 +40,7 @@
     "prebuild": "npm run clean",
     "typecheck": "tsc --noEmit",
     "test:types": "./node_modules/.bin/tsc --project test/types/tsconfig.json",
-    "example": "wrangler dev examples/worker.ts --compatibility-date 2026-10-01 --compatibility-flags nodejs_compat webcrypto_modern_algorithms",
+    "example": "wrangler dev",
     "prepublishOnly": "node --input-type=module -e \"await import('./index.ts')\""
   },
   "keywords": [
@@ -68,6 +73,7 @@
     "access": "public"
   },
   "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.4.10",
     "@cloudflare/workers-types": "^5.20261029.1",
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.19.2",
@@ -79,6 +85,7 @@
     "prettier": "^3.9.10",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.72.1",
+    "vitest": "^4.1.12",
     "wrangler": "^4.155.0"
   }
 }

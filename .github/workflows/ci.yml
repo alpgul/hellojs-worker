@@ -13,6 +13,9 @@ jobs:
   test:
     name: test (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    # npm test boots workerd for the workers project, and the Workers pool image is a
+    # download the first run pays for.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:

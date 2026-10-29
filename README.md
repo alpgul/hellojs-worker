@@ -41,6 +41,7 @@ const res = await request({
 - [Certificate validation](#certificate-validation)
 - [TypeScript](#typescript)
 - [Performance](#performance)
+- [Testing](#testing)
 - [Errors](#errors)
 - [Debugging](#debugging)
 - [API surface](#api-surface)
@@ -386,7 +387,7 @@ The profile defines:
 ### Verifying
 
 ```bash
-node test/fingerprint/chrome147.js
+npm run test:fingerprint
 ```
 
 Asserts JA4, Akamai HTTP/2 fingerprint, cipher list, signature_algorithms,
@@ -394,8 +395,9 @@ supported_groups, supported_versions, extension set, HTTP/2 HEADERS flags +
 header order against `test/fixtures/chrome147-peet.json` (a real Chrome 147
 capture on macOS via [tls.peet.ws](https://tls.peet.ws)).
 
-Expected output: `11/11 checks passed` and
-`JA4 == t13d1516h2_8daaf6152771_d8a2da3f94cd`.
+Expected output: `11 passed (11)`. The suite reaches `tls.peet.ws` live, so it
+can go red when that host is unreachable or rate-limiting — re-run before
+treating a failure as a fingerprint regression.
 
 ---
 
@@ -463,13 +465,17 @@ With no provider configured the seam resolves to `dgram`, so Node needs no setup
 `examples/worker.ts` is the worked version of this: a Worker (workerd) entry point whose
 runtime has no outbound UDP, so it takes HTTP/3 off the table at module scope, installs the
 generated Mozilla root bundle from `examples/root-certificates.ts` (workerd ships no roots),
-and still serves `h3: true` requests over TCP + TLS. `npm run example` starts it
-under wrangler, which needs
-`nodejs_compat` for the `node:` modules hellojs uses and `webcrypto_modern_algorithms` for
-the ML-KEM-768 share in the Chrome 147 key exchange — that flag has no default enable date,
-so it has to be named. Open the URL wrangler prints and the Worker serves its run-test page
-(`/run-test.html`): one button runs all fourteen scenarios from `examples/scenarios.ts`
-concurrently and colors each result; `GET /run` answers the same report as JSON.
+and still serves `h3: true` requests over TCP + TLS. Open the URL wrangler prints and the
+Worker serves its run-test page (`/run-test.html`): one button runs all fourteen scenarios
+from `examples/scenarios.ts` concurrently and colors each result; `GET /run` answers the
+same report as JSON.
+
+`wrangler.jsonc` is the single source of truth for the runtime config:
+`compatibility_date` plus `nodejs_compat` (for the `node:` modules hellojs uses) and
+`webcrypto_modern_algorithms` (for the ML-KEM-768 share in the Chrome 147 key exchange —
+that flag has no default enable date, so it has to be named). `npm run example` is plain
+`wrangler dev`, and the Vitest `workers` project reads the same file, so the runtime that
+executes the library tests is the runtime the library is written for.
 
 ### What's implemented
 
@@ -608,6 +614,13 @@ try {
 }
 ```
 
+The test suite is TypeScript too: `test/**/*.ts` and `vitest.config.ts` are inside the
+root `tsconfig.json` include, so `npm run typecheck` covers them. Tests that run in the
+workerd pool get `cloudflare:test` typings from the triple-slash reference in
+`test/env.d.ts`, and the program deliberately types `crypto.subtle` against
+`@cloudflare/workers-types/experimental` rather than generated `wrangler types` output —
+that entry is the one that declares ML-KEM.
+
 ---
 
 ## Performance
@@ -692,6 +705,60 @@ Active handles after load: 3
 ```
 
 Knobs: `SOAK_REQUESTS=1000000 SOAK_CONCURRENCY=200 SOAK_HEAP_BUDGET_MB=128 npm run test:soak`.
+
+---
+
+## Testing
+
+Vitest, in three projects. `lib/` is written for the workerd runtime, so the tests that
+exercise it run there — via the official
+[Workers Vitest integration](https://developers.cloudflare.com/workers/testing/vitest-integration/),
+which boots a worker from `wrangler.jsonc` and gives each test file the real
+`crypto.subtle`.
+
+| Project | Location | Runs in | Covers |
+|---|---|---|---|
+| `workers` | `test/unit/**/*.test.ts` | workerd (`cloudflare-pool`) | the library itself: handshake crypto, HKDF, HPACK/Huffman, frame codecs, parsers, profiles, fingerprint shaping |
+| `node` | `test/node/**/*.test.ts` | Node | the same lib, plus what workerd cannot host: `node:fs` fixtures, `openssl` subprocesses, loopback servers, `node:dgram`, a real trust store |
+| `network` | `test/integration/**`, `test/fingerprint/**` | Node, live internet | round-trips against public servers and the Chrome 147 fingerprint regression |
+
+```bash
+npm test                    # workers + node — offline, the default gate
+npm run test:watch
+npm run test:workers        # workerd pool only
+npm run test:node           # node pool only
+npm run test:network        # live internet; NOT part of npm test
+npm run test:integration
+npm run test:fingerprint
+npm run test:all            # everything, network included
+```
+
+Why workerd: two of the library's crypto paths exist *because* of workerd.
+`lib/tls/x25519.ts` derives its shared secret through `crypto.subtle.deriveBits` because
+workerd's `node:crypto diffieHellman()` rejects an imported peer key, and `lib/tls/mlkem.ts`
+needs `ML-KEM-768` generate/encapsulate/decapsulate — available in workerd only with the
+`webcrypto_modern_algorithms` flag and never in Node. Testing those against Node's WebCrypto
+would test code we don't ship. To prove the coupling is real, delete
+`webcrypto_modern_algorithms` from `wrangler.jsonc` and `npm run test:workers` fails with
+`ML-KEM-768 unavailable: runtime needs Web Crypto with ML-KEM support`.
+
+Where a new test goes: `workers` by default. A test moves to `node` only because of a workerd
+runtime limit — a missing or broken builtin, the empty trust store, the CPU budget — and never
+to hide a library bug; a `lib/` bug is fixed in `lib/`. In practice that means anything using
+`node:fs`, `node:child_process`, `node:dgram`, a `node:net`/`node:tls` server, or
+`tls.rootCertificates` starts in `test/node/`. Anything that reaches a public host starts in
+`test/integration/`, which is excluded from `npm test` so the default gate stays offline and
+deterministic; those suites can legitimately go red when a host rate-limits us, retires TLS
+1.2, or blocks UDP — re-run before treating a failure as a regression.
+
+Byte comparisons use one helper, `hex()` from `test/helpers/bytes.ts`, rather than a deep-equal
+on `Buffer` vs `Uint8Array` — the two are not interchangeable under `toStrictEqual`, and the
+comparison must behave identically in both runtimes. `test/setup/workerd.ts` runs before every
+`workers` test file and applies the same two module-scope fixes as the Worker example: no UDP
+provider, and the generated Mozilla roots.
+
+`test/bench/clients.js` and `test/soak/soak.js` stay plain Node scripts: they measure and
+sustain load rather than assert, and Vitest would add nothing.
 
 ---
 
@@ -868,6 +935,24 @@ lib/
 └── models/
     └── log.ts                 leveled logger (HELLOJS_LOG=info/debug/trace;
                                JSON-line output via HELLOJS_LOG_JSON=1)
+```
+
+```
+test/
+├── unit/                  Vitest `workers` project — runs inside workerd
+│   ├── smoke.test.ts      the whole module graph boots in workerd
+│   ├── mlkem.test.ts      ML-KEM-768 via the Worker's Web Crypto
+│   ├── x25519.test.ts     the WebCrypto X25519 bridge
+│   └── …                  crypto, h2/h3 codecs, HPACK/Huffman, parsers, profiles
+├── node/                  Vitest `node` project — same lib, workerd-hostile needs
+├── integration/           Vitest `network` project — live public servers
+├── fingerprint/           Vitest `network` project — Chrome 147 vs the fixture
+├── setup/workerd.ts       per-file workers setup (no UDP, Mozilla roots)
+├── helpers/               hex(), rejection(), listenOnLoopback(), probeTls()
+├── fixtures/              captured peet.json / peet samples
+├── types/                 strict-tsc consumer check for index.d.ts
+├── bench/                 cross-client benchmarks (plain Node script)
+└── soak/                  sustained-load soak (plain Node script)
 ```
 
 The custom h2 client (`lib/h2/session.ts`) replaces Node's built-in

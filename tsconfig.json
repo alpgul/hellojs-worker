@@ -25,6 +25,6 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["index.ts", "lib/**/*.ts", "test/**/*.ts", "examples/**/*.ts"],
+  "include": ["index.ts", "lib/**/*.ts", "test/**/*.ts", "examples/**/*.ts", "vitest.config.ts"],
   "exclude": ["node_modules", "dist"]
 }
