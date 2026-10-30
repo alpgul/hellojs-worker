@@ -9,7 +9,7 @@
 // concatenated shared secret. The X25519 portion follows.
 //
 // ML-KEM-768 itself is done by Web Crypto — workerd exposes it behind its
-// `webcrypto_modern_algorithms` flag, and Node from 24.7 through `node:crypto.webcrypto` — so
+// `webcrypto_modern_algorithms` flag, and Node from 24.21 through `node:crypto.webcrypto` — so
 // there is no pure-JS implementation to ship. `sk` is therefore an opaque Web Crypto key that
 // only this module touches: the ClientHello takes `pk` (raw encapsulation key), decapsulation
 // takes `sk` back. Both operations are native (~0.4ms for keygen), so nothing is pre-warmed.
@@ -37,7 +37,7 @@ function mlkemSubtle(): Subtle {
 	const s = getSubtle()
 	if (typeof s.encapsulateBits !== 'function' || typeof s.decapsulateBits !== 'function') {
 		throw new Error(
-			`${ALG} unavailable: Web Crypto has no ML-KEM support; requires Node >= 24.7 or Cloudflare Workers with the webcrypto_modern_algorithms flag`
+			`${ALG} unavailable: Web Crypto has no ML-KEM support; requires Node >= 24.21 or Cloudflare Workers with the webcrypto_modern_algorithms flag`
 		)
 	}
 	return s

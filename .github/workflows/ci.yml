@@ -19,8 +19,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Matches package.json engines. Node 24.7 is the floor for native ML-KEM-768 WebCrypto
-        # (the default Chrome 147 key share); 24 is also the floor for unflagged type stripping.
+        # Matches package.json engines. Node 24.21 is the floor: ML-KEM-768 itself landed in 24.7,
+        # but JWK export of ML-KEM keys, which lib/tls/mlkem.ts needs, only arrived in 24.21.
+        # 24 is also the floor for unflagged type stripping.
         node: ['24']
     steps:
       - uses: actions/checkout@v4

@@ -73,7 +73,7 @@
   },
   "homepage": "https://github.com/unreleased/hellojs#readme",
   "engines": {
-    "node": ">=24.7.0"
+    "node": ">=24.21.0"
   },
   "publishConfig": {
     "access": "public"

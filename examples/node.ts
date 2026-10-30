@@ -8,7 +8,7 @@
 //      actually attempts QUIC; a network that blocks UDP makes it fall back to TCP + TLS.
 //   2. The trust store is real. Certificate validation reads node:tls's bundled roots, so the
 //      generated Mozilla bundle the Worker installs is not needed.
-//   3. ML-KEM is native. Node 24.7+ supplies ML-KEM-768 through node:crypto.webcrypto, and
+//   3. ML-KEM is native. Node 24.21+ supplies ML-KEM-768 through node:crypto.webcrypto, and
 //      WebCrypto is resolved there even if the globalThis.crypto global is absent.
 //
 // Network access is required; this is a manual tour, not part of `npm test`.
