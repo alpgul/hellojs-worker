@@ -8,21 +8,20 @@
 // Note ordering: MLKEM portion comes FIRST in both client/server shares and in the
 // concatenated shared secret. The X25519 portion follows.
 //
-// ML-KEM-768 itself is done by Web Crypto — the same `ML-KEM-768` algorithm the worker
-// runtime exposes behind its `webcrypto_modern_algorithms` flag — so there is no
-// pure-JS implementation to ship. `sk` is therefore an opaque Web Crypto key that only this
-// module touches: the ClientHello takes `pk` (raw encapsulation key), decapsulation takes
-// `sk` back. Both operations are native (~0.4ms for keygen), so nothing is pre-warmed.
+// ML-KEM-768 itself is done by Web Crypto — workerd exposes it behind its
+// `webcrypto_modern_algorithms` flag, and Node from 24.7 through `node:crypto.webcrypto` — so
+// there is no pure-JS implementation to ship. `sk` is therefore an opaque Web Crypto key that
+// only this module touches: the ClientHello takes `pk` (raw encapsulation key), decapsulation
+// takes `sk` back. Both operations are native (~0.4ms for keygen), so nothing is pre-warmed.
 
-// `sk` is an opaque Web Crypto key: this module is the only place that touches it, so the
-// types are read off the global `crypto` value instead of being re-declared locally. That keeps
-// them the host runtime's own — the tsconfig loads @cloudflare/workers-types, so `Subtle` is
-// workerd's SubtleCrypto with ML-KEM in it, not a namespace that has to be imported.
+// The `Subtle` type comes from ../utils/webcrypto so it stays the host runtime's own —
+// workerd's ML-KEM-capable SubtleCrypto.
+import { getSubtle, type Subtle } from '../utils/webcrypto.ts'
+
 import { deriveX25519SharedSecret } from './x25519.ts'
 
 import type { KeyObject } from 'node:crypto'
 
-type Subtle = typeof crypto.subtle
 // Named, and exported, because tls.ts stores the opaque `sk` on the handshake state and has to
 // call it the same thing this module does.
 export type WebCryptoKey = Awaited<ReturnType<Subtle['importKey']>>
@@ -34,20 +33,22 @@ const MLKEM_PK_LEN = 1184
 const MLKEM_CT_LEN = 1088
 const X25519_LEN = 32
 
-function subtle(): Subtle {
-	const s = crypto.subtle
+function mlkemSubtle(): Subtle {
+	const s = getSubtle()
 	if (typeof s.encapsulateBits !== 'function' || typeof s.decapsulateBits !== 'function') {
-		throw new Error(`${ALG} unavailable: runtime needs Web Crypto with ML-KEM support`)
+		throw new Error(
+			`${ALG} unavailable: Web Crypto has no ML-KEM support; requires Node >= 24.7 or Cloudflare Workers with the webcrypto_modern_algorithms flag`
+		)
 	}
 	return s
 }
 
 async function generateMlKemKeyPair(): Promise<{ pk: Buffer; sk: WebCryptoKey }> {
-	const pair = await subtle().generateKey(ALG, true, KEY_OPS)
+	const pair = await mlkemSubtle().generateKey(ALG, true, KEY_OPS)
 	// generateKey answers a union for the string-algorithm form; a KEM keygen is always a pair, so
 	// this narrows rather than guards.
 	if (!('publicKey' in pair)) throw new Error(`${ALG}: keygen returned no key pair`)
-	const jwk = (await subtle().exportKey('jwk', pair.publicKey)) as { pub?: string }
+	const jwk = (await mlkemSubtle().exportKey('jwk', pair.publicKey)) as { pub?: string }
 	if (!jwk || typeof jwk.pub !== 'string') throw new Error(`${ALG}: JWK has no "pub" field`)
 	const pk = Buffer.from(jwk.pub, 'base64url')
 	if (pk.length !== MLKEM_PK_LEN) {
@@ -57,7 +58,7 @@ async function generateMlKemKeyPair(): Promise<{ pk: Buffer; sk: WebCryptoKey }>
 }
 
 async function decapsulateMlKem(ct: Uint8Array, sk: WebCryptoKey): Promise<Buffer> {
-	return Buffer.from(await subtle().decapsulateBits(ALG, sk, ct))
+	return Buffer.from(await mlkemSubtle().decapsulateBits(ALG, sk, ct))
 }
 
 // Given the server's 1120-byte X25519MLKEM768 key_share entry and our private keys, compute the 64-byte hybrid shared secret.

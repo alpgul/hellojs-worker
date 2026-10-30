@@ -46,6 +46,7 @@
     "typecheck": "tsc --noEmit",
     "test:types": "./node_modules/.bin/tsc --project test/types/tsconfig.json",
     "example": "wrangler dev",
+    "example:node": "node examples/node.ts",
     "prepublishOnly": "node --input-type=module -e \"await import('./index.ts')\""
   },
   "keywords": [
@@ -72,7 +73,7 @@
   },
   "homepage": "https://github.com/unreleased/hellojs#readme",
   "engines": {
-    "node": ">=24"
+    "node": ">=24.7.0"
   },
   "publishConfig": {
     "access": "public"

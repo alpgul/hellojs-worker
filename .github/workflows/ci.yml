@@ -19,8 +19,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Matches package.json engines. The .ts sources need unflagged type stripping, so 24 is
-        # the floor as well as the development version.
+        # Matches package.json engines. Node 24.7 is the floor for native ML-KEM-768 WebCrypto
+        # (the default Chrome 147 key share); 24 is also the floor for unflagged type stripping.
         node: ['24']
     steps:
       - uses: actions/checkout@v4

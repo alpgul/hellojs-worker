@@ -473,6 +473,11 @@ Worker serves its run-test page (`/run-test.html`): one button runs all fourteen
 from `examples/scenarios.ts` concurrently and colors each result; `GET /run` answers the
 same report as JSON.
 
+`examples/node.ts` is the same tour on Node: `npm run example:node` runs all fourteen
+scenarios concurrently and prints the report. Node needs no module-scope setup — it has a
+real `node:dgram` transport (so `h3: true` actually attempts QUIC), a built-in trust store,
+and Node 24.7+ supplies ML-KEM through `node:crypto.webcrypto`.
+
 `wrangler.jsonc` is the single source of truth for the runtime config:
 `compatibility_date` plus `nodejs_compat` (for the `node:` modules hellojs uses) and
 `webcrypto_modern_algorithms` (for the ML-KEM-768 share in the Chrome 147 key exchange —
@@ -747,14 +752,15 @@ npm run bench:vs-got
 npm run bench:vs-axios
 ```
 
-Why workerd: two of the library's crypto paths exist *because* of workerd.
-`lib/tls/x25519.ts` derives its shared secret through `crypto.subtle.deriveBits` because
-workerd's `node:crypto diffieHellman()` rejects an imported peer key, and `lib/tls/mlkem.ts`
-needs `ML-KEM-768` generate/encapsulate/decapsulate — available in workerd only with the
-`webcrypto_modern_algorithms` flag and never in Node. Testing those against Node's WebCrypto
-would test code we don't ship. To prove the coupling is real, delete
-`webcrypto_modern_algorithms` from `wrangler.jsonc` and `npm run test:workers` fails with
-`ML-KEM-768 unavailable: runtime needs Web Crypto with ML-KEM support`.
+Why workerd: `lib/tls/x25519.ts` derives its shared secret through `crypto.subtle.deriveBits`
+because workerd's `node:crypto diffieHellman()` rejects an imported peer key, and
+`lib/tls/mlkem.ts` needs `ML-KEM-768` generate/encapsulate/decapsulate — native in workerd
+only with the `webcrypto_modern_algorithms` flag, and in Node from 24.7 through
+`node:crypto.webcrypto`. `lib/utils/webcrypto.ts` resolves SubtleCrypto per call:
+`globalThis.crypto.subtle` when the host provides it, otherwise `node:crypto.webcrypto.subtle` —
+a standard Node project never has to install a global. To prove the workerd coupling is real,
+delete `webcrypto_modern_algorithms` from `wrangler.jsonc` and `npm run test:workers` fails with
+`ML-KEM-768 unavailable: Web Crypto has no ML-KEM support; requires Node >= 24.7 or Cloudflare Workers with the webcrypto_modern_algorithms flag`.
 
 Where a new test goes: `workers` by default. A test moves to `node` only because of a workerd
 runtime limit — a missing or broken builtin, the empty trust store, the CPU budget — and never

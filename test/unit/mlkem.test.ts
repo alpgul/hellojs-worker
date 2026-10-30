@@ -1,8 +1,8 @@
-// ML-KEM-768 — the hybrid key_share path (TLS group 0x11EC). This is the one part of the handshake
-// that only exists in the Worker's Web Crypto: workerd exposes `ML-KEM-768` behind the
-// `webcrypto_modern_algorithms` flag (declared in wrangler.jsonc, which the workers pool loads) and
-// Node has no ML-KEM at all, so these tests can only pass in workerd. Drop the flag and this file
-// fails with `ML-KEM-768 unavailable: runtime needs Web Crypto with ML-KEM support`.
+// ML-KEM-768 — the hybrid key_share path (TLS group 0x11EC). workerd exposes `ML-KEM-768` behind
+// the `webcrypto_modern_algorithms` flag (declared in wrangler.jsonc, which the workers pool loads);
+// Node supplies it from 24.7 through node:crypto.webcrypto. These tests run on the workerd path.
+// Drop the flag and this file fails with `ML-KEM-768 unavailable: Web Crypto has no ML-KEM support;
+// requires Node >= 24.7 or Cloudflare Workers with the webcrypto_modern_algorithms flag`.
 
 import { generateKeyPairSync } from 'node:crypto'
 

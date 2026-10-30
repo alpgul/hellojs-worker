@@ -1,9 +1,9 @@
 // Vitest runs the library's tests in three projects, split by the runtime they need.
 //
-//   workers  -> inside workerd, via the official Workers Vitest integration. The library reads
-//               ML-KEM and X25519 off the global `crypto.subtle` (lib/tls/mlkem.ts, lib/tls/x25519.ts),
-//               and ML-KEM only exists there behind `webcrypto_modern_algorithms` — which Node has no
-//               equivalent of. Those tests are meaningless anywhere else.
+//   workers  -> inside workerd, via the official Workers Vitest integration. The library resolves
+//               ML-KEM and X25519 through `crypto.subtle` (lib/utils/webcrypto.ts), and workerd only
+//               puts ML-KEM there behind `webcrypto_modern_algorithms`; these tests exercise the
+//               workerd path. Node resolves the same interface from node:crypto.webcrypto.
 //   node     -> Node's own pool, for tests that need local TCP/TLS servers, node:fs fixtures,
 //               node:dgram or Node's real CA bundle, none of which workerd provides. The soak
 //               suite (test/soak) lives here too: it drives a local h2 server under load and
