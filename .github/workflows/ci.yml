@@ -29,7 +29,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: 'npm'
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - name: Unit tests
         run: npm test
       - name: Smoke import
@@ -44,7 +44,7 @@ jobs:
         with:
           node-version: '24'
           cache: 'npm'
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - name: ESLint
         run: npm run lint
       # Checks the .ts sources against both @types/node and @cloudflare/workers-types, so the
@@ -69,6 +69,6 @@ jobs:
         with:
           node-version: '24'
           cache: 'npm'
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - name: Cross-client benchmark (loopback only)
         run: npm run bench

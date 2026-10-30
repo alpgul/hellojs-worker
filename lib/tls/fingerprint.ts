@@ -130,7 +130,8 @@ function ja3(ch: ParsedClientHello): { str: string; hash: string } {
 	const groups = ch.groups.filter(g => !isGrease(g)).join('-')
 	const points = ch.ecPointFormats.join('-')
 	const str = `${ver},${ciphers},${exts},${groups},${points}`
-	return { str, hash: crypto.createHash('md5').update(str).digest('hex') }
+	// JA3's de-facto spec mandates MD5; this is a client fingerprint, not a security hash.
+	return { str, hash: crypto.createHash('md5').update(str).digest('hex') } // NOSONAR
 }
 
 // JA4 = "t<ver>d<#ciphers><#extensions><alpn>_<sha256(ciphers-sorted)>:12_<sha256(extensions-sorted-w/o-sni-or-alpn,sig_algs)>:12"

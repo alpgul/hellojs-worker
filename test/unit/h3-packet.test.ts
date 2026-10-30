@@ -34,7 +34,8 @@ it('1-RTT PING probe builds despite tiny payload (pads for HP sample)', () => {
 
 it('1-RTT empty-payload packet still builds and round-trips', () => {
 	const packet = pkt.buildOneRtt({ dstCid: DST, payloadFrames: Buffer.alloc(0), pn: 1, pnLen: 1, clientKeys: CK })
-	oneRtt(pkt.parsePacket(packet, 0, { oneRtt: { server: CK } }, DST.length))
+	const parsed = oneRtt(pkt.parsePacket(packet, 0, { oneRtt: { server: CK } }, DST.length))
+	expect(pkt.decodeFrames(parsed.payload)).toEqual([])
 })
 
 it('large 1-RTT payload is not padded (unchanged length)', () => {

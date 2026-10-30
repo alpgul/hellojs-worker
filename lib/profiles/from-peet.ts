@@ -172,7 +172,7 @@ const CERT_COMPRESS_BY_NAME: Record<string, number> = {
 //   "extensionEncryptedClientHello (boringssl) (65037)"
 
 function isGreaseLabel(label: string): boolean {
-	return /^TLS_GREASE\b|\bGREASE\b/i.test(label)
+	return /(?:^TLS_GREASE\b|\bGREASE\b)/i.test(label)
 }
 
 // Parse the trailing "(0x..)" or "(N)" from a label. Returns null when nothing parses.
@@ -198,12 +198,18 @@ function extractBare(label: string): number | null {
 	return null
 }
 
+// Drop the first "(" and everything after it, then trim — e.g. "foo (10)" → "foo".
+function stripParenSuffix(label: string): string {
+	const paren = label.indexOf('(')
+	return (paren === -1 ? label : label.slice(0, paren)).trim()
+}
+
 // Centralized: name lookup → trailing-paren → bare-hex/decimal. Returns null if all fail.
 function toCode(label: string, byName: Record<string, number> | null): number | null {
 	if (byName) {
 		const exact = byName[label]
 		if (exact != null) return exact
-		const stripped = String(label).replace(/\s*\(.*$/, '').trim()
+		const stripped = stripParenSuffix(String(label))
 		if (byName[stripped] != null) return byName[stripped]
 	}
 	const n = extractNum(label)
@@ -376,7 +382,7 @@ function fromPeet(json: PeetJson, opts: { name?: string } = {}): Profile {
 	const ccExt = findExt(27)
 	const certCompressionAlgorithms: number[] = []
 	if (ccExt) for (const a of ccExt.algorithms || []) {
-		const aname = a.replace(/\s*\(.*$/, '').trim()
+		const aname = stripParenSuffix(a)
 		const code = CERT_COMPRESS_BY_NAME[aname] ?? extractNum(a) ?? extractHex(a)
 		if (code != null) certCompressionAlgorithms.push(code)
 	}
