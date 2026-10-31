@@ -20,7 +20,7 @@ import { PassThrough } from 'node:stream'
 import { URL } from 'node:url'
 import * as zlib from 'node:zlib'
 
-import { connect } from './connect.ts'
+import { connect, connectPreferred } from './connect.ts'
 import { Jar } from './cookies.ts'
 import { HellojsError, wrap as wrapError } from './errors.ts'
 import { buildH2Headers, buildH1Headers, mergeProfileHeaders } from './headers.ts'
@@ -234,31 +234,21 @@ async function performRequest(opts: RequestOptions): Promise<unknown> {
 	}
 
 	// Transport: HTTP/3 is opt-in per request (`h3: true`). Every other request uses
-	// TCP + TLS, regardless of any `alt-svc` response headers.
-	const transport = opts.h3 === true ? 'quic' : 'tcp'
-
-	let conn: Connection
-	try {
-		conn = await connect({
+	// TCP + TLS, regardless of any `alt-svc` response headers. An h3 request races the
+	// QUIC and TCP handshakes and keeps whichever completes first, so an origin without
+	// a QUIC endpoint falls back without sitting in QUIC Initial retransmits.
+	const conn: Connection = opts.h3 === true
+		? await connectPreferred({
 			host, port, profile, proxy: opts.proxy,
-			transport,
 			verifyTLS: opts.verifyTLS !== false,
 			timeouts: opts.timeouts,
 		})
-	} catch (e) {
-		// An opt-in h3 request that can't complete over QUIC falls back to TCP
-		// instead of failing.
-		if (transport === 'quic') {
-			conn = await connect({
-				host, port, profile, proxy: opts.proxy,
-				transport: 'tcp',
-				verifyTLS: opts.verifyTLS !== false,
-				timeouts: opts.timeouts,
-			})
-		} else {
-			throw e
-		}
-	}
+		: await connect({
+			host, port, profile, proxy: opts.proxy,
+			transport: 'tcp',
+			verifyTLS: opts.verifyTLS !== false,
+			timeouts: opts.timeouts,
+		})
 
 	// Build headers
 	const userHeaders: HeaderMap = { ...opts.headers }
