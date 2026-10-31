@@ -23,6 +23,7 @@
 import * as crypto from 'node:crypto'
 import { EventEmitter } from 'node:events'
 
+import { resolveHost, type ResolvedAddress } from '../dns-cache.ts'
 import { CreateALPNExtension, CreatePSKExchangeModesExtension, CreateSignatureAlgorithmsExtension, CreateSNIExtension } from '../extensions/index.ts'
 import logFactory from '../models/log.ts'
 import { CIPHERS, HASHES, MESSAGE_TYPES } from '../utils/config.ts'
@@ -270,7 +271,17 @@ class QuicConnection extends EventEmitter {
 	}
 
 	async connect(): Promise<void> {
-		const socket = dgram.createSocket('udp4')
+		// Resolve once through the TTL cache and pin every send to the chosen address: dgram.send()
+		// with a hostname re-resolves per call, so a multi-A-record host can answer from one
+		// address and receive our replies on another, and each send pays DNS again.
+		let addresses: ResolvedAddress[] | null = null
+		try {
+			addresses = await resolveHost(this.host)
+		} catch {
+			// No resolver (workerd) or a failed lookup: keep the hostname and the old behaviour.
+		}
+		const chosen = addresses?.find((a) => a.family === 4) ?? addresses?.[0]
+		const socket = dgram.createSocket(chosen?.family === 6 ? 'udp6' : 'udp4')
 		this.socket = socket
 		socket.on('message', (msg: Buffer, rinfo: { address: string; port: number }) => {
 			// Pin the peer to the address that answered: send() on a hostname re-resolves per call,
@@ -281,10 +292,9 @@ class QuicConnection extends EventEmitter {
 		})
 		socket.on('error', (e: Error) => this.emit('error', e))
 
-		// Resolve and bind
 		await new Promise<void>((res) => socket.bind(0, () => res()))
 
-		this.serverAddr = { host: this.host, port: this.port }
+		this.serverAddr = { host: chosen?.address ?? this.host, port: this.port }
 
 		this.initialKeys = keys.deriveInitialKeys(this.dstCid)
 		this._sendClientHello()
@@ -418,7 +428,7 @@ class QuicConnection extends EventEmitter {
 		if (this._closed) return
 		try {
 			if (this.peerAddr) this.socket?.send(buf, this.peerAddr.port, this.peerAddr.address)
-			else this.socket?.send(buf, this.port, this.host)
+			else this.socket?.send(buf, this.port, this.serverAddr?.host ?? this.host)
 		} catch {}
 	}
 
@@ -1148,7 +1158,7 @@ class QuicConnection extends EventEmitter {
 					keyPhase: this.currentPhase,
 				})
 				this.pn.oneRtt++
-				socket.send(packet, this.port, this.host, () => {
+				socket.send(packet, this.port, this.serverAddr?.host ?? this.host, () => {
 					try { socket.close() } catch {}
 				})
 				return

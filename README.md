@@ -721,11 +721,12 @@ Target `https://www.cloudflare.com/cdn-cgi/trace`, one fresh connection per requ
 
 | Build | hellojs h2 p50 / mean | curl h2 p50 / mean | Δ p50 / Δ mean |
 |---|---:|---:|---:|
-| Before Nagle fix | 212–215 ms / — | 145–152 ms / — | +39–48% / — |
+| After Nagle fix | 212–215 ms / — | 145–152 ms / — | +39–48% / — |
 | After `setNoDelay` | 153.0 / 158.8 ms | 144.1 / 145.8 ms | +6.2% / +8.9% |
 | After certificate cache (25 samples) | 151.8 / 154.4 ms | 150.7 / 152.1 ms | **+0.7% / +1.5%** |
+| After DNS cache (25 samples × 2 runs) | 117.6–121.8 / 121.4–127.2 ms | 144.9–148.7 / 146.0–152.3 ms | **−18% / −17%** |
 
-hellojs h3 in the same runs: p50 150–160 ms; a curl h3 column requires an
+hellojs h3 in the same runs: p50 118.6–119.6 ms; a curl h3 column requires an
 HTTP/3-capable curl via `CURL_BIN`.
 
 **Fix 1 — Nagle.** The TLS Finished record and the first HTTP/2 frames leave as
@@ -753,20 +754,28 @@ resolving the leaf key costs 0.003 ms instead of 0.408 ms. The one-time cost is 
 lazy parse of the bundled root store (~22 ms) on the first validated chain of a
 process, not per request.
 
-**What remains.** The TLS 1.3 CertificateVerify is a proof of possession and must be
-verified on every handshake (~1–2 ms), and run-to-run network drift moves both
-columns by several ms. The p50 gap is now inside that noise band.
+**Fix 3 — DNS cache + address pinning.** Node does not cache `getaddrinfo`: every
+fresh connection paid the full lookup (33–38 ms on this host; curl's own timer shows
+36–41 ms `time_namelookup` per process), and the QUIC path re-resolved on every
+`dgram.send`. `lib/dns-cache.ts` adds a TTL-bounded cache (30 s, 256 entries,
+successes only, in-flight dedupe, IP literals bypass) injected through the
+`net.createConnection({ lookup })` seam for direct TCP, proxy CONNECT and SOCKS5.
+QUIC resolves once through the same cache and pins the peer address for all datagrams
+(SNI keeps the hostname). On workerd `node:dns` is absent, so `dnsCacheAvailable()` is
+false and every path keeps connecting by hostname exactly as before.
 
-**Measured next step — DNS.** `dns.lookup('www.cloudflare.com')` costs 33–38 ms on
-this host (record TTL 53 s) and Node does not cache `getaddrinfo`; every fresh
-connection pays it. The QUIC path re-resolves on each `dgram.send` as well. A
-TTL-bounded cache plus a pinned peer address is the next optimization.
+Measured: one resolver call across 3 sequential requests, both h2 and h3; with curl
+unchanged at 145–149 ms, hellojs h2 went 151.8 → 117.6–121.8 ms p50 and now leads
+curl by ~18%.
+
+**What remains.** TCP connect + TCP/TLS handshake. The TLS 1.3 CertificateVerify must
+be verified on every handshake (~1–2 ms), and run-to-run network drift moves both
+columns by several ms. TLS 1.3 PSK resumption is the remaining lever: plain
+resumption keeps the 1-RTT handshake but removes the certificate flight and its
+verification, while 0-RTT saves a full RTT at the cost of replay risk.
 
 **Not applicable here.** Connection pooling would remove DNS + TCP + TLS altogether
-(~152 ms → ~35–40 ms), but it contradicts the fresh-connection-per-request design.
-TLS 1.3 PSK resumption is the remaining option: plain resumption keeps the 1-RTT
-handshake but removes the certificate flight and its verification, while 0-RTT saves
-a full RTT at the cost of replay risk.
+(~120 ms → ~35–40 ms), but it contradicts the fresh-connection-per-request design.
 
 Reproduce: `npm run bench:curl`. Knobs: `BENCH_URL`, `SAMPLES`, `CURL_BIN`.
 Caveats: these are connect/handshake-heavy fresh-connection numbers, not steady-state
@@ -985,6 +994,7 @@ lib/
 ├── connect.ts                 per-request TLS/QUIC connection factory (h2/h1/h3),
 │                              per-phase timeouts
 ├── socks5.ts                  SOCKS5 client (RFC 1928 + RFC 1929 user/pass)
+├── dns-cache.ts               TTL-bounded getaddrinfo cache + net lookup seam (Node only)
 ├── tls-summary.ts             best-effort TLS state summary for observability hooks
 ├── cookies.ts                 RFC 6265 cookie jar (Domain/Path/Secure/SameSite/Expires)
 ├── headers.ts                 Chrome 147 default header set + ordering
@@ -1074,7 +1084,7 @@ cold-connect gains and ~45% of the concurrent-throughput gains came from.
   connection migration (socket rebind), 0-RTT-Protected packets.
 - **Common HTTP features not yet implemented:** WebSocket (`Upgrade: ws`),
   multipart/form-data builder, `Expect: 100-continue`, response Cache-Control/ETag
-  semantics, `Retry-After` honoring on 429/503, DNS caching, `Content-Range` resumable
+  semantics, `Retry-After` honoring on 429/503, `Content-Range` resumable
   uploads. These don't affect the fingerprint or TLS layer — they're caller
   conveniences that can sit on top.
 

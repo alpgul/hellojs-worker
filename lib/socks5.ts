@@ -19,6 +19,8 @@
 
 import * as net from 'node:net'
 
+import { cachedLookup, dnsCacheAvailable } from './dns-cache.ts'
+
 export interface Socks5Options {
 	proxyHost: string
 	proxyPort: number
@@ -91,7 +93,9 @@ function readReply(buf: Buffer): Socks5Reply | null {
 function socks5Connect(options: Socks5Options): Promise<net.Socket> {
 	const { proxyHost, proxyPort, username, password, destHost, destPort, connectTimeoutMs = 10_000 } = options
 	return new Promise<net.Socket>((resolve, reject) => {
-		const sock = net.createConnection({ host: proxyHost, port: proxyPort })
+		const connectOptions: net.TcpNetConnectOpts = { host: proxyHost, port: proxyPort }
+		if (dnsCacheAvailable()) connectOptions.lookup = cachedLookup
+		const sock = net.createConnection(connectOptions)
 		const t = setTimeout(() => {
 			// Tagged so the caller sees a timeout rather than wrap()'s EPROTO fallback.
 			const err = new Error('SOCKS5 connect timed out') as NodeJS.ErrnoException

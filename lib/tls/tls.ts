@@ -4,6 +4,7 @@ import * as net from 'node:net'
 import { Duplex } from 'node:stream'
 import * as zlib from 'node:zlib'
 
+import { cachedLookup, dnsCacheAvailable } from '../dns-cache.ts'
 import {
 	CreateStatusRequestExtension,
 	CreateSignedCertificateTimestampExtension,
@@ -381,10 +382,11 @@ class TLS extends EventEmitter {
 					.catch((err) => this.emit('error', err))
 				return
 			}
-			const proxyOptions = {
+			const proxyOptions: net.TcpNetConnectOpts = {
 				host: proxyUrl.hostname,
 				port: Number(proxyUrl.port) || 80
 			}
+			if (dnsCacheAvailable()) proxyOptions.lookup = cachedLookup
 
 			// CONNECT-phase timeout. Without this, a proxy that accepts TCP but never returns
 			// the CONNECT response (overloaded, blackholed, malicious) leaves createTLS in
@@ -466,8 +468,11 @@ class TLS extends EventEmitter {
 				if (this.h2Session && !this.h2Session.closed) this.h2Session.close()
 			})
 		} else {
-			// Standard TCP connect via Node's default resolver.
-			const sock = net.createConnection({ host: this.host, port: this.port })
+			// Standard TCP connect. The cached lookup keeps repeated connections to one host from
+			// resolving again; it falls back to the runtime resolver on a miss.
+			const connectOptions: net.TcpNetConnectOpts = { host: this.host, port: this.port }
+			if (dnsCacheAvailable()) connectOptions.lookup = cachedLookup
+			const sock = net.createConnection(connectOptions)
 			this.socket = sock
 			const timer = setTimeout(() => {
 				// Carry the code so the error reports as a timeout instead of falling through
