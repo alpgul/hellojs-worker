@@ -155,6 +155,9 @@ const isReadable = (b: unknown): b is Readable =>
 
 function decompressIfNeeded(buf: Buffer, encoding: string): Buffer {
 	const e = (encoding || '').toLowerCase()
+	// HEAD/204/304 responses carry content-encoding but no body; decompressing
+	// zero bytes would fail with a spurious truncated-input error.
+	if (!buf || buf.length === 0) return buf
 	if (!e || e === 'identity') return buf
 	if (e.includes('gzip')) return zlib.gunzipSync(buf)
 	if (e.includes('br')) return zlib.brotliDecompressSync(buf)
