@@ -36,6 +36,7 @@
     "bench:h3": "node test/bench/h3-vs-h2.ts",
     "bench:vs-got": "node test/bench/vs-got-h2.ts",
     "bench:vs-axios": "node test/bench/vs-axios.ts",
+    "bench:curl": "node test/bench/vs-curl.ts",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",

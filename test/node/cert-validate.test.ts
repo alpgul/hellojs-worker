@@ -5,10 +5,11 @@ import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import * as tls from 'node:tls'
 
 import { expect, it } from 'vitest'
 
-import { validateChain, hostnameMatches, trustedRoots } from '../../lib/tls/cert-validate.ts'
+import { validateChain, hostnameMatches, trustedRoots, setTrustedRoots } from '../../lib/tls/cert-validate.ts'
 
 // openssl is fed paths we generated ourselves under os.tmpdir(); nothing user-controlled reaches it.
 function withCertDir(fn: (dir: string) => void): void {
@@ -79,4 +80,19 @@ it('validateChain rejects empty chain', () => {
 it('trustedRoots populates from Node bundled CAs (non-zero)', () => {
 	const roots = trustedRoots()
 	expect(roots.length, `expected > 50 bundled roots, got ${roots.length}`).toBeGreaterThan(50)
+})
+
+it('cached chain result is keyed by host and cleared when the trust store changes', () => {
+	const pem = genCertPem('localhost', 'DNS:localhost')
+	const der = Buffer.from(new crypto.X509Certificate(pem).raw)
+	try {
+		setTrustedRoots([pem])
+		expect(validateChain([der], 'localhost').ok, 'trusted chain accepted').toBe(true)
+		expect(validateChain([der], 'localhost').ok, 'repeat call served from cache').toBe(true)
+		expect(validateChain([der], 'other.example').ok, 'different host must not reuse the entry').toBe(false)
+		setTrustedRoots([])
+		expect(validateChain([der], 'localhost').ok, 'same chain rejected after trust store reset').toBe(false)
+	} finally {
+		setTrustedRoots(tls.rootCertificates)
+	}
 })

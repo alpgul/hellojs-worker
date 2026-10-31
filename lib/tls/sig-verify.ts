@@ -34,9 +34,50 @@ export interface SignatureSpec {
 // Anything a call site can hand us: PEM text, a certificate, DER, or a key object.
 export type KeyMaterial = string | Uint8Array | X509Certificate | KeyObject | null | undefined
 
-interface ResolvedKey {
+export interface ResolvedKey {
 	pem: string
 	keyType: string | null
+}
+
+// Public key material is re-derived on every signature check (certificate parse, SPKI export,
+// algorithm lookup). Those bytes are a pure function of the certificate DER, so remember the
+// result: by instance for callers that hold one, and by DER hash for the handshake path, which
+// carries the leaf as raw bytes. Bounded so a peer rotating certificates cannot grow it.
+const SPKI_CACHE_MAX = 256
+const spkiCache = new Map<string, ResolvedKey>()
+const instanceKeys = new WeakMap<X509Certificate, ResolvedKey>()
+const instancePublicKeys = new WeakMap<X509Certificate, KeyObject>()
+
+function spkiCacheKey(der: Uint8Array): string {
+	return crypto.createHash('sha256').update(der).digest('hex')
+}
+
+function spkiCacheGet(key: string): ResolvedKey | undefined {
+	const hit = spkiCache.get(key)
+	if (hit) {
+		// Refresh recency: Map iteration order is insertion order, so re-insert on every hit.
+		spkiCache.delete(key)
+		spkiCache.set(key, hit)
+	}
+	return hit
+}
+
+function spkiCacheSet(key: string, resolved: ResolvedKey): void {
+	spkiCache.set(key, resolved)
+	while (spkiCache.size > SPKI_CACHE_MAX) {
+		const oldest = spkiCache.keys().next().value
+		if (oldest === undefined) break
+		spkiCache.delete(oldest)
+	}
+}
+
+function publicKeyOf(cert: X509Certificate): KeyObject {
+	let pub = instancePublicKeys.get(cert)
+	if (!pub) {
+		pub = cert.publicKey
+		instancePublicKeys.set(cert, pub)
+	}
+	return pub
 }
 
 const DIGEST_LEN: Record<string, number> = { sha1: 20, sha256: 32, sha384: 48, sha512: 64 }
@@ -72,7 +113,7 @@ function keyTypeFromPem(pem: string): string | null {
 }
 
 function keyFromCert(cert: X509Certificate): ResolvedKey {
-	const pub = cert.publicKey
+	const pub = publicKeyOf(cert)
 	return { pem: String(pub.export({ type: 'spki', format: 'pem' })), keyType: pub.asymmetricKeyType || null }
 }
 
@@ -82,12 +123,36 @@ function keyFromCert(cert: X509Certificate): ResolvedKey {
 // cannot be skipped by passing a different key shape.
 function resolveKey(key: KeyMaterial): ResolvedKey {
 	if (typeof key === 'string') return { pem: key, keyType: keyTypeFromPem(key) }
-	if (key instanceof crypto.X509Certificate) return keyFromCert(key)
+	if (key instanceof crypto.X509Certificate) {
+		const memo = instanceKeys.get(key)
+		if (memo) return memo
+		const cacheKey = spkiCacheKey(key.raw)
+		const hit = spkiCacheGet(cacheKey)
+		if (hit) {
+			instanceKeys.set(key, hit)
+			return hit
+		}
+		const resolved = keyFromCert(key)
+		spkiCacheSet(cacheKey, resolved)
+		instanceKeys.set(key, resolved)
+		return resolved
+	}
 	let cert: X509Certificate | null
 	if (Buffer.isBuffer(key) || key instanceof Uint8Array) {
-		try { cert = new crypto.X509Certificate(Buffer.from(key)) } catch { cert = null }
-		if (cert === null) { const pem = derToSpkiPem(key); return { pem, keyType: keyTypeFromPem(pem) } }
-		return keyFromCert(cert)
+		const der = key instanceof Buffer ? key : Buffer.from(key)
+		const cacheKey = spkiCacheKey(der)
+		const hit = spkiCacheGet(cacheKey)
+		if (hit) return hit
+		try { cert = new crypto.X509Certificate(der) } catch { cert = null }
+		let resolved: ResolvedKey
+		if (cert === null) {
+			const pem = derToSpkiPem(der)
+			resolved = { pem, keyType: keyTypeFromPem(pem) }
+		} else {
+			resolved = keyFromCert(cert)
+		}
+		spkiCacheSet(cacheKey, resolved)
+		return resolved
 	}
 	const asKey = key as KeyObject
 	if (asKey && typeof asKey.export === 'function') {
@@ -134,7 +199,7 @@ function verifyCertSignature(child: Uint8Array | X509Certificate, parent: Uint8A
 	try {
 		const c = child instanceof crypto.X509Certificate ? child : new crypto.X509Certificate(child)
 		const p = parent instanceof crypto.X509Certificate ? parent : new crypto.X509Certificate(parent)
-		return c.verify(p.publicKey) === true
+		return c.verify(publicKeyOf(p)) === true
 	} catch {
 		return false
 	}

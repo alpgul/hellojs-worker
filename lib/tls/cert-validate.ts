@@ -23,16 +23,20 @@ import * as tls from 'node:tls'
 
 
 import { extractScts } from './sct.ts'
-import { verifySignature as nodeVerify, verifyCertSignature } from './sig-verify.ts'
+import { resolveKey, verifySignature as nodeVerify, verifyCertSignature } from './sig-verify.ts'
 
 import type { CertificateTimestamp } from './sct.ts'
 import type { KeyMaterial, SignatureSpec } from './sig-verify.ts'
 import type { X509Certificate } from 'node:crypto'
 
+export interface ChainOk {
+	ok: true
+	root: string
+	scts: CertificateTimestamp[]
+}
+
 // A chain either terminates in a trusted root or explains why it did not.
-export type ChainResult =
-	| { ok: false; reason: string }
-	| { ok: true; root: string; scts: CertificateTimestamp[] }
+export type ChainResult = { ok: false; reason: string } | ChainOk
 
 let _trustedRoots: X509Certificate[] | null = null   // [{cert: X509Certificate, subject, issuer, fingerprint256}]
 function trustedRoots() {
@@ -47,15 +51,105 @@ function trustedRoots() {
 	return _trustedRoots
 }
 
+// X509Certificate.subject and .fingerprint256 are re-derived from DER on every access, and the
+// candidate scan touches every bundled root (~120). Memoise per root object: roots removed from
+// the store fall out with the WeakMap, and setTrustedRoots installs a fresh array.
+interface RootMeta {
+	subject: string
+	ca: boolean
+	fingerprint?: string
+}
+const rootMeta = new WeakMap<X509Certificate, RootMeta>()
+
+function rootMetaOf(root: X509Certificate): RootMeta {
+	let meta = rootMeta.get(root)
+	if (!meta) {
+		meta = { subject: root.subject, ca: root.ca === true }
+		rootMeta.set(root, meta)
+	}
+	return meta
+}
+
+function rootFingerprint(root: X509Certificate): string {
+	const meta = rootMetaOf(root)
+	if (meta.fingerprint === undefined) meta.fingerprint = root.fingerprint256
+	return meta.fingerprint
+}
+
+// A successful validation is a pure function of (chain DER, hostname, trust store, time windows),
+// so consecutive connections to the same host can reuse it. Every time-dependent input is checked
+// again on a hit: the validity windows against `now`, and the terminating root's continued presence
+// in the trust store. Failures are never cached. A hit skips the DER parse and every signature check.
+const CHAIN_CACHE_MAX = 64
+const CHAIN_CACHE_TTL_MS = 10 * 60_000
+interface ChainCacheEntry {
+	result: ChainOk
+	root: X509Certificate
+	notBefore: number[]
+	notAfter: number[]
+	expiresAt: number
+}
+const chainCache = new Map<string, ChainCacheEntry>()
+
+function chainCacheKey(chain: Array<Uint8Array | X509Certificate>, hostname: string): string | null {
+	try {
+		const h = crypto.createHash('sha256')
+		h.update(hostname.toLowerCase())
+		const len = Buffer.alloc(4)
+		for (const c of chain) {
+			const der = c instanceof crypto.X509Certificate ? c.raw : c
+			len.writeUInt32BE(der.length, 0)
+			h.update(len)
+			h.update(der)
+		}
+		return h.digest('hex')
+	} catch {
+		return null
+	}
+}
+
+function chainCacheGet(key: string, now: number): ChainOk | null {
+	const entry = chainCache.get(key)
+	if (!entry) return null
+	const stale =
+		now > entry.expiresAt ||
+		!trustedRoots().includes(entry.root) ||
+		entry.notBefore.some((t, i) => now < t || now > entry.notAfter[i]!)
+	if (stale) {
+		chainCache.delete(key)
+		return null
+	}
+	chainCache.delete(key)
+	chainCache.set(key, entry)
+	return entry.result
+}
+
+function chainCacheStore(key: string, result: ChainOk, root: X509Certificate, chain: X509Certificate[], now: number): void {
+	chainCache.delete(key)
+	chainCache.set(key, {
+		result,
+		root,
+		notBefore: chain.map((c) => Date.parse(c.validFrom)),
+		notAfter: chain.map((c) => Date.parse(c.validTo)),
+		expiresAt: now + CHAIN_CACHE_TTL_MS
+	})
+	while (chainCache.size > CHAIN_CACHE_MAX) {
+		const oldest = chainCache.keys().next().value
+		if (oldest === undefined) break
+		chainCache.delete(oldest)
+	}
+}
+
 // Replace the bundled store. workerd's node:tls ships no roots, so a Worker
 // must install its own Mozilla/NSS PEM bundle before the first handshake.
-function setTrustedRoots(pems?: string[]): void {
+function setTrustedRoots(pems?: readonly string[]): void {
 	_trustedRoots = []
 	for (const pem of pems || []) {
 		try {
 			_trustedRoots.push(new crypto.X509Certificate(pem))
 		} catch { /* skip unparseable */ }
 	}
+	chainCache.clear()
 }
 
 // Match a leaf cert against a hostname per RFC 6125.
@@ -94,10 +188,20 @@ function matchHostname(pattern: string, host: string): boolean {
 function validateChain(
 	chainDerOrCerts: Array<Uint8Array | X509Certificate>,
 	hostname: string,
-	{ now = Date.now() }: { now?: number } = {},
+	opts: { now?: number } = {},
 ): ChainResult {
+	const now = opts.now ?? Date.now()
+	if (chainDerOrCerts.length === 0) return { ok: false, reason: 'empty chain' }
+
+	// An explicit `now` (tests, policy simulations) bypasses the cache because the entry was agreed
+	// at a different point in time.
+	const cacheKey = opts.now === undefined ? chainCacheKey(chainDerOrCerts, hostname) : null
+	if (cacheKey) {
+		const hit = chainCacheGet(cacheKey, now)
+		if (hit) return hit
+	}
+
 	const chain = chainDerOrCerts.map(x => x instanceof crypto.X509Certificate ? x : new crypto.X509Certificate(x))
-	if (chain.length === 0) return { ok: false, reason: 'empty chain' }
 	const leaf = chain[0]
 
 	// Validity window
@@ -121,19 +225,20 @@ function validateChain(
 	// at the top (e.g. Amazon's VeriSign G5) but where an intermediate is signed by a root
 	// still in our trust store.
 	const roots = trustedRoots()
-	let trustedRoot = null
+	let trustedRoot: X509Certificate | null = null
 	for (let i = 0; i < chain.length; i++) {
 		const cert = chain[i]
 		// Try to terminate the path here: find a root that issued this cert. Subject equality is
 		// the cheap filter; only the survivors get a signature check.
-		const candidates = roots.filter(r => r.subject === cert.issuer && r.ca === true)
-		for (const root of candidates) {
-			if (verifyCertSignature(cert, root)) { trustedRoot = root; break }
+		for (const root of roots) {
+			const meta = rootMetaOf(root)
+			if (meta.ca && meta.subject === cert.issuer && verifyCertSignature(cert, root)) { trustedRoot = root; break }
 		}
 		if (trustedRoot) break
 		// Also check: if this cert IS a trusted root itself (self-signed + in trust store).
 		if (cert.issuer === cert.subject) {
-			const match = roots.find(r => r.fingerprint256 === cert.fingerprint256)
+			const fingerprint = cert.fingerprint256
+			const match = roots.find(r => rootFingerprint(r) === fingerprint)
 			if (match) { trustedRoot = match; break }
 		}
 		// Otherwise verify the next cert in chain signed this one (walking up).
@@ -165,7 +270,13 @@ function validateChain(
 		scts = extractScts(Buffer.from(leaf.raw))
 	} catch { /* parse failure is non-fatal */ }
 
-	return { ok: true, root: trustedRoot.subject, scts }
+	// The TLS 1.3 CertificateVerify for this same handshake asks for this leaf as raw DER; warm the
+	// key cache from the certificate already parsed here so it is not parsed a second time.
+	try { resolveKey(leaf) } catch { /* best effort */ }
+
+	const result: ChainOk = { ok: true, root: trustedRoot.subject, scts }
+	if (cacheKey) chainCacheStore(cacheKey, result, trustedRoot, chain, now)
+	return result
 }
 
 // --- TLS 1.3 server CertificateVerify (RFC 8446 §4.4.3) ----------------------------------------

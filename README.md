@@ -708,6 +708,70 @@ shared endpoint).
 Reproduce: `npm run bench:remote` (default target `www.cloudflare.com/cdn-cgi/trace`,
 override with `REMOTE_TARGET=host/path`).
 
+### Fresh connections vs curl
+
+The current tree opens a new TCP+TLS (or QUIC) connection for every request, so the
+per-request comparison that matches this design is against `curl` invoked once per
+sample. `npm run bench:curl` interleaves hellojs and curl, flips the order every round,
+verifies the negotiated protocol from the Cloudflare trace body (`http=...`) and curl's
+`http_version`, and reports end-to-end latency (curl's own `-w '%{json}'` timers, so
+process spawn is excluded). The local curl 8.5.0 has no HTTP/3, so its h3 row is N/A.
+
+Target `https://www.cloudflare.com/cdn-cgi/trace`, one fresh connection per request:
+
+| Build | hellojs h2 p50 / mean | curl h2 p50 / mean | Δ p50 / Δ mean |
+|---|---:|---:|---:|
+| Before Nagle fix | 212–215 ms / — | 145–152 ms / — | +39–48% / — |
+| After `setNoDelay` | 153.0 / 158.8 ms | 144.1 / 145.8 ms | +6.2% / +8.9% |
+| After certificate cache (25 samples) | 151.8 / 154.4 ms | 150.7 / 152.1 ms | **+0.7% / +1.5%** |
+
+hellojs h3 in the same runs: p50 150–160 ms; a curl h3 column requires an
+HTTP/3-capable curl via `CURL_BIN`.
+
+**Fix 1 — Nagle.** The TLS Finished record and the first HTTP/2 frames leave as
+separate small writes. With Nagle enabled, the second write waits for the peer's
+delayed ACK (~40 ms on Linux) before the request is even on the wire.
+`setNoDelay(true)` is now applied in `_wireSocketListeners` (`lib/tls/tls.ts`), which
+covers the TCP, CONNECT and SOCKS5 paths. This was the dominant fix: +39–48% → +6.2%.
+
+**Fix 2 — certificate validation cache.** The remaining gap was the certificate
+verification path, not Node: with `verifyTLS: false`, hellojs matched curl
+(p50 146.0 vs 149.6 ms in an interleaved 20-round probe). Now:
+
+- Successful chain validations are cached under `host + SHA-256(leaf..top DER)`
+  (64-entry LRU, 10 min TTL). Every hit re-checks the validity windows against
+  `now` and the terminating root's presence in the trust store; failures are never
+  cached, `setTrustedRoots()` clears the cache, and an explicit `now` bypasses it.
+- SPKI public keys are memoised by certificate DER (256-entry LRU) and by
+  `X509Certificate` instance. `validateChain` warms the leaf entry, so the TLS 1.3
+  CertificateVerify does not parse the leaf a second time.
+- RFC 8879 compressed Certificate bodies are decompressed once per distinct body
+  (32 entries / 1 MiB).
+
+Measured: a cache hit costs 0.015 ms instead of a ~1.2 ms warm validation, and
+resolving the leaf key costs 0.003 ms instead of 0.408 ms. The one-time cost is the
+lazy parse of the bundled root store (~22 ms) on the first validated chain of a
+process, not per request.
+
+**What remains.** The TLS 1.3 CertificateVerify is a proof of possession and must be
+verified on every handshake (~1–2 ms), and run-to-run network drift moves both
+columns by several ms. The p50 gap is now inside that noise band.
+
+**Measured next step — DNS.** `dns.lookup('www.cloudflare.com')` costs 33–38 ms on
+this host (record TTL 53 s) and Node does not cache `getaddrinfo`; every fresh
+connection pays it. The QUIC path re-resolves on each `dgram.send` as well. A
+TTL-bounded cache plus a pinned peer address is the next optimization.
+
+**Not applicable here.** Connection pooling would remove DNS + TCP + TLS altogether
+(~152 ms → ~35–40 ms), but it contradicts the fresh-connection-per-request design.
+TLS 1.3 PSK resumption is the remaining option: plain resumption keeps the 1-RTT
+handshake but removes the certificate flight and its verification, while 0-RTT saves
+a full RTT at the cost of replay risk.
+
+Reproduce: `npm run bench:curl`. Knobs: `BENCH_URL`, `SAMPLES`, `CURL_BIN`.
+Caveats: these are connect/handshake-heavy fresh-connection numbers, not steady-state
+throughput; CDN anycast and PoP changes move both clients by several ms.
+
 ### Soak
 
 The soak is a `node`-project test (`test/soak/soak.test.ts`), so it runs on every

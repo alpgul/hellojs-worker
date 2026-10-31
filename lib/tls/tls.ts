@@ -63,6 +63,48 @@ const HASH_FNS: Record<string, (...bufs: Buffer[]) => Buffer> = {
 // `catch (e)` gives unknown; the handshake logs the reason, so it needs a string either way.
 export const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
+// RFC 8879 compressed Certificate messages are byte-identical across connections to the same host,
+// and decompression is one of the per-handshake costs that chain caching does not remove. Key on the
+// algorithm plus the compressed bytes; bounded by entry count AND total bytes so a hostile peer
+// cannot pin memory.
+const CERT_DECOMPRESS_CACHE_MAX_ENTRIES = 32
+const CERT_DECOMPRESS_CACHE_MAX_BYTES = 1 << 20
+const certDecompressCache = new Map<string, Buffer>()
+let certDecompressBytes = 0
+
+function certDecompressCached(algo: number, comp: Buffer, uncompLen: number): Buffer {
+	const key = `${algo}:${crypto.createHash('sha256').update(comp).digest('hex')}`
+	const hit = certDecompressCache.get(key)
+	if (hit !== undefined) {
+		if (hit.length !== uncompLen) throw new Error('decompressed length mismatch')
+		certDecompressCache.delete(key)
+		certDecompressCache.set(key, hit)
+		return hit
+	}
+	let plain: Buffer
+	if (algo === 1)
+		plain = zlib.inflateSync(comp) // zlib
+	else if (algo === 2)
+		plain = zlib.brotliDecompressSync(comp) // brotli (Chrome's choice)
+	else if (algo === 3)
+		plain = zlib.zstdDecompressSync(comp) // zstd
+	else throw new Error(`unsupported certificate_compression_algorithm ${algo}`)
+	if (plain.length !== uncompLen) throw new Error('decompressed length mismatch')
+	certDecompressCache.set(key, plain)
+	certDecompressBytes += plain.length
+	while (
+		certDecompressBytes > CERT_DECOMPRESS_CACHE_MAX_BYTES ||
+		certDecompressCache.size > CERT_DECOMPRESS_CACHE_MAX_ENTRIES
+	) {
+		const oldest = certDecompressCache.keys().next().value
+		if (oldest === undefined) break
+		const evicted = certDecompressCache.get(oldest)!
+		certDecompressCache.delete(oldest)
+		certDecompressBytes -= evicted.length
+	}
+	return plain
+}
+
 interface ServerKeyShare {
 	group: number
 	key: Buffer
@@ -457,6 +499,10 @@ class TLS extends EventEmitter {
 	// logged), so a TCP RST mid-handshake left createTLS waiting on a tls 'error' event
 	// that never fired. h2Transport cleanup runs when it exists (post-handshake).
 	_wireSocketListeners = () => {
+		// The Finished record and the first HTTP/2 frames leave as separate small writes. With
+		// Nagle on, the second write waits for the peer's delayed ACK (~40ms on Linux before the
+		// request is even on the wire). Browsers, curl and Node's http2 client all disable it.
+		this.socket!.setNoDelay(true)
 		this.socket!.on('data', (data) => this.onData(data))
 		this.socket!.on('error', (err) => {
 			if (this.h2Transport) {
@@ -686,15 +732,7 @@ class TLS extends EventEmitter {
 			if (8 + compLen > body.length) throw new Error('compressed length exceeds message')
 			if (uncompLen > MAX_CERT_MESSAGE) throw new Error(`declared cert message too large (${uncompLen})`)
 			const comp = body.subarray(8, 8 + compLen)
-			let plain
-			if (algo === 1)
-				plain = zlib.inflateSync(comp) // zlib
-			else if (algo === 2)
-				plain = zlib.brotliDecompressSync(comp) // brotli (Chrome's choice)
-			else if (algo === 3)
-				plain = zlib.zstdDecompressSync(comp) // zstd
-			else throw new Error(`unsupported certificate_compression_algorithm ${algo}`)
-			if (plain.length !== uncompLen) throw new Error('decompressed length mismatch')
+			const plain = certDecompressCached(algo, comp, uncompLen)
 			const certs = parseCertificateList(plain)
 			this.serverCertChain = certs
 			const r = validateChain(certs, this.host)
