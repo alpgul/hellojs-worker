@@ -134,3 +134,44 @@ it('chrome147-mac still emits GREASE everywhere expected', () => {
 	expect(sv.readUInt16BE(3)).toBe(0x0304)
 	expect(sv.readUInt16BE(5)).toBe(0x0303)
 })
+
+// Mirrors the runtime profile the Next.js request route registers: keep the selected browser
+// profile but advertise TLS 1.2 only and drop the ML-KEM group. chrome147-mac has no
+// extensionOrder, so the id-51 filter is a no-op and the legacy extension fallback is used.
+function registerTls12RuntimeProfile(sourceName: string, runtimeName: string) {
+	const source = profiles.get(sourceName)
+	profiles.register(runtimeName, {
+		...source,
+		tls: {
+			...source.tls,
+			supportedVersions: [0x0303],
+			supportedGroups: Array.isArray(source.tls.supportedGroups)
+				? source.tls.supportedGroups.filter((g) => g !== 4588)
+				: source.tls.supportedGroups,
+			keyShareGroups: Array.isArray(source.tls.keyShareGroups)
+				? source.tls.keyShareGroups.filter((g) => g !== 4588)
+				: source.tls.keyShareGroups,
+			extensionOrder: Array.isArray(source.tls.extensionOrder)
+				? source.tls.extensionOrder.filter((e) => e?.id !== 51)
+				: source.tls.extensionOrder,
+		},
+	})
+}
+
+it('route.ts TLS-1.2 runtime profili: register sonrası ClientHello key_share üretmeden kurulur', () => {
+	registerTls12RuntimeProfile('chrome147-mac', 'runtime-tls12-chrome147-mac')
+	const runtime = profiles.get('runtime-tls12-chrome147-mac')
+	expect(runtime.tls.supportedVersions).toStrictEqual([0x0303])
+	expect(runtime.tls.extensionOrder).toBeUndefined() // chrome147-mac uses the legacy fallback
+
+	const { tls, getCh } = makeTls('runtime-tls12-chrome147-mac')
+	expect(() => tls.startClientHello()).not.toThrow()
+
+	const { extensionIds, extensionMap } = parseClientHello(getCh())
+	expect(extensionIds).not.toContain(51)
+	const sv = extensionMap[43]
+	const versions: number[] = []
+	for (let i = 1; i < 1 + sv[0]; i += 2) versions.push(sv.readUInt16BE(i))
+	expect(versions).toContain(0x0303)
+	expect(versions).not.toContain(0x0304)
+})

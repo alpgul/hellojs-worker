@@ -1426,8 +1426,9 @@ class TLS extends EventEmitter {
 			keyShareExtension = hrrCtx.keyShareExt
 		} else if (this._profileNeedsMlkem()) {
 			// TLS-1.2-only profiles skip key_share construction entirely (saves an X25519 keygen
-			// plus the MLKEM concat). EXT_BUILDERS[51] will never be invoked because id 51 won't
-			// be in middleIds for those profiles.
+			// plus the MLKEM concat). id 51 is filtered out of middleIds below so EXT_BUILDERS[51]
+			// is never invoked; this also covers profiles without extensionOrder that fall back
+			// to LEGACY_CHROME_IDS.
 			const keyShare = CreateKeyShareX25519(grease.c, this.mlkemPk, { useGrease })
 			this.clientPrivateKey = keyShare.privateKey
 			this.clientPubRaw32 = keyShare.publicRaw32
@@ -1439,8 +1440,9 @@ class TLS extends EventEmitter {
 
 		// Builders keyed by IANA extension ID. Each is a thunk so we only materialize the
 		// extensions a profile actually lists. Profiles that don't set extensionOrder fall
-		// back to the legacy "every Chrome 147 extension" set defined below.
-		const EXT_BUILDERS: Record<number, () => Buffer> = {
+		// back to the legacy "every Chrome 147 extension" set defined below. key_share is the
+		// only builder that can legitimately return null (when no key_share was constructed).
+		const EXT_BUILDERS: Record<number, () => Buffer | null> = {
 			0: () => CreateSNIExtension(this.host), // server_name
 			5: () => CreateStatusRequestExtension(ptls.statusRequest), // status_request
 			10: () => CreateSupportedGroupsExtension(grease.c, ptls.supportedGroups, { useGrease }), // supported_groups
@@ -1464,7 +1466,7 @@ class TLS extends EventEmitter {
 							? { sigalgs: ptls.signatureAlgorithmsCert }
 							: { sigalgs: ptls.signatureAlgorithms || [] }
 				),
-			51: () => keyShareExtension!, // key_share
+			51: () => keyShareExtension, // key_share (null when TLS 1.2-only)
 			17613: () => CreateApplicationSettingsExtension(ptls.alpsProtocols, ptls.alpsExtensionType || 0x44cd), // ALPS v1
 			17517: () => CreateApplicationSettingsExtension(ptls.alpsProtocols, ptls.alpsExtensionType || 0x446d), // ALPS v2
 			65037: () => CreateEncryptedClientHelloExtension(), // ECH GREASE
@@ -1523,8 +1525,22 @@ class TLS extends EventEmitter {
 			middleIds = LEGACY_CHROME_IDS.slice()
 		}
 
+		// TLS-1.2-only profiles build no key_share. The legacy fallback above still lists id 51,
+		// and EXT_BUILDERS[51] would return null at runtime (the ! is TypeScript-only), which
+		// makes Buffer.concat throw. Drop it here so only buildable extensions reach the wire.
+		if (keyShareExtension == null) middleIds = middleIds.filter((id) => id !== 51)
+
 		const namedExts: Record<string, Buffer> = {}
-		for (const id of middleIds) namedExts[String(id)] = EXT_BUILDERS[id]()
+		for (const id of middleIds) {
+			const ext = EXT_BUILDERS[id]()
+			if (!Buffer.isBuffer(ext)) {
+				// Never let a non-Buffer reach Buffer.concat below; a builder that cannot
+				// produce a body must not take down the whole process.
+				log.notify(`[ext] WARN extension ${id} builder returned no body; skipping`)
+				continue
+			}
+			namedExts[String(id)] = ext
+		}
 
 		// Add cookie ext on CH2 if HRR provided one (RFC 8446 §4.2.2 — verbatim echo).
 		if (hrrCtx && hrrCtx.cookieExt) {
