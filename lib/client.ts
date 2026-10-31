@@ -234,9 +234,9 @@ async function performRequest(opts: RequestOptions): Promise<unknown> {
 	}
 
 	// Transport: HTTP/3 is opt-in per request (`h3: true`). Every other request uses
-	// TCP + TLS, regardless of any `alt-svc` response headers. An h3 request races the
-	// QUIC and TCP handshakes and keeps whichever completes first, so an origin without
-	// a QUIC endpoint falls back without sitting in QUIC Initial retransmits.
+	// TCP + TLS, regardless of any `alt-svc` response headers. An h3 request tries QUIC
+	// first and falls back to TCP when the handshake cannot complete, so an origin without
+	// a QUIC endpoint answers over TCP instead of sitting in QUIC Initial retransmits.
 	const conn: Connection = opts.h3 === true
 		? await connectPreferred({
 			host, port, profile, proxy: opts.proxy,

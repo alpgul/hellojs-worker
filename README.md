@@ -147,7 +147,7 @@ await request({
 | `resolveWithFullResponse` | bool | `false` | resolve to `{status, headers, body}` instead of just body |
 | `retry` | object | none | `{ limit, methods, statusCodes, baseDelayMs }` |
 | `profile` | string | `'chrome147-mac'` | which fingerprint profile to emit |
-| `h3` | bool | `false` | opt in to HTTP/3 for this request; QUIC and TCP+TLS handshakes race and the first to complete is used |
+| `h3` | bool | `false` | opt in to HTTP/3 for this request; QUIC is tried first and TCP+TLS is used when the QUIC handshake cannot complete |
 | `verifyTLS` | bool | `true` | Validate the server certificate chain (RFC 5280) + hostname (RFC 6125 SubjectAltName). On by default. Set `false` to skip validation (self-signed dev servers, intentional MITM proxies). Applies to both TLS 1.3 and TLS 1.2 paths. See [Certificate validation](#certificate-validation). |
 
 ### Headers and profiles
@@ -410,9 +410,10 @@ Pure-JS QUIC + HTTP/3 client at `lib/h3/`, integrated into `request()`.
 HTTP/3 is **off by default** — a request uses h3 only when `h3: true` is passed:
 
 ```js
-// Explicit h3 — opt in per request. QUIC and TCP+TLS handshakes race and the
-// first to complete carries the request, so an origin without a QUIC endpoint
-// answers over TCP instead of waiting out the QUIC Initial retransmits.
+// Explicit h3 — opt in per request. QUIC is tried first; when the handshake
+// cannot complete (an origin with no QUIC endpoint), the request falls back
+// to TCP + TLS after a bounded budget instead of waiting out the QUIC Initial
+// retransmits.
 await request({ url: 'https://www.cloudflare.com/', h3: true })
 
 // Without the flag every request stays on TCP + TLS, even if the server
@@ -420,8 +421,8 @@ await request({ url: 'https://www.cloudflare.com/', h3: true })
 await request({ url: 'https://www.cloudflare.com/api/foo' })   // h2
 ```
 
-The losing handshake is aborted as soon as the winner is ready; h3-capable
-origins still win on QUIC, while everything else falls back in roughly one RTT.
+h3-capable origins stay on QUIC; everything else falls back in roughly the
+default 2s QUIC handshake budget. Pass `timeouts: { connect }` to override it.
 
 Or use the lower-level QUIC + H3 layer directly:
 

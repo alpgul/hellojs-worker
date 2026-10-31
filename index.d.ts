@@ -57,7 +57,7 @@ export interface RequestOptions {
 
 	/** TLS-only: turn on cert chain validation (default `true`). */
 	verifyTLS?: boolean
-	/** Opt in to HTTP/3 (QUIC) for this request. Off unless explicitly `true`; QUIC and TCP handshakes race. */
+	/** Opt in to HTTP/3 (QUIC) for this request. Off unless explicitly `true`; QUIC is tried first with a bounded TCP fallback. */
 	h3?: boolean
 	/** When true, resolve as soon as headers arrive and expose the body as a Node Readable. */
 	stream?: boolean
