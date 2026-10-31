@@ -1,5 +1,6 @@
 node_modules/
 .wrangler/
+.sonarlint/*
 package-lock.json.bak
 
 # Captures, scratch, generated keys
