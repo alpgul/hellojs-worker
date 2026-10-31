@@ -39,6 +39,7 @@ const res = await request({
 - [Fingerprint](#fingerprint)
 - [HTTP/3](#http3)
 - [Certificate validation](#certificate-validation)
+- [TLS 1.3 session resumption](#tls-13-session-resumption)
 - [TypeScript](#typescript)
 - [Performance](#performance)
 - [Testing](#testing)
@@ -148,6 +149,7 @@ await request({
 | `retry` | object | none | `{ limit, methods, statusCodes, baseDelayMs }` |
 | `profile` | string | `'chrome147-mac'` | which fingerprint profile to emit |
 | `h3` | bool | `false` | opt in to HTTP/3 for this request; QUIC is tried first and TCP+TLS is used when the QUIC handshake cannot complete |
+| `resume` | bool | `false` | offer a cached TLS 1.3 `NewSessionTicket` (`pre_shared_key`) on the next connection to the same host. Opt-in because the extra extension changes JA3/JA4 — see [TLS 1.3 session resumption](#tls-13-session-resumption). h3 is not resumed. |
 | `verifyTLS` | bool | `true` | Validate the server certificate chain (RFC 5280) + hostname (RFC 6125 SubjectAltName). On by default. Set `false` to skip validation (self-signed dev servers, intentional MITM proxies). Applies to both TLS 1.3 and TLS 1.2 paths. See [Certificate validation](#certificate-validation). |
 
 ### Headers and profiles
@@ -605,6 +607,35 @@ certificate validation failed: OCSP responder reported the leaf as revoked
 
 ---
 
+## TLS 1.3 session resumption
+
+`resume: true` opts a request into TLS 1.3 PSK resumption (RFC 8446 §4.6.1). The
+handshake stores each `NewSessionTicket` the server sends; later handshakes to the
+same `host:port` offer the most recent ticket in `pre_shared_key` as the last
+ClientHello extension and reuse it when `ServerHello` selects it. The resumption
+master secret and per-ticket PSK are derived per RFC 8446 §7.1, and the ClientHello
+binder (§4.2.11.2) is verified byte-for-byte against the RFC 8448 §4 vector in the
+test suite.
+
+- Only tickets from handshakes whose chain was verified are offered to requests that
+  require verification (`verifyTLS: true`), so a `verifyTLS: false` session cannot
+  seed a trusted connection.
+- The store is keyed by host, port and ALPN, capped at 64 entries (LRU) with a 7-day
+  ceiling. `clearSessionTickets()` empties it.
+- Off by default: a resumed ClientHello carries `pre_shared_key` (0x0029), so resumed
+  and fresh connections have different JA3/JA4. Use it when speed matters more than
+  a stable fingerprint.
+- Only plain 1-RTT resumption is implemented. 0-RTT (`early_data`) would save a round
+  trip but replays requests, so it is deliberately not offered. h3/QUIC is not
+  resumed yet.
+
+```js
+await request({ url, resume: true })   // offers a cached ticket, if one exists
+clearSessionTickets()                  // forget every stored ticket
+```
+
+---
+
 ## TypeScript
 
 Type declarations ship with the package (`index.d.ts`) and are validated under
@@ -768,16 +799,29 @@ Measured: one resolver call across 3 sequential requests, both h2 and h3; with c
 unchanged at 145–149 ms, hellojs h2 went 151.8 → 117.6–121.8 ms p50 and now leads
 curl by ~18%.
 
-**What remains.** TCP connect + TCP/TLS handshake. The TLS 1.3 CertificateVerify must
-be verified on every handshake (~1–2 ms), and run-to-run network drift moves both
-columns by several ms. TLS 1.3 PSK resumption is the remaining lever: plain
-resumption keeps the 1-RTT handshake but removes the certificate flight and its
-verification, while 0-RTT saves a full RTT at the cost of replay risk.
+**Fix 4 — TLS 1.3 PSK resumption (opt-in).** `resume: true` stores the server's
+`NewSessionTicket` and offers it as `pre_shared_key` on the next connection to the same
+host, so the server can skip the certificate flight and CertificateVerify. Measured with
+an interleaved connect-only A/B (30 rounds each, ticket seeded, 30/30 PSK accepted):
+full handshake p50 82.2–82.6 ms vs resumed 80.0–83.4 ms, mean −1.9% / −2.5%. A 60-sample
+end-to-end A/B left the median flat (120.2 vs 120.7 ms) and moved the mean by −7.5% to
+−11.5% depending on how much tail noise the run collected. The reason the gain is small
+here is structural: full and resumed TLS 1.3 handshakes are both 1-RTT, so resumption
+removes only the ~4–6 KB certificate flight and its signature check — a few ms on this
+path, and less than DNS caching saved. It scales with chain size and path loss, and 0-RTT
+would remove a real round trip but replays requests, so it is not offered.
+
+**What remains.** TCP connect + one TLS round trip. CertificateVerify is still checked on
+every full handshake (~1–2 ms), and run-to-run network drift moves both columns by
+several ms. PSK resumption is now available as the opt-in lever for repeated connections
+to the same host; 0-RTT is the only remaining handshake shortcut, and it trades replay
+safety for the round trip.
 
 **Not applicable here.** Connection pooling would remove DNS + TCP + TLS altogether
 (~120 ms → ~35–40 ms), but it contradicts the fresh-connection-per-request design.
 
-Reproduce: `npm run bench:curl`. Knobs: `BENCH_URL`, `SAMPLES`, `CURL_BIN`.
+Reproduce: `npm run bench:curl`. Knobs: `BENCH_URL`, `SAMPLES`, `CURL_BIN`,
+`BENCH_RESUME=1` (turns the hellojs h2 row into the resuming row).
 Caveats: these are connect/handshake-heavy fresh-connection numbers, not steady-state
 throughput; CDN anycast and PoP changes move both clients by several ms.
 
@@ -963,6 +1007,7 @@ request.head(...)
 request.options(...)
 request.defaults(defaultOpts)    // bound instance
 request.jar()                    // new RFC 6265 cookie jar
+request.clearSessionTickets()    // forget cached TLS 1.3 session tickets
 request.HellojsError             // error class
 request.observability            // EventEmitter — see Observability hooks
 
@@ -1006,6 +1051,7 @@ lib/
 │   ├── tls12_records.ts       TLS 1.2 record codec (AEAD GCM/ChaCha20 + CBC)
 │   ├── tls12_prf.ts           TLS 1.2 PRF (P_SHA256/SHA384) + key schedule
 │   ├── cert-validate.ts       Chain validation (path + SAN + dates + intermediate trust)
+│   ├── session-tickets.ts     TLS 1.3 NewSessionTicket store + PSK binder (RFC 8446)
 │   ├── fingerprint.ts         JA3 + JA4 + PeetPrint derivation from a ClientHello
 │   ├── sig-verify.ts          streaming signature verifier (workerd crypto gaps)
 │   ├── ocsp.ts                OCSP response parser + signature verifier (RFC 6960)

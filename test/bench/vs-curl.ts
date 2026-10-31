@@ -12,9 +12,13 @@
 //
 // Caveats: this is connect/handshake-dominated, hellojs runs its own JS TLS/QUIC stack (JIT
 // warm-up on the first sample) while curl is compiled C, and a single run is directional.
+// With BENCH_RESUME=1 the hellojs h2 row opts into TLS 1.3 PSK resumption: the first sample
+// stores the server's ticket and later samples resume (curl spawns a new process per sample
+// and therefore has no comparable ticket cache).
 //
 //   npm run bench:curl
 //   SAMPLES=20 npm run bench:curl
+//   BENCH_RESUME=1 npm run bench:curl
 //   CURL_BIN=/opt/curl/bin/curl npm run bench:curl
 
 import { spawn } from 'node:child_process'
@@ -24,6 +28,7 @@ import request from '../../index.ts'
 const TARGET = process.env.BENCH_URL ?? 'https://www.cloudflare.com/cdn-cgi/trace'
 const SAMPLES = positiveInt(process.env.SAMPLES, 15)
 const CURL_BIN = process.env.CURL_BIN ?? 'curl'
+const RESUME = process.env.BENCH_RESUME === '1'
 const MAX_CONSECUTIVE_FAILURES = 3
 const CURL_TIMEOUT_MS = 45_000
 
@@ -77,6 +82,7 @@ interface Combo {
 	label: string
 	kind: 'hellojs' | 'curl'
 	h3: boolean
+	resume: boolean
 	enabled: boolean
 	note?: string
 	samples: Sample[]
@@ -192,11 +198,12 @@ async function runCurl(info: CurlInfo, url: string, h3: boolean): Promise<CurlSa
 	}
 }
 
-async function runHello(url: string, h3: boolean): Promise<Sample> {
+async function runHello(url: string, h3: boolean, resume: boolean): Promise<Sample> {
 	const t0 = process.hrtime.bigint()
 	const res = (await request({
 		url,
 		h3,
+		resume,
 		resolveWithFullResponse: true,
 		simple: false,
 		timeouts: h3 ? { connect: 3000, response: 15_000 } : { response: 15_000 }
@@ -216,9 +223,10 @@ function makeCombos(curl: CurlInfo): Combo[] {
 	const combos: Combo[] = [
 		{
 			id: 'hellojs-h2',
-			label: 'hellojs h2',
+			label: RESUME ? 'hellojs h2+psk' : 'hellojs h2',
 			kind: 'hellojs',
 			h3: false,
+			resume: RESUME,
 			enabled: true,
 			samples: [],
 			curlSamples: [],
@@ -229,6 +237,7 @@ function makeCombos(curl: CurlInfo): Combo[] {
 			label: 'curl h2',
 			kind: 'curl',
 			h3: false,
+			resume: false,
 			enabled: true,
 			samples: [],
 			curlSamples: [],
@@ -239,6 +248,7 @@ function makeCombos(curl: CurlInfo): Combo[] {
 			label: 'hellojs h3',
 			kind: 'hellojs',
 			h3: true,
+			resume: false,
 			enabled: true,
 			samples: [],
 			curlSamples: [],
@@ -250,6 +260,7 @@ function makeCombos(curl: CurlInfo): Combo[] {
 		label: 'curl h3',
 		kind: 'curl',
 		h3: true,
+		resume: false,
 		enabled: curl.hasH3,
 		note: curl.hasH3 ? undefined : 'curl build lacks HTTP3 (set CURL_BIN to an h3-capable curl)',
 		samples: [],
@@ -273,7 +284,8 @@ async function runSamples(combos: Combo[], curl: CurlInfo): Promise<void> {
 		for (const c of order) {
 			if (!c.enabled) continue
 			try {
-				const sample = c.kind === 'hellojs' ? await runHello(TARGET, c.h3) : await runCurl(curl, TARGET, c.h3)
+				const sample =
+					c.kind === 'hellojs' ? await runHello(TARGET, c.h3, c.resume) : await runCurl(curl, TARGET, c.h3)
 				const problem = protocolProblem(c, sample.protocol)
 				if (problem) {
 					c.enabled = false
@@ -349,6 +361,7 @@ async function main(): Promise<void> {
 	console.log(`Target: ${TARGET}`)
 	console.log(`Samples: ${SAMPLES} per row (one fresh connection per request)`)
 	console.log(`curl: ${curl.version} — HTTP3 ${curl.hasH3 ? 'yes' : 'no'}`)
+	console.log(`hellojs TLS 1.3 resumption: ${RESUME ? 'on (hellojs h2 row, first sample is cold)' : 'off'}`)
 	console.log()
 	await runSamples(combos, curl)
 	console.log()

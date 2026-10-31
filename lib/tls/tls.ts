@@ -41,6 +41,7 @@ import * as HKDF from '../utils/hkdf.ts'
 import { parseCertificateList, validateChain, verifyCertVerify } from './cert-validate.ts'
 import { parseClientHello, ja3, ja4 } from './fingerprint.ts'
 import { generateMlKemKeyPair, deriveHybridSharedSecret, type WebCryptoKey } from './mlkem.ts'
+import { getSessionTicket, storeSessionTicket, pskBinder, type SessionTicket } from './session-tickets.ts'
 import { TLS12Handshake } from './tls12.ts'
 import { deriveX25519SharedSecret } from './x25519.ts'
 
@@ -137,6 +138,10 @@ interface TLSOptions {
 	_forceHRRGroup?: number | null
 	verifyTLS?: boolean
 	profile?: string | Profile
+	// TLS 1.3 PSK resumption: offer a cached NewSessionTicket's pre_shared_key on the next
+	// connection to the same host. Off by default — a resumed ClientHello carries an extra
+	// extension (0x0029) and therefore a different JA3/JA4 than a fresh one.
+	resume?: boolean
 }
 
 // A duplex that presents *plaintext HTTP/2 bytes* to Node's http2 session.
@@ -265,6 +270,15 @@ class TLS extends EventEmitter {
 	declare _nonceBuf?: Buffer
 	declare _prematureCloseSurfaced?: boolean
 
+	// TLS 1.3 PSK resumption state. `pskTicket` is the ticket we put in the current
+	// ClientHello (null on a full handshake), `pskAccepted` is set from ServerHello, and the
+	// two master secrets are captured after the handshake to derive tickets from.
+	declare resume: boolean
+	declare pskTicket: SessionTicket | null
+	declare pskAccepted: boolean
+	declare masterSecret: Buffer | null
+	declare resumptionMasterSecret: Buffer | null
+
 	constructor(host: string, port: number, proxy: string | null, opts: TLSOptions = {}) {
 		super()
 
@@ -309,6 +323,12 @@ class TLS extends EventEmitter {
 		this.cipher = null
 
 		this.transcript = []
+
+		this.resume = opts.resume === true
+		this.pskTicket = null
+		this.pskAccepted = false
+		this.masterSecret = null
+		this.resumptionMasterSecret = null
 
 		this.serverSeq = 0
 		this.clientSeq = 0
@@ -701,6 +721,11 @@ class TLS extends EventEmitter {
 					this._sendClientFinished()
 					break
 				}
+				case 0x04: {
+					// NewSessionTicket is post-handshake: decrypt-only, never transcripted.
+					this._handleNewSessionTicket(body)
+					break
+				}
 				default: {
 					break
 				}
@@ -857,6 +882,20 @@ class TLS extends EventEmitter {
 			verifyData
 		])
 
+		// Resumption master secret (RFC 8446 §7.1) covers the transcript through our Finished.
+		// Tickets that arrive later derive their PSK from it via the ticket nonce.
+		if (this.resume && this.masterSecret) {
+			const th = HASH_FNS[this.cipher!.hash](...this.transcript, finishedMessage)
+			this.resumptionMasterSecret = HKDF.ExpandLabel(
+				this.masterSecret,
+				'res master',
+				th,
+				this.cipher!.hashLen,
+				this.cipher!.hash,
+				this.cipher!.hashLen
+			)
+		}
+
 		// 4. Encrypt the message using the CLIENT HANDSHAKE keys.
 		// Note: The client's first encrypted message has sequence number 0.
 		const encryptedFinished = this.encrypt(
@@ -887,6 +926,50 @@ class TLS extends EventEmitter {
 		} else {
 			// http/1.1
 			this.emit('ready-http1')
+		}
+	}
+
+	// NewSessionTicket (RFC 8446 §4.6.1): derive the resumption PSK from the nonce and cache
+	// the ticket for the next connection to this host. Malformed tickets are ignored — they
+	// only cost a future full handshake.
+	_handleNewSessionTicket(body: Buffer): void {
+		if (!this.resume || !this.resumptionMasterSecret || !this.cipher || !this.server) return
+		try {
+			let p = 0
+			const lifetime = body.readUInt32BE(p)
+			p += 4
+			const ageAdd = body.readUInt32BE(p)
+			p += 4
+			const nonceLen = body[p++]
+			if (body.length < p + nonceLen + 2) throw new Error('truncated nonce')
+			const nonce = body.subarray(p, p + nonceLen)
+			p += nonceLen
+			const ticketLen = body.readUInt16BE(p)
+			p += 2
+			if (ticketLen === 0 || body.length < p + ticketLen) throw new Error('truncated ticket')
+			// lifetime=0 means "discard immediately" (RFC 8446 §4.6.1).
+			if (lifetime === 0) return
+			const ticket = Buffer.from(body.subarray(p, p + ticketLen))
+			const { hash, hashLen } = this.cipher
+			const psk = HKDF.ExpandLabel(this.resumptionMasterSecret, 'resumption', nonce, hashLen, hash, hashLen)
+			// A resumed connection must not launder an unverified origin into later requests
+			// that ask for verification: carry the ancestry forward.
+			const verified = this.pskAccepted ? this.pskTicket?.verified === true : this.verifyTLS
+			storeSessionTicket(this.host, this.port, {
+				ticket,
+				psk,
+				cipherSuite: this.server.cipherSuite,
+				hash,
+				hashLen,
+				lifetime,
+				ageAdd,
+				receivedAt: Date.now(),
+				alpn: this.alpn || '',
+				verified
+			})
+			log.debug(`[resume] stored session ticket for ${this.host}:${this.port} (${ticketLen}B, ${lifetime}s)`)
+		} catch (e) {
+			log.notify(`[resume] ignoring malformed NewSessionTicket: ${errMsg(e)}`)
 		}
 	}
 
@@ -1028,6 +1111,7 @@ class TLS extends EventEmitter {
 		let hrrCookie = null
 		let selAlpn = null
 		let serverEMS = false // server echoed extended_master_secret (RFC 7627)
+		let pskSelected = false // server accepted an offered pre_shared_key (RFC 8446 §4.2.11)
 
 		const end = o + extTotalLen
 		while (o + 4 <= end) {
@@ -1066,6 +1150,10 @@ class TLS extends EventEmitter {
 				// cookie (HRR only)
 				const cklen = extData.readUInt16BE(0)
 				hrrCookie = extData.subarray(2, 2 + cklen)
+			} else if (extType === 0x0029) {
+				// pre_shared_key — the server resumed the session. We offer at most one PSK,
+				// so selected_identity must be 0.
+				pskSelected = true
 			}
 			// ignore others
 		}
@@ -1084,6 +1172,25 @@ class TLS extends EventEmitter {
 		}
 		if (selAlpn) this.alpn = selAlpn
 		this.serverEMS = serverEMS
+
+		if (pskSelected) {
+			const err: TLSError | null = !this.pskTicket
+				? new Error('ServerHello selected a PSK that was never offered')
+				: this.cipher.hash !== this.pskTicket.hash
+					? new Error(
+							`ServerHello selected a PSK whose hash (${this.pskTicket.hash}) does not match the negotiated suite (${this.cipher.hash})`
+						)
+					: null
+			if (err) {
+				err.code = 'ETLSPSK'
+				this.emit('error', err)
+				this.socket?.destroy()
+				return
+			}
+		}
+		this.pskAccepted = pskSelected
+		if (pskSelected) log.notify('[resume] server accepted the offered PSK')
+		else if (this.pskTicket) log.debug('[resume] server rejected the offered PSK; full handshake')
 
 		// Version dispatch:
 		//   supported_versions=0x0304 → TLS 1.3 (existing path).
@@ -1274,7 +1381,12 @@ class TLS extends EventEmitter {
 
 	_completeHandshakeKeySchedule(shared: Buffer, thSH: Buffer): void {
 		const zeros = Buffer.alloc(this.cipher!.hashLen, 0x00)
-		const earlySecret = HKDF.Extract(this.cipher!.hash, zeros, zeros)
+		// With a resumed PSK the Early Secret is extracted from the PSK instead of zeros
+		// (RFC 8446 §7.1). The rest of the schedule — including the master secret — is identical.
+		const earlySecret =
+			this.pskAccepted && this.pskTicket
+				? HKDF.Extract(this.cipher!.hash, zeros, this.pskTicket.psk)
+				: HKDF.Extract(this.cipher!.hash, zeros, zeros)
 
 		// sha256(''), not an empty buffer/str
 		const emptyHash = crypto.createHash(this.cipher!.hash).update(Buffer.alloc(0)).digest()
@@ -1364,6 +1476,7 @@ class TLS extends EventEmitter {
 			this.cipher!.hashLen
 		)
 		const masterSecret = HKDF.Extract(this.cipher!.hash, derivedSecret, Buffer.alloc(this.cipher!.hashLen, 0x00))
+		this.masterSecret = masterSecret
 
 		// 3. Derive client and server application traffic secrets.
 		const cAppTraffic = HKDF.ExpandLabel(
@@ -1647,8 +1760,41 @@ class TLS extends EventEmitter {
 		if (useGrease) extPieces.push(CreateGREASEExtension(grease.b))
 		const extensionsList = Buffer.concat(extPieces)
 
+		// --- TLS 1.3 PSK resumption (RFC 8446 §4.2.11) ---
+		// Offer the ticket cached from a previous handshake to this host. pre_shared_key must be
+		// the last extension, so it is appended after the trailing GREASE. The server can reject
+		// it and fall back to a full handshake, which only costs the extra extension bytes.
+		let pskTicket: SessionTicket | null = null
+		if (this.resume) {
+			const offeredAlpn = ptls.alpn || ['h2', 'http/1.1']
+			pskTicket = this.pskTicket ?? getSessionTicket(this.host, this.port, offeredAlpn, this.verifyTLS)
+			// After an HRR the negotiated suite is known: a PSK with a different hash would
+			// corrupt the binder transcript, so drop it and run a full handshake.
+			if (pskTicket && this.cipher && this.cipher.hash !== pskTicket.hash) pskTicket = null
+			this.pskTicket = pskTicket
+		}
+
+		let pskPrefix: Buffer | null = null
+		let pskBindersLen = 0 // bytes of binders<2> + entry<1> + binder
+		if (pskTicket) {
+			const age = Buffer.alloc(4)
+			const ageMs = Date.now() - pskTicket.receivedAt
+			age.writeUInt32BE(((ageMs + pskTicket.ageAdd) % 0x100000000) >>> 0, 0)
+			const identity = Buffer.concat([
+				Buffer.from([pskTicket.ticket.length >> 8, pskTicket.ticket.length & 0xff]),
+				pskTicket.ticket,
+				age
+			])
+			const identities = Buffer.concat([Buffer.from([identity.length >> 8, identity.length & 0xff]), identity])
+			pskBindersLen = 2 + 1 + pskTicket.hashLen
+			const extBodyLen = identities.length + pskBindersLen
+			// Truncated ClientHello stops right after the identities field; the length fields
+			// are written as if the binders were present (RFC 8446 §4.2.11.2).
+			pskPrefix = Buffer.concat([Buffer.from([0x00, 0x29, extBodyLen >> 8, extBodyLen & 0xff]), identities])
+		}
+
 		const extensionsLen = Buffer.alloc(2)
-		extensionsLen.writeUInt16BE(extensionsList.length, 0)
+		extensionsLen.writeUInt16BE(extensionsList.length + (pskPrefix ? pskPrefix.length + pskBindersLen : 0), 0)
 
 		const clientHelloBody = Buffer.concat([
 			legacyVersion, // 2
@@ -1659,17 +1805,38 @@ class TLS extends EventEmitter {
 			cipherSuites, // 2
 			compression, // 2 (00 count + 00 method) -> actually 1+1
 			extensionsLen, // 2
-			extensionsList // variable
+			extensionsList, // variable
+			...(pskPrefix ? [pskPrefix] : []) // pre_shared_key must be last
 		])
 
 		const hsLen = Buffer.alloc(3)
-		hsLen.writeUIntBE(clientHelloBody.length, 0, 3) // uint24 BE
+		// The handshake length always counts the binders that follow the truncated body.
+		hsLen.writeUIntBE(clientHelloBody.length + pskBindersLen, 0, 3) // uint24 BE
 
-		const handshakeMsg = Buffer.concat([
-			handshakeHeader, // 0x01
-			hsLen, // uint24 length
-			clientHelloBody
-		])
+		let handshakeMsg: Buffer
+		if (pskTicket && pskPrefix) {
+			const truncated = Buffer.concat([
+				handshakeHeader, // 0x01
+				hsLen, // uint24 length
+				clientHelloBody
+			])
+			// PskBinderEntry = HMAC(finished_key, Transcript-Hash(Truncate(ClientHello))),
+			// where finished_key = Expand-Label(binder_key, "finished", "") — RFC 8446 §4.2.11.2.
+			const transcriptHash = HASH_FNS[pskTicket.hash](...this.transcript, truncated)
+			const binder = pskBinder(pskTicket, transcriptHash)
+			handshakeMsg = Buffer.concat([
+				truncated,
+				// binders<2>: the vector length counts only the entries (u8 len + binder).
+				Buffer.from([(pskBindersLen - 2) >> 8, (pskBindersLen - 2) & 0xff, pskTicket.hashLen]),
+				binder
+			])
+		} else {
+			handshakeMsg = Buffer.concat([
+				handshakeHeader, // 0x01
+				hsLen, // uint24 length
+				clientHelloBody
+			])
+		}
 
 		this.transcript.push(handshakeMsg)
 

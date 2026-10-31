@@ -57,6 +57,12 @@ export interface RequestOptions {
 
 	/** TLS-only: turn on cert chain validation (default `true`). */
 	verifyTLS?: boolean
+	/**
+	 * TLS-only: reuse a TLS 1.3 session ticket from an earlier request to the same host
+	 * (default `false`). Resumed handshakes skip the certificate flight, but add
+	 * `pre_shared_key` to the ClientHello, so JA3/JA4 differ from a fresh handshake.
+	 */
+	resume?: boolean
 	/** Opt in to HTTP/3 (QUIC) for this request. Off unless explicitly `true`; QUIC is tried first with a bounded TCP fallback. */
 	h3?: boolean
 	/** When true, resolve as soon as headers arrive and expose the body as a Node Readable. */
@@ -135,6 +141,9 @@ export interface RequestFn extends Invokable, Shortcuts {
 	/** Install a Mozilla/NSS PEM bundle when the runtime has no built-in roots. */
 	setTrustedRoots(pems: string[]): void
 
+	/** Drop every cached TLS 1.3 session ticket (used only with `resume: true`). */
+	clearSessionTickets(): void
+
 	/** Request lifecycle events — see [Observability](README.md#observability). */
 	observability: Observability
 
@@ -167,9 +176,11 @@ export const observability: Observability
 export const profiles: ProfileRegistry
 export const udp: UdpTransport
 export function setTrustedRoots(pems: string[]): void
+export function clearSessionTickets(): void
 
 export interface TLSOptions {
 	verifyTLS?: boolean
+	resume?: boolean
 }
 
 /** The subset of `node:dgram.Socket` that the QUIC client depends on. */

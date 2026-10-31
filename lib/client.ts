@@ -75,6 +75,12 @@ export interface RequestOptions {
 
 	/** TLS-only: turn on cert chain validation (default `true`). */
 	verifyTLS?: boolean
+	/**
+	 * TLS-only: reuse a TLS 1.3 session ticket from an earlier request to the same host
+	 * (default `false`). Resumed handshakes skip the certificate flight and its validation,
+	 * but add `pre_shared_key` to the ClientHello, so JA3/JA4 differ from a fresh handshake.
+	 */
+	resume?: boolean
 	/** Opt in to HTTP/3 (QUIC) for this request. Off unless explicitly `true`. */
 	h3?: boolean
 	/** When true, resolve as soon as headers arrive and expose the body as a Node Readable. */
@@ -241,12 +247,14 @@ async function performRequest(opts: RequestOptions): Promise<unknown> {
 		? await connectPreferred({
 			host, port, profile, proxy: opts.proxy,
 			verifyTLS: opts.verifyTLS !== false,
+			resume: opts.resume === true,
 			timeouts: opts.timeouts,
 		})
 		: await connect({
 			host, port, profile, proxy: opts.proxy,
 			transport: 'tcp',
 			verifyTLS: opts.verifyTLS !== false,
+			resume: opts.resume === true,
 			timeouts: opts.timeouts,
 		})
 

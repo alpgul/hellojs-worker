@@ -25,6 +25,7 @@ export interface ConnectOptions {
 	proxy?: string | null
 	transport?: 'tcp' | 'quic'
 	verifyTLS?: boolean
+	resume?: boolean
 	timeouts?: PerPhaseTimeouts | null
 }
 
@@ -107,11 +108,12 @@ function createTLS(
 	port: number,
 	profile: Profile | string | null | undefined,
 	proxy: string | null | undefined,
-	opts: { verifyTLS?: boolean; timeouts?: PerPhaseTimeouts | null } = {}
+	opts: { verifyTLS?: boolean; resume?: boolean; timeouts?: PerPhaseTimeouts | null } = {}
 ): Promise<Connection> {
 	return new Promise((resolve, reject) => {
 		const tlsOpts: TLSOptions = {}
 		tlsOpts.verifyTLS = opts.verifyTLS !== false
+		if (opts.resume) tlsOpts.resume = true
 		if (profile) tlsOpts.profile = profile
 		const tls = new TLS(host, port, proxy ?? null, tlsOpts)
 		const conn = new Connection(tls)
@@ -172,9 +174,9 @@ function createTLS(
 	})
 }
 
-function connect({ host, port = 443, profile, proxy, transport = 'tcp', verifyTLS = true, timeouts = null }: ConnectOptions): Promise<Connection> {
+function connect({ host, port = 443, profile, proxy, transport = 'tcp', verifyTLS = true, resume = false, timeouts = null }: ConnectOptions): Promise<Connection> {
 	if (transport === 'quic') return createH3(host, port, timeouts)
-	return createTLS(host, port, profile, proxy, { verifyTLS, timeouts })
+	return createTLS(host, port, profile, proxy, { verifyTLS, resume, timeouts })
 }
 
 // h3 is opt-in per request and takes priority: start QUIC, and only fall back to TCP + TLS
