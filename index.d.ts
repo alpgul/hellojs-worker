@@ -9,6 +9,74 @@ import { EventEmitter } from 'node:events'
 
 import type { Duplex } from 'node:stream'
 
+/**
+ * Methods registered with IANA (RFC 9110 §9, RFC 5789). The protocol allows extension
+ * methods, so any token is accepted at runtime — the literals exist for autocomplete,
+ * not to close the set.
+ */
+export type RegisteredHttpMethod =
+	| 'GET' | 'HEAD' | 'POST' | 'PUT' | 'DELETE' | 'CONNECT' | 'OPTIONS' | 'TRACE' | 'PATCH'
+
+/** The method may be given in either case; `request()` uppercases it before use. */
+export type HttpMethod = RegisteredHttpMethod | Lowercase<RegisteredHttpMethod> | (string & {})
+
+/** Status codes registered with IANA. Unknown codes are accepted (servers invent them). */
+export type RegisteredHttpStatusCode =
+	| 100 | 101 | 102 | 103
+	| 200 | 201 | 202 | 203 | 204 | 205 | 206 | 207 | 208 | 226
+	| 300 | 301 | 302 | 303 | 304 | 305 | 307 | 308
+	| 400 | 401 | 402 | 403 | 404 | 405 | 406 | 407 | 408 | 409
+	| 410 | 411 | 412 | 413 | 414 | 415 | 416 | 417 | 418 | 421
+	| 422 | 423 | 424 | 425 | 426 | 428 | 429 | 431 | 451
+	| 500 | 501 | 502 | 503 | 504 | 505 | 506 | 507 | 508 | 509 | 510 | 511
+
+export type HttpStatusCode = RegisteredHttpStatusCode | (number & {})
+
+/**
+ * Redirect handling, as the Fetch standard defines the mode. Only the two modes this client
+ * implements are accepted: `'follow'` (default) follows 3xx with a `Location` up to
+ * `maxRedirects`; `'manual'` stops and returns the 3xx response itself. Fetch's `'error'` is
+ * deliberately not offered until the client rejects on it.
+ */
+export type RedirectMode = 'follow' | 'manual'
+
+/** ALPN identifiers this client can negotiate. */
+export type AlpnProtocol = 'h2' | 'http/1.1'
+
+/** RFC 8259 JSON — the shape `json` and a serialized `body` are restricted to. */
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
+
+/** A percent-encoded `key=value` pair set, as `application/x-www-form-urlencoded` defines it. */
+export type QueryValue = string | number | ReadonlyArray<string | number>
+export type QueryParams = Record<string, QueryValue>
+
+/**
+ * Header field names registered for HTTP requests (RFC 9110 + the IANA registry, plus the
+ * `sec-*` set the fingerprint profiles send). Field names are case-insensitive; the library
+ * lowercases them on the wire.
+ */
+export type KnownHttpRequestHeader =
+	| 'accept' | 'accept-charset' | 'accept-encoding' | 'accept-language' | 'accept-ranges'
+	| 'authorization' | 'cache-control' | 'connection' | 'content-encoding' | 'content-language'
+	| 'content-length' | 'content-location' | 'content-range' | 'content-type' | 'cookie'
+	| 'date' | 'expect' | 'forwarded' | 'from' | 'host' | 'if-match' | 'if-modified-since'
+	| 'if-none-match' | 'if-range' | 'if-unmodified-since' | 'max-forwards' | 'pragma'
+	| 'proxy-authorization' | 'range' | 'referer' | 'te' | 'trailer' | 'transfer-encoding'
+	| 'upgrade' | 'upgrade-insecure-requests' | 'user-agent' | 'via' | 'warning'
+	| 'x-forwarded-for' | 'x-forwarded-host'
+	| 'sec-ch-ua' | 'sec-ch-ua-mobile' | 'sec-ch-ua-platform'
+	| 'sec-fetch-dest' | 'sec-fetch-mode' | 'sec-fetch-site' | 'sec-fetch-user'
+	| 'sec-websocket-accept' | 'sec-websocket-extensions' | 'sec-websocket-key' | 'sec-websocket-version'
+
+/** Known names autocomplete; any other field name is allowed, since HTTP defines extensions. */
+export type HttpRequestHeaders =
+	& { [name: string]: string | string[] }
+	& Partial<Record<KnownHttpRequestHeader, string | string[]>>
+
+/** Profiles this build ships with. `default` aliases `chrome147-mac`; `register()` adds more. */
+export type BuiltInProfileName = 'default' | 'chrome147-mac' | 'firefox147'
+export type ProfileName = BuiltInProfileName | (string & {})
+
 export interface CookieJar {
 	getCookieString(requestUrlOrHost: string): string
 	setCookie(setCookieHeader: string | string[], requestUrlOrHost: string): void
@@ -24,8 +92,8 @@ export interface Jar extends CookieJar {
 
 export interface RetryPolicy {
 	limit?: number
-	methods?: string[]
-	statusCodes?: number[]
+	methods?: HttpMethod[]
+	statusCodes?: HttpStatusCode[]
 	baseDelayMs?: number
 }
 
@@ -38,16 +106,16 @@ export interface PerPhaseTimeouts {
 export interface RequestOptions {
 	url?: string
 	uri?: string
-	method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'HEAD' | 'OPTIONS' | string
-	headers?: Record<string, string | string[]>
-	body?: string | Buffer | Uint8Array | NodeJS.ReadableStream | null
-	json?: boolean | unknown
-	form?: Record<string, string | number>
-	qs?: Record<string, string | number | (string | number)[]>
+	method?: HttpMethod
+	headers?: HttpRequestHeaders
+	body?: string | Buffer | Uint8Array | NodeJS.ReadableStream | JsonValue | null
+	/** `true` parses the response as JSON; an RFC 8259 value is serialized and sent as the body. */
+	json?: boolean | JsonValue
+	form?: QueryParams
+	qs?: QueryParams
 	jar?: CookieJar | null
 	gzip?: boolean
-	/** Redirect handling: 'follow' (default) auto-follows 3xx; 'manual' stops and returns the 3xx response. */
-	redirect?: 'follow' | 'manual'
+	redirect?: RedirectMode
 	maxRedirects?: number
 	timeout?: number
 	timeouts?: PerPhaseTimeouts | null
@@ -69,12 +137,12 @@ export interface RequestOptions {
 	/** When true, resolve as soon as headers arrive and expose the body as a Node Readable. */
 	stream?: boolean
 	/** Profile name, or an inline profile object shaped like lib/profiles/types.ts `Profile`. */
-	profile?: string | Record<string, unknown>
+	profile?: ProfileName | Record<string, unknown>
 }
 
 export interface Response<TBody = unknown> {
-	statusCode: number
-	status: number
+	statusCode: HttpStatusCode
+	status: HttpStatusCode
 	headers: Record<string, string | string[]>
 	body: TBody
 	/** Wire bytes as read; with `stream: true` this is the same Readable as `body`. */
@@ -84,6 +152,11 @@ export interface Response<TBody = unknown> {
 export type HellojsErrorCategory =
 	| 'usage' | 'transport' | 'tls' | 'protocol' | 'http' | 'body' | 'timeout'
 
+/**
+ * The stable taxonomy in `lib/errors.ts`. `code` is typed with a `(string & {})` escape so
+ * a newer runtime can introduce codes without breaking compilation, while the known set still
+ * autocompletes and narrows.
+ */
 export type HellojsErrorCode =
 	| 'EBADOPTS' | 'EBADARG' | 'EHEADERFIXED'
 	| 'ECONNREFUSED' | 'ECONNRESET' | 'ENOTFOUND' | 'EPROXY'
@@ -93,8 +166,23 @@ export type HellojsErrorCode =
 	| 'EBODYSTREAM'
 	| 'ETIMEDOUT'
 
+/**
+ * Codes the low-level `TLS` class puts on the `Error` it emits for its `'error'` event. These
+ * are the protocol-level detail codes; `request()` folds them into `HellojsErrorCode` (usually
+ * `ETLS_HANDSHAKE` / `ETLS_ALERT`) when it wraps a connection for the caller.
+ */
+export type TLSErrorCode =
+	| 'ETLS_ALERT' | 'ETLSALERT' | 'ETLS_HANDSHAKE' | 'ETLS_VERSION'
+	| 'ETLS_CERT_VERIFY' | 'ECERTPARSE' | 'ECERTVALIDATION' | 'ECERTVERIFY'
+	| 'ETLSPSK' | 'ETLS12' | 'EHRR'
+	| 'ECONNRESET' | 'ECONNREFUSED' | 'ETIMEDOUT'
+
+export interface TLSError extends Error {
+	code?: TLSErrorCode | (string & {})
+}
+
 export class HellojsError extends Error {
-	code: HellojsErrorCode | string
+	code: HellojsErrorCode | (string & {})
 	category: HellojsErrorCategory
 	cause?: unknown
 	response?: Response
@@ -158,8 +246,16 @@ export interface RequestFn extends Invokable, Shortcuts {
 declare const request: RequestFn
 export default request
 
+/** Lifecycle events the library emits — see README → Observability. */
+export type ObservabilityEvent =
+	| 'request:start'
+	| 'request:headersSent'
+	| 'request:firstByte'
+	| 'request:end'
+	| 'request:error'
+
 export interface ProfileRegistry {
-	get(name?: string): unknown
+	get(name?: ProfileName): unknown
 	list(): string[]
 	register(name: string, profile: unknown): void
 	registerFromPeet(name: string, peet: unknown): unknown
@@ -168,9 +264,9 @@ export interface ProfileRegistry {
 }
 
 export interface Observability {
-	safeEmit(event: string, payload?: unknown): void
-	on(event: string, listener: (...args: unknown[]) => void): unknown
-	off(event: string, listener: (...args: unknown[]) => void): unknown
+	safeEmit(event: ObservabilityEvent, payload?: unknown): void
+	on(event: ObservabilityEvent, listener: (...args: unknown[]) => void): unknown
+	off(event: ObservabilityEvent, listener: (...args: unknown[]) => void): unknown
 }
 
 export const observability: Observability
@@ -206,7 +302,7 @@ export class TLS extends EventEmitter {
 	constructor(host: string, port?: number, proxy?: string | null, options?: TLSOptions)
 	host: string
 	port: number
-	alpn: 'h2' | 'http/1.1' | null
+	alpn: AlpnProtocol | null
 	h2Transport: Duplex | null
 	h2Session: unknown | null
 	server: {
@@ -220,5 +316,5 @@ export class TLS extends EventEmitter {
 
 	on(event: 'ready', listener: () => void): this
 	on(event: 'ready-http1', listener: () => void): this
-	on(event: 'error', listener: (err: Error) => void): this
+	on(event: 'error', listener: (err: TLSError) => void): this
 }

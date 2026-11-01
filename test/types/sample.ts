@@ -110,6 +110,43 @@ async function smoke(): Promise<void> {
 	const ts: PerPhaseTimeouts = { connect: 1000 }
 	void ts
 
+	// Values with a standard are validated, not left as free strings/numbers.
+	// Each @ts-expect-error below MUST fail to compile; if the .d.ts loosens again, tsc
+	// reports the directive as unused and this file breaks.
+	await request({ url: 'https://example.com', method: 'get' })                 // any case is fine
+	await request({ url: 'https://example.com', method: 'PURGE' })               // extension methods allowed
+	await request({ url: 'https://example.com', redirect: 'manual' })
+	await request({ url: 'https://example.com', qs: { tag: ['a', 'b'], page: 2 } })
+	await request({ url: 'https://example.com', headers: { authorization: 'Bearer x', 'x-trace': '1' } })
+	await request({ url: 'https://example.com', retry: { statusCodes: [408, 429, 503], methods: ['GET'] } })
+	// @ts-expect-error redirect is the Fetch enum, not an arbitrary string
+	await request({ url: 'https://example.com', redirect: 'nope' })
+	// @ts-expect-error 'error' is in the Fetch spec but not implemented here — reject it loudly
+	await request({ url: 'https://example.com', redirect: 'error' })
+	// @ts-expect-error a method is a token, not a number
+	await request({ url: 'https://example.com', method: 123 })
+	// @ts-expect-error a timeout is milliseconds, not a numeric string
+	await request({ url: 'https://example.com', timeout: '5000' })
+	// @ts-expect-error header values are strings or string arrays
+	await request({ url: 'https://example.com', headers: { 'x-count': 42 } })
+	// @ts-expect-error query values may not be nested objects
+	await request({ url: 'https://example.com', qs: { filter: { a: 1 } } })
+	// @ts-expect-error status codes are numbers (the IANA set autocompletes)
+	await request({ url: 'https://example.com', retry: { statusCodes: ['503'] } })
+	// @ts-expect-error json must be an RFC 8259 value; a Date is not
+	await request({ url: 'https://example.com', json: { at: new Date() } })
+	// @ts-expect-error observability events are the documented lifecycle set
+	request.observability.on('request:bogus', () => {})
+
+	// Statuses and codes carry the registry/taxonomy types.
+	const status: number = (await request({ url: 'https://example.com', resolveWithFullResponse: true })).status
+	const code: HellojsErrorCode = 'ETLS_HANDSHAKE'
+	const cat: HellojsErrorCategory = 'protocol'
+	void status; void code; void cat
+	// @ts-expect-error codes outside the documented taxonomy do not narrow to HellojsErrorCode
+	const badCode: HellojsErrorCode = 'ENOPE'
+	void badCode
+
 	// defaults() carries the callable, its shortcuts and a further defaults() — and nothing
 	// else, since only the root export is decorated with TLS/udp/profiles helpers.
 	const api: DefaultsFn = request.defaults({ headers: { 'x-default': 'yes' } })
