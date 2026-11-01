@@ -403,7 +403,11 @@ function performH2(conn: Connection, { method, url, host, body, userHeaders, opt
 			})
 			req.on('error', (e: Error) => { if (settled) return; settled = true; if (timer) clearTimeout(timer); conn.close('h2-stream-error'); reject(new HellojsError(e.message, 'EH2STREAM', e)) })
 			if (streamingBody) {
-				streamingBody.on('data', (c: Buffer) => req.write(Buffer.isBuffer(c) ? c : Buffer.from(c)))
+				// req.write returns false when the peer's flow-control window is full and the chunk
+				// is queued; pause the source until the session drains it (emits 'drain').
+				streamingBody.on('data', (c: Buffer) => {
+					if (!req.write(Buffer.isBuffer(c) ? c : Buffer.from(c))) { streamingBody.pause(); req.once('drain', () => streamingBody.resume()) }
+				})
 				streamingBody.on('end', () => req.end())
 				streamingBody.on('error', (e: Error) => { try { req.close(0x8) } catch {}; conn.close('h2-body-error'); reject(new HellojsError(e.message, 'EBODYSTREAM', e)) })
 			} else if (bufferedBody) req.end(bufferedBody)
@@ -449,7 +453,11 @@ function performH2(conn: Connection, { method, url, host, body, userHeaders, opt
 		})
 		req.on('error', (e: Error) => { if (timer) clearTimeout(timer); conn.close('h2-error'); reject(new HellojsError(e.message, 'EH2STREAM', e)) })
 		if (streamingBody) {
-			streamingBody.on('data', (c: Buffer) => req.write(Buffer.isBuffer(c) ? c : Buffer.from(c)))
+			// req.write returns false when the peer's flow-control window is full and the chunk
+			// is queued; pause the source until the session drains it (emits 'drain').
+			streamingBody.on('data', (c: Buffer) => {
+				if (!req.write(Buffer.isBuffer(c) ? c : Buffer.from(c))) { streamingBody.pause(); req.once('drain', () => streamingBody.resume()) }
+			})
 			streamingBody.on('end', () => req.end())
 			streamingBody.on('error', (e: Error) => { try { req.close(0x8) } catch {}; reject(new HellojsError(e.message, 'EBODYSTREAM', e)) })
 		} else if (bufferedBody) req.end(bufferedBody)
@@ -476,7 +484,6 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 	const head = Buffer.from(requestLine + headerBlock + '\r\n\r\n', 'utf8')
 	const h1T0 = Date.now()
 	transport.write(head)
-	if (body) transport.write(body)
 
 	return new Promise((resolve, reject) => {
 		// The connection is fresh and dedicated to this request, so no leftover bytes
@@ -509,6 +516,28 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 		}
 		function fail(msg: string, code: ErrorCode | string) {
 			done(() => { try { conn.close('h1-error') } catch {}; reject(new HellojsError(msg, code)) })
+		}
+
+		// Send the request body. A Readable streams as HTTP/1.1 chunks when the header layer
+		// selected chunked framing (unknown length); with a caller Content-Length it streams raw.
+		// A buffered body is written in one shot. Mirrors the h2/h3 streaming-body paths.
+		const streamBody = isReadable(body) ? body : null
+		if (streamBody) {
+			const chunked = Object.keys(userHeaders).some(
+				(k) => k.toLowerCase() === 'transfer-encoding' && String(userHeaders[k]).toLowerCase().includes('chunked'),
+			)
+			const CRLF = Buffer.from('\r\n', 'utf8')
+			streamBody.on('data', (c: Buffer | string) => {
+				const data = Buffer.isBuffer(c) ? c : Buffer.from(c)
+				const frame = chunked
+					? Buffer.concat([Buffer.from(data.length.toString(16), 'utf8'), CRLF, data, CRLF])
+					: data
+				if (!transport.write(frame)) { streamBody.pause(); transport.once('drain', () => streamBody.resume()) }
+			})
+			streamBody.on('end', () => { if (chunked) transport.write('0\r\n\r\n', 'utf8') })
+			streamBody.on('error', (e: Error) => done(() => { try { conn.close('h1-body-error') } catch {}; reject(new HellojsError(e.message, 'EBODYSTREAM', e)) }))
+		} else if (body) {
+			transport.write(body)
 		}
 
 		// Parse one response head (status line + headers) at the front of buf.

@@ -116,6 +116,15 @@ class H2Stream extends EventEmitter {
 	// Set once a body chunk has been streamed, so end() knows whether a trailing
 	// zero-length DATA frame would be legal.
 	declare _wroteBody: boolean | undefined
+	// Outbound flow-control send queue (RFC 7540 §6.9): bytes that exceed the peer's window are
+	// held here and flushed as inbound WINDOW_UPDATE refills it, so sustained uploads never drop
+	// data. `_pendingEnd` records a deferred END_STREAM; `_endSent` guards against emitting it twice;
+	// `_headersEndStream` remembers whether the opening HEADERS already ended the stream.
+	declare _pendingSend: Buffer[]
+	declare _pendingLen: number
+	declare _pendingEnd: boolean
+	declare _endSent: boolean
+	declare _headersEndStream: boolean
 
 	constructor(session: H2Session, id: number) {
 		super()
@@ -128,6 +137,11 @@ class H2Stream extends EventEmitter {
 		this._headerEndStream = false
 		this.sendWindow = 65535
 		this.recvUsed = 0
+		this._pendingSend = []
+		this._pendingLen = 0
+		this._pendingEnd = false
+		this._endSent = false
+		this._headersEndStream = false
 	}
 	_onHeaders(payload: Buffer, flags: number): void {
 		// HEADERS may have PADDED or PRIORITY flags affecting payload layout.
@@ -200,22 +214,63 @@ class H2Stream extends EventEmitter {
 		this.emit('error', err)
 	}
 	// Public API
-	write(chunk: Buffer | string): void {
-		if (!chunk || chunk.length === 0) return
-		this.session._sendData(this.id, chunk, false)
-		this._wroteBody = true
+	// Queue a body chunk and flush as much as the peer's window allows. Returns false when the
+	// chunk could not be fully sent (window exhausted) so callers can apply backpressure to their
+	// source; a subsequent WINDOW_UPDATE emits 'drain' once the queue empties.
+	write(chunk: Buffer | string): boolean {
+		if (!chunk || chunk.length === 0 || this.closed || this._endSent) return true
+		const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+		this._pendingSend.push(b)
+		this._pendingLen += b.length
+		this._pump()
+		return this._pendingLen === 0
 	}
 	end(body?: Buffer | string): void {
-		if (body) { this.session._sendData(this.id, body, true); this._wroteBody = true; return }
-		// If we've streamed any body chunks already, terminate the stream with an empty
-		// END_STREAM DATA frame. Otherwise the HEADERS frame already carried END_STREAM
-		// (set by session.request({ endStream: true })) and a trailing zero-length DATA
-		// would be a protocol error.
-		if (this._wroteBody) this.session._sendData(this.id, Buffer.alloc(0), true)
+		if (this.closed || this._endSent) return
+		if (body && body.length) {
+			const b = Buffer.isBuffer(body) ? body : Buffer.from(body)
+			if (b.length) { this._pendingSend.push(b); this._pendingLen += b.length }
+		}
+		this._pendingEnd = true
+		this._pump()
+	}
+	// Emit DATA frames up to min(MAX_FRAME, connWindow, streamWindow); hold the rest queued. The
+	// END_STREAM flag rides on the final byte when it's available; if the body drained before the
+	// end() call (or was empty), a zero-length DATA carries it instead.
+	_pump(): void {
+		if (this.closed || this.session.closed || this.session.destroyed) return
+		const maxFrame = Math.min(this.session.peerSettings[frame.SETTING.MAX_FRAME_SIZE] || 16384, 16384)
+		let flushed = false
+		while (this._pendingLen > 0) {
+			const room = Math.min(maxFrame, this.session._connSendWindow, this.sendWindow)
+			if (room <= 0) break // window exhausted — resume when a WINDOW_UPDATE arrives
+			const head = this._pendingSend[0]
+			const take = Math.min(room, head.length)
+			const slice = take === head.length ? head : head.subarray(0, take)
+			const endThisFrame = this._pendingEnd && !this._endSent && this._pendingLen === take
+			this.session._sendFrame(frame.TYPE.DATA, endThisFrame ? frame.FLAG.END_STREAM : 0, this.id, slice)
+			this.session._connSendWindow -= take
+			this.sendWindow -= take
+			this._pendingLen -= take
+			if (take === head.length) this._pendingSend.shift()
+			else this._pendingSend[0] = head.subarray(take)
+			this._wroteBody = true
+			if (endThisFrame) this._endSent = true
+			flushed = true
+		}
+		// All bytes are out (or there never were any) and end() is pending: close the stream, but
+		// only if the opening HEADERS did not already carry END_STREAM.
+		if (this._pendingEnd && this._pendingLen === 0 && !this._endSent) {
+			if (!this._headersEndStream) this.session._sendFrame(frame.TYPE.DATA, frame.FLAG.END_STREAM, this.id, Buffer.alloc(0))
+			this._endSent = true
+		}
+		if (flushed && this._pendingLen === 0) this.emit('drain')
 	}
 	close(errorCode = 0x08): void {
 		if (this.closed) return
 		this.closed = true
+		this._pendingSend = []
+		this._pendingLen = 0
 		this.session._sendFrame(frame.TYPE.RST_STREAM, 0, this.id, frame.buildRstStream(errorCode))
 		this.session._closeStream(this.id)
 	}
@@ -369,12 +424,20 @@ class H2Session extends EventEmitter {
 		switch (f.type) {
 			case frame.TYPE.SETTINGS: {
 				if (f.flags & frame.FLAG.ACK) break
+				const prevInitial = this.peerSettings[frame.SETTING.INITIAL_WINDOW_SIZE]
 				for (const [id, v] of frame.parseSettings(f.payload)) {
 					this.peerSettings[id] = v
 					if (id === frame.SETTING.HEADER_TABLE_SIZE) {
 						// Peer is telling us their decoder capacity for the headers WE encode.
 						this.localHpackTable.setCapacity(v)
 					}
+				}
+				// RFC 7540 §6.9.2: an INITIAL_WINDOW_SIZE change retroactively shifts every open
+				// stream's send window by the same delta (it may go negative; we just stall then).
+				const newInitial = this.peerSettings[frame.SETTING.INITIAL_WINDOW_SIZE]
+				if (prevInitial !== undefined && newInitial !== undefined && newInitial !== prevInitial) {
+					const delta = newInitial - prevInitial
+					for (const s of this.streams.values()) s.sendWindow += delta
 				}
 				this._sendFrame(frame.TYPE.SETTINGS, frame.FLAG.ACK, 0, Buffer.alloc(0))
 				if (!this._sawSettings) {
@@ -387,9 +450,11 @@ class H2Session extends EventEmitter {
 				const inc = f.payload.readUInt32BE(0) & 0x7fffffff
 				if (f.streamId === 0) {
 					this._connSendWindow += inc
+					// Connection window freed — retry any stream still holding a send backlog.
+					for (const s of this.streams.values()) if (s._pendingLen > 0) s._pump()
 				} else {
 					const s = this.streams.get(f.streamId)
-					if (s) s.sendWindow += inc
+					if (s) { s.sendWindow += inc; if (s._pendingLen > 0) s._pump() }
 				}
 				break
 			}
@@ -455,37 +520,6 @@ class H2Session extends EventEmitter {
 		}
 	}
 
-	_sendData(streamId: number, body: Buffer | string, endStream: boolean): void {
-		const buf = Buffer.isBuffer(body) ? body : Buffer.from(body)
-		const maxFrame = Math.min(this.peerSettings[frame.SETTING.MAX_FRAME_SIZE] || 16384, 16384)
-		const stream = this.streams.get(streamId)
-		let off = 0
-		while (off < buf.length) {
-			// Respect per-stream + connection send windows. RFC 7540 §6.9.1: a sender MUST NOT
-			// send DATA frames larger than min(connWindow, streamWindow). For now we just send
-			// what we have and decrement; if a window goes negative we'd need to buffer — but
-			// in practice with maxFrame=16KB and 64KB initial windows, single-shot requests
-			// never block. For sustained streaming uploads this needs queuing; that's a future
-			// item documented in README.
-			const room = Math.min(
-				maxFrame,
-				this._connSendWindow,
-				stream ? stream.sendWindow : maxFrame,
-			)
-			if (room <= 0) break  // window exhausted; drop the rest (caller sees short write)
-			const take = Math.min(maxFrame, buf.length - off, room)
-			const chunk = buf.subarray(off, off + take)
-			off += chunk.length
-			const flags = (off >= buf.length && endStream) ? frame.FLAG.END_STREAM : 0
-			this._sendFrame(frame.TYPE.DATA, flags, streamId, chunk)
-			this._connSendWindow -= chunk.length
-			if (stream) stream.sendWindow -= chunk.length
-		}
-		if (buf.length === 0 && endStream) {
-			this._sendFrame(frame.TYPE.DATA, frame.FLAG.END_STREAM, streamId, Buffer.alloc(0))
-		}
-	}
-
 	_closeStream(id: number): void {
 		this.streams.delete(id)
 	}
@@ -502,6 +536,8 @@ class H2Session extends EventEmitter {
 		const id = this.nextStreamId
 		this.nextStreamId += 2
 		const stream = new H2Stream(this, id)
+		// The peer's advertised INITIAL_WINDOW_SIZE caps how much we may send on this stream.
+		stream.sendWindow = this.peerSettings[frame.SETTING.INITIAL_WINDOW_SIZE] ?? 65535
 		this.streams.set(id, stream)
 
 		// Normalize: lib/client.ts passes headers as { ':method': 'GET', ... } object.
@@ -525,6 +561,8 @@ class H2Session extends EventEmitter {
 		}
 		const block = hpack.encode(list, this.localHpackTable)
 		const endStream = !!opts.endStream
+		// Remembered so the send pump knows a trailing END_STREAM is legal (vs. HEADERS already ended).
+		stream._headersEndStream = endStream
 		// PRIORITY-on-HEADERS is profile-driven. Chrome 147 sets it with E=1, weight=256.
 		// Safari clears the flag (it advertises NO_RFC7540_PRIORITIES). When the profile says
 		// sendPriorityFrame is false we omit the flag and the 5-byte payload entirely.

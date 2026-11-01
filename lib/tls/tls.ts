@@ -162,19 +162,31 @@ class TLSTransport extends Duplex {
 			if (!this.tls.handshakeComplete) {
 				return cb(new Error('TLS handshake not complete'))
 			}
+			// RFC 8446 §5.2 / RFC 5246 §6.2.1: a record's plaintext must not exceed 2^14 bytes.
+			// A single application write can be far larger (a big POST body, a chunked h1 frame),
+			// so split it into <=MAX_PLAIN fragments, each sealed as its own record with the
+			// sequence number advancing per record. Sending one oversized record trips the peer's
+			// record_overflow alert.
+			const MAX_PLAIN = 16384
 			// TLS 1.2 path encrypts via its own record layer (different cipher/MAC structure).
 			if (this.tls.tls12) {
-				this.tls.tls12.encryptAppData(chunk)
+				if (chunk.length === 0) return cb()
+				for (let off = 0; off < chunk.length; off += MAX_PLAIN) {
+					this.tls.tls12.encryptAppData(chunk.subarray(off, off + MAX_PLAIN))
+				}
 				return cb()
 			}
-			const rec = this.tls.encrypt(
-				this.tls.clientAppKey,
-				this.tls.clientAppIV,
-				chunk,
-				0x17, // inner content type: application data
-				this.tls.clientSeq++
-			)
-			this.tls.socket!.write(rec)
+			for (let off = 0; off < chunk.length; off += MAX_PLAIN) {
+				const frag = chunk.subarray(off, off + MAX_PLAIN)
+				const rec = this.tls.encrypt(
+					this.tls.clientAppKey,
+					this.tls.clientAppIV,
+					frag,
+					0x17, // inner content type: application data
+					this.tls.clientSeq++
+				)
+				this.tls.socket!.write(rec)
+			}
 			cb()
 		} catch (e) {
 			cb(e instanceof Error ? e : new Error(String(e)))
