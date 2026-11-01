@@ -934,9 +934,9 @@ try {
 | Category | Codes | Meaning |
 |---|---|---|
 | `usage` | `EBADOPTS`, `EBADARG`, `EHEADERFIXED` | Caller passed bad options (programmer error) |
-| `transport` | `ECONNREFUSED`, `ECONNRESET`, `ENOTFOUND`, `EPROXY` | TCP / DNS / proxy issues |
-| `tls` | `ETLS_ALERT`, `ETLS_HANDSHAKE`, `ETLS_CERT_VERIFY`, `ETLS_VERSION` | Handshake or cert problem |
-| `protocol` | `EH2STREAM`, `EH2GOAWAY`, `EH3STREAM`, `EH3CONN`, `EPROTO` | h2 / h3 / QUIC protocol-level failure |
+| `transport` | `ECONNREFUSED`, `ECONNRESET`, `ENOTFOUND`, `EPROXY`, `EUDPUNAVAILABLE` | TCP / DNS / proxy issues, or no UDP provider for HTTP/3 |
+| `tls` | `ETLS_ALERT`, `ETLS_HANDSHAKE`, `ETLS_CERT_VERIFY`, `ETLS_VERSION`, `ECERTPARSE`, `ECERTVALIDATION`, `ECERTVERIFY`, `ETLSPSK`, `ETLS12`, `EHRR` | Handshake, record-layer or certificate problem |
+| `protocol` | `EH2STREAM`, `EH2GOAWAY`, `EH2COMPRESS`, `EH2KEEPALIVE`, `EH3STREAM`, `EH3CONN`, `EH3PARSE`, `EPROTO` | h2 / h3 / QUIC protocol-level failure |
 | `http` | `EHTTP`, `EBADRESP`, `EDECOMPRESS` | HTTP status >= 400 (with `simple:true`), parser failure, or content-encoding error |
 | `body` | `EBODYSTREAM` | Request body stream errored mid-upload |
 | `timeout` | `ETIMEDOUT` | Any phase exceeded its budget — see `timeouts` option |

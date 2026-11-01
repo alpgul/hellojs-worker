@@ -40,18 +40,28 @@ const CODES = Object.freeze({
 	ECONNRESET:      { category: CATEGORY.TRANSPORT, msg: 'TCP connection reset' },
 	ENOTFOUND:       { category: CATEGORY.TRANSPORT, msg: 'DNS resolution failed' },
 	EPROXY:          { category: CATEGORY.TRANSPORT, msg: 'proxy CONNECT failed' },
+	EUDPUNAVAILABLE: { category: CATEGORY.TRANSPORT, msg: 'no UDP provider — HTTP/3 unreachable' },
 
 	// TLS
 	ETLS_ALERT:      { category: CATEGORY.TLS,       msg: 'fatal TLS alert from server' },
 	ETLS_HANDSHAKE:  { category: CATEGORY.TLS,       msg: 'TLS handshake failed' },
 	ETLS_CERT_VERIFY:{ category: CATEGORY.TLS,       msg: 'server certificate chain validation failed' },
 	ETLS_VERSION:    { category: CATEGORY.TLS,       msg: 'server picked an unsupported TLS version' },
+	ECERTPARSE:      { category: CATEGORY.TLS,       msg: 'server certificate could not be parsed' },
+	ECERTVALIDATION: { category: CATEGORY.TLS,       msg: 'certificate chain failed path validation' },
+	ECERTVERIFY:     { category: CATEGORY.TLS,       msg: 'CertificateVerify signature failed' },
+	ETLSPSK:         { category: CATEGORY.TLS,       msg: 'PSK / session-resumption setup failed' },
+	ETLS12:          { category: CATEGORY.TLS,       msg: 'TLS 1.2 record-layer failure' },
+	EHRR:            { category: CATEGORY.TLS,       msg: 'HelloRetryRequest could not be honored' },
 
 	// Protocol
 	EH2STREAM:       { category: CATEGORY.PROTOCOL,  msg: 'h2 stream error' },
 	EH2GOAWAY:       { category: CATEGORY.PROTOCOL,  msg: 'h2 GOAWAY received' },
+	EH2COMPRESS:     { category: CATEGORY.PROTOCOL,  msg: 'h2 HPACK compression failure' },
+	EH2KEEPALIVE:    { category: CATEGORY.PROTOCOL,  msg: 'h2 keepalive PING timed out' },
 	EH3STREAM:       { category: CATEGORY.PROTOCOL,  msg: 'h3 stream error' },
 	EH3CONN:         { category: CATEGORY.PROTOCOL,  msg: 'h3 / QUIC connection error' },
+	EH3PARSE:        { category: CATEGORY.PROTOCOL,  msg: 'h3 response could not be parsed' },
 	EPROTO:          { category: CATEGORY.PROTOCOL,  msg: 'protocol-level violation' },
 
 	// HTTP

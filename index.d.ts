@@ -159,20 +159,22 @@ export type HellojsErrorCategory =
  */
 export type HellojsErrorCode =
 	| 'EBADOPTS' | 'EBADARG' | 'EHEADERFIXED'
-	| 'ECONNREFUSED' | 'ECONNRESET' | 'ENOTFOUND' | 'EPROXY'
+	| 'ECONNREFUSED' | 'ECONNRESET' | 'ENOTFOUND' | 'EPROXY' | 'EUDPUNAVAILABLE'
 	| 'ETLS_ALERT' | 'ETLS_HANDSHAKE' | 'ETLS_CERT_VERIFY' | 'ETLS_VERSION'
-	| 'EH2STREAM' | 'EH2GOAWAY' | 'EH3STREAM' | 'EH3CONN' | 'EPROTO'
+	| 'ECERTPARSE' | 'ECERTVALIDATION' | 'ECERTVERIFY' | 'ETLSPSK' | 'ETLS12' | 'EHRR'
+	| 'EH2STREAM' | 'EH2GOAWAY' | 'EH2COMPRESS' | 'EH2KEEPALIVE'
+	| 'EH3STREAM' | 'EH3CONN' | 'EH3PARSE' | 'EPROTO'
 	| 'EHTTP' | 'EBADRESP' | 'EDECOMPRESS'
 	| 'EBODYSTREAM'
 	| 'ETIMEDOUT'
 
 /**
- * Codes the low-level `TLS` class puts on the `Error` it emits for its `'error'` event. These
- * are the protocol-level detail codes; `request()` folds them into `HellojsErrorCode` (usually
- * `ETLS_HANDSHAKE` / `ETLS_ALERT`) when it wraps a connection for the caller.
+ * Codes the low-level `TLS` class puts on the `Error` it emits for its `'error'` event. Every
+ * one of them is also a `HellojsErrorCode`, so `request()` preserves the specific diagnosis
+ * instead of collapsing it to `EPROTO`.
  */
 export type TLSErrorCode =
-	| 'ETLS_ALERT' | 'ETLSALERT' | 'ETLS_HANDSHAKE' | 'ETLS_VERSION'
+	| 'ETLS_ALERT' | 'ETLS_HANDSHAKE' | 'ETLS_VERSION'
 	| 'ETLS_CERT_VERIFY' | 'ECERTPARSE' | 'ECERTVALIDATION' | 'ECERTVERIFY'
 	| 'ETLSPSK' | 'ETLS12' | 'EHRR'
 	| 'ECONNRESET' | 'ECONNREFUSED' | 'ETIMEDOUT'

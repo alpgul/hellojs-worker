@@ -630,7 +630,7 @@ class TLS extends EventEmitter {
 
 	// Single home for TLS alert handling. Used by both the cleartext outer-record path
 	// and the encrypted inner-record path so that a fatal alert in either always
-	// surfaces as an 'error' event with code='ETLSALERT' (was previously swallowed
+	// surfaces as an 'error' event with code='ETLS_ALERT' (was previously swallowed
 	// on the inner path, leaving callers to hang until their timeout).
 	_handleAlert(level: number, desc: number, where: string): void {
 		log.error(`[server] [alert ${where}] level=${level} desc=${desc}`)
@@ -638,7 +638,7 @@ class TLS extends EventEmitter {
 			const err: TLSError = new Error(
 				`TLS fatal alert from server (${where}): level=${level} description=${desc}`
 			)
-			err.code = 'ETLSALERT'
+			err.code = 'ETLS_ALERT'
 			err.alertLevel = level
 			err.alertDescription = desc
 			this.emit('error', err)
@@ -654,7 +654,7 @@ class TLS extends EventEmitter {
 				const err: TLSError = new Error(
 					`TLS warning alert during handshake (${where}): level=${level} description=${desc}`
 				)
-				err.code = 'ETLSALERT'
+				err.code = 'ETLS_ALERT'
 				err.alertLevel = level
 				err.alertDescription = desc
 				this.emit('error', err)
