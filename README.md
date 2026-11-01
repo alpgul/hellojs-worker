@@ -139,7 +139,7 @@ await request({
 | `qs` | object | — | querystring appended to url |
 | `jar` | `request.jar()` | — | cookie persistence across requests |
 | `gzip` | bool | — | accepted for request.js compatibility; **no-op**. Response bodies are auto-decompressed based on the response's `Content-Encoding` header. To receive raw compressed bytes, override `Accept-Encoding: identity` in `headers`. |
-| `followRedirect` | bool | `true` | up to `maxRedirects` |
+| `redirect` | `'follow' \| 'manual'` | `'follow'` | `'follow'` auto-follows 3xx up to `maxRedirects`; `'manual'` stops and returns the 3xx response (with its `Location` header). |
 | `maxRedirects` | number | `10` | |
 | `timeout` | ms | — | aborts request after N ms (legacy single-phase timer; applies to the response phase). Overrides the 60s response default. |
 | `timeouts` | object | — | per-phase timeouts: `{ connect, tlsHandshake, response }`, all in ms. Response phase defaults to **60_000ms** (60s) when neither `timeouts.response` nor `timeout` is set; pass `timeouts: { response: 0 }` to disable. Overrides `timeout` for the response phase. |

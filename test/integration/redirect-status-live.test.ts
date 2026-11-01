@@ -65,8 +65,8 @@ describe('live redirect codes', () => {
 		expect(res.status).toBe(200)
 	})
 
-	it('followRedirect:false stops at the first 3xx and surfaces Location', async () => {
-		const res = await request({ simple: false, verifyTLS: false, followRedirect: false, timeout: 20_000, url: `${BASE}/redirect/1`, resolveWithFullResponse: true })
+	it("redirect:'manual' stops at the first 3xx and surfaces Location", async () => {
+		const res = await request({ simple: false, verifyTLS: false, redirect: 'manual', timeout: 20_000, url: `${BASE}/redirect/1`, resolveWithFullResponse: true })
 		expect(res.status).toBe(302)
 		// httpbin's /redirect/1 points at /get; assert a Location came back, not its exact path.
 		expect(res.headers.location).toBeTruthy()

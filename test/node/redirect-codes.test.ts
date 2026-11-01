@@ -194,10 +194,21 @@ describe('3xx redirect codes — method/body semantics', () => {
 })
 
 describe('redirect controls', () => {
-	it('followRedirect:false stops at the 3xx and surfaces Location', async () => {
-		const res = await request(call({ url: `${base}/from/302`, followRedirect: false }))
+	it("redirect:'manual' stops at the 3xx and surfaces Location", async () => {
+		const res = await request(call({ url: `${base}/from/302`, redirect: 'manual' }))
 		expect(res.status).toBe(302)
 		expect(res.headers.location).toBe('/target')
+	})
+
+	it("redirect:'follow' explicitly follows the 3xx to the target", async () => {
+		const res = await request(call({ url: `${base}/from/302`, redirect: 'follow' }))
+		expect(res.status).toBe(200)
+		expect(lastSeen.method).toBe('GET')
+	})
+
+	it('default (no redirect option) follows', async () => {
+		const res = await request(call({ url: `${base}/from/302` }))
+		expect(res.status).toBe(200)
 	})
 
 	it('maxRedirects bounds a redirect chain', async () => {

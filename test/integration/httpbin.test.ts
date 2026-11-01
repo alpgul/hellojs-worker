@@ -76,8 +76,8 @@ it('follows redirects (3 hops)', async () => {
 	expect(r.status).toBe(200)
 })
 
-it('followRedirect:false stops at 302', async () => {
-	const r = await request({ simple: false, url: `${BASE}/redirect/1`, followRedirect: false, resolveWithFullResponse: true })
+it("redirect:'manual' stops at 302", async () => {
+	const r = await request({ simple: false, url: `${BASE}/redirect/1`, redirect: 'manual', resolveWithFullResponse: true })
 	expect(r.status).toBeGreaterThanOrEqual(300)
 	expect(r.status).toBeLessThan(400)
 	expect(r.headers.location).toBeTruthy()

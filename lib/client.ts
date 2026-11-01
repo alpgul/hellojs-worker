@@ -1,7 +1,7 @@
 // Public request.js-shape API.
 //
 //   import request from 'hellojs'
-//   request({ url, method, headers, body, json, qs, jar, gzip, followRedirect, timeout, proxy }, (err, res, body) => {})
+//   request({ url, method, headers, body, json, qs, jar, gzip, redirect, timeout, proxy }, (err, res, body) => {})
 //   request({...}).then(res => {})            // promise form
 //   request.get/post/put/del/patch/head/options
 //   request.defaults(opts)
@@ -64,7 +64,8 @@ export interface RequestOptions {
 	qs?: Record<string, string | number | (string | number)[]>
 	jar?: Jar | null
 	gzip?: boolean
-	followRedirect?: boolean
+	/** Redirect handling: 'follow' (default) auto-follows 3xx; 'manual' stops and returns the 3xx response. */
+	redirect?: 'follow' | 'manual'
 	maxRedirects?: number
 	timeout?: number
 	timeouts?: PerPhaseTimeouts | null
@@ -723,7 +724,7 @@ function handleResponse({ status, headers, body, raw, opts, resolve, reject }: H
 		err.response = res
 		return reject(err)
 	}
-	if (opts.followRedirect !== false && status >= 300 && status < 400 && headers.location && (opts.maxRedirects ?? 10) > 0) {
+	if (opts.redirect !== 'manual' && status >= 300 && status < 400 && headers.location && (opts.maxRedirects ?? 10) > 0) {
 		const location = Array.isArray(headers.location) ? headers.location[0] : headers.location
 		const currentUrl = new URL(opts.url ?? opts.uri ?? '')
 		const target = new URL(location, currentUrl)

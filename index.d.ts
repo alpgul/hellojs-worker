@@ -46,7 +46,8 @@ export interface RequestOptions {
 	qs?: Record<string, string | number | (string | number)[]>
 	jar?: CookieJar | null
 	gzip?: boolean
-	followRedirect?: boolean
+	/** Redirect handling: 'follow' (default) auto-follows 3xx; 'manual' stops and returns the 3xx response. */
+	redirect?: 'follow' | 'manual'
 	maxRedirects?: number
 	timeout?: number
 	timeouts?: PerPhaseTimeouts | null
