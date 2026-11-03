@@ -845,13 +845,51 @@ several ms. PSK resumption is now available as the opt-in lever for repeated con
 to the same host; 0-RTT is the only remaining handshake shortcut, and it trades replay
 safety for the round trip.
 
-**Not applicable here.** Connection pooling would remove DNS + TCP + TLS altogether
-(~120 ms → ~35–40 ms), but it contradicts the fresh-connection-per-request design.
+**Pooling, now available opt-in.** Pooling removes DNS + TCP + TLS altogether, and the
+fresh-connection-per-request prediction (~120 ms → ~35–40 ms) held once the bounded
+keep-alive pool shipped (`keepAlive: true` — see [Request options](#request-options)).
+Measured results, including through a proxy tunnel, are in the next section.
 
 Reproduce: `npm run bench:curl`. Knobs: `BENCH_URL`, `SAMPLES`, `CURL_BIN`,
 `BENCH_RESUME=1` (turns the hellojs h2 row into the resuming row).
 Caveats: these are connect/handshake-heavy fresh-connection numbers, not steady-state
 throughput; CDN anycast and PoP changes move both clients by several ms.
+
+### Keep-alive vs curl through a CONNECT-over-TLS proxy
+
+Measured with the sibling project's harness (`veepnApi/bench/veepn-vs-curl.ts`, run as
+`npm run bench` there) on Linux / Node 26: a live VeePN datacenter proxy pool, requested
+as `https://user:pass@addr:port` so the client takes a TLS hop to the proxy and runs
+CONNECT inside it, then a second TLS handshake to the target through the tunnel — the
+same dialect curl speaks with `--proxytunnel -x https://…`. Rounds are interleaved with
+the order flipped every round. The pool ran bounded, as configured by the caller:
+`maxPerOrigin: 1`, `idleMs: 15_000`.
+
+Target `https://example.com/` (fast CDN edge), 15 samples, one proxy:
+
+| Row | min | p50 | p95 |
+|---|---:|---:|---:|
+| curl (fresh process per request) | 571.7 | 721.5 | 7526.3 |
+| hellojs, fresh connection | 74.1 | 94.7 | 123.1 |
+| hellojs, `keepAlive: true` | 26.7 | 33.7 | 99.1 |
+
+hellojs beats curl by **−86.9% p50** even cold — per-sample curl carries process spawn,
+proxy-side TLS and CONNECT setup, and the proxy's own handshake variance (its p95 tail
+reached 7.5 s). Reusing the tunnel drops the client-side connection cost to near zero:
+**−64.4% p50** versus a fresh hellojs connection.
+
+The residual is not client work. Against `https://api.ipify.org/` (8 samples, same
+suite) the same three rows measured p50 1230.3 / 229.4 / 173.8 ms — the keep-alive
+saving shrinks to −24% because ~140 ms of that is the proxy's own path to the target
+(server TTFB), which no client option can remove. Realistic budget for a proxied
+request: **~30–40 ms floor + target TTFB** with a reused tunnel, plus ~60–100 ms for a
+fresh hellojs handshake or ~500–700 ms for a fresh curl process.
+
+Correctness was verified alongside the timings: through the same proxy, curl and hellojs
+both returned the identical proxy exit IP (`51.158.254.152`) from api.ipify.org while a
+direct request returned the local egress IP, and curl reported `http_version=2` inside
+the tunnel — so the two rows really are dialing the same endpoint over the same dialect,
+with no silent bypass on either side.
 
 ### Soak
 
