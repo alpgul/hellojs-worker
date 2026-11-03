@@ -8,8 +8,9 @@
 //   request.jar()
 //
 // Notes:
-// - Driven by lib/connect.ts and lib/tls/tls.ts for TLS+HTTP/2. Every request opens
-//   a fresh connection and closes it when the response completes.
+// - Driven by lib/connect.ts and lib/tls/tls.ts for TLS+HTTP/2. Requests open a fresh
+//   connection and close it when the response completes, unless `keepAlive: true` opts the
+//   caller into the bounded per-origin pool (lib/pool.ts).
 // - HTTP/1.1 fallback is hand-rolled (chunked, content-length).
 // - Auto-decompresses gzip / br / deflate / zstd response bodies based on the response's
 //   Content-Encoding header — no opt-in needed. To receive raw compressed bytes, override
@@ -25,6 +26,7 @@ import { Jar } from './cookies.ts'
 import { HellojsError, wrap as wrapError } from './errors.ts'
 import { buildH2Headers, buildH1Headers, mergeProfileHeaders } from './headers.ts'
 import { observability, nextRequestId } from './observability.ts'
+import * as pool from './pool.ts'
 import * as profileRegistry from './profiles/index.ts'
 import { summarizeConn } from './tls-summary.ts'
 
@@ -32,6 +34,7 @@ import type { Connection, PerPhaseTimeouts } from './connect.ts'
 import type { ErrorCode } from './errors.ts'
 import type { H2Stream } from './h2/session.ts'
 import type { HeaderMap } from './headers.ts'
+import type { PoolConfig } from './pool.ts'
 import type { Profile } from './profiles/types.ts'
 import type { Readable, Transform } from 'node:stream'
 
@@ -84,6 +87,15 @@ export interface RequestOptions {
 	resume?: boolean
 	/** Opt in to HTTP/3 (QUIC) for this request. Off unless explicitly `true`. */
 	h3?: boolean
+	/**
+	 * Reuse live HTTP/2 connections across requests (default `false`). Each pooled origin holds
+	 * at most one multiplexed socket; caps and idle lifetime come from `pool`. A request that
+	 * finds no pool capacity opens a one-shot connection and closes it after the response, so
+	 * enabling this can never hold more sockets than the caps allow.
+	 */
+	keepAlive?: boolean
+	/** Keep-alive pool caps: process-wide sockets, sockets per origin, idle socket lifetime. */
+	pool?: Partial<PoolConfig>
 	/** When true, resolve as soon as headers arrive and expose the body as a Node Readable. */
 	stream?: boolean
 	/** Profile name, or an inline profile object. */
@@ -247,20 +259,31 @@ async function performRequest(opts: RequestOptions): Promise<unknown> {
 	// TCP + TLS, regardless of any `alt-svc` response headers. An h3 request tries QUIC
 	// first and falls back to TCP when the handshake cannot complete, so an origin without
 	// a QUIC endpoint answers over TCP instead of sitting in QUIC Initial retransmits.
-	const conn: Connection = opts.h3 === true
-		? await connectPreferred({
-			host, port, profile, proxy: opts.proxy,
-			verifyTLS: opts.verifyTLS !== false,
-			resume: opts.resume === true,
-			timeouts: opts.timeouts,
-		})
-		: await connect({
-			host, port, profile, proxy: opts.proxy,
-			transport: 'tcp',
-			verifyTLS: opts.verifyTLS !== false,
-			resume: opts.resume === true,
-			timeouts: opts.timeouts,
-		})
+	// With `keepAlive: true` a live pooled h2 socket for this origin+profile is taken first;
+	// otherwise (and whenever the pool has no capacity) the request handshakes a fresh one,
+	// which is registered for reuse when it lands on a healthy h2 session.
+	const poolConfig: PoolConfig | null = opts.keepAlive === true && opts.h3 !== true
+		? { ...pool.DEFAULT_CONFIG, ...opts.pool }
+		: null
+	const poolKey = poolConfig ? pool.poolKey(host, port, opts.profile, opts.proxy, opts.verifyTLS !== false) : null
+	let conn: Connection | null = poolConfig && poolKey ? pool.take(poolKey) : null
+	if (!conn) {
+		conn = opts.h3 === true
+			? await connectPreferred({
+				host, port, profile, proxy: opts.proxy,
+				verifyTLS: opts.verifyTLS !== false,
+				resume: opts.resume === true,
+				timeouts: opts.timeouts,
+			})
+			: await connect({
+				host, port, profile, proxy: opts.proxy,
+				transport: 'tcp',
+				verifyTLS: opts.verifyTLS !== false,
+				resume: opts.resume === true,
+				timeouts: opts.timeouts,
+			})
+		if (poolConfig && poolKey) pool.register(conn, poolKey, poolConfig)
+	}
 
 	// Build headers
 	const userHeaders: HeaderMap = { ...opts.headers }
@@ -318,8 +341,9 @@ async function performRequest(opts: RequestOptions): Promise<unknown> {
 		return await performH1(conn, ctx)
 	} catch (e) {
 		// Synchronous setup failures (e.g. a header builder throwing) must not leak the socket.
-		// Individual transports close on their own completion paths, and close() is idempotent.
-		conn.close('error')
+		// A pooled socket survives with its slot returned so sibling streams are unaffected;
+		// one-shot sockets close. close() is idempotent.
+		if (!pool.release(conn)) conn.close('error')
 		throw e
 	}
 }
@@ -389,7 +413,7 @@ function performH2(conn: Connection, { method, url, host, body, userHeaders, opt
 				req.on('data', (c: Buffer) => pt.write(c))
 				req.on('end', () => {
 					pt.end()
-					conn.close('h2-stream-end')
+					if (!pool.release(conn)) conn.close('h2-stream-end')
 				})
 				req.on('error', (e: Error) => { conn.close('h2-stream-error'); pt.destroy(new HellojsError(e.message, 'EH2STREAM', e)) })
 
@@ -397,7 +421,7 @@ function performH2(conn: Connection, { method, url, host, body, userHeaders, opt
 				if (opts.simple !== false && status >= 400) {
 					const err = new HellojsError(`HTTP ${status}`, 'EHTTP')
 					err.response = res
-					req.close(0x8); conn.close('h2-http-error'); pt.destroy(err)
+					req.close(0x8); if (!pool.release(conn)) conn.close('h2-http-error'); pt.destroy(err)
 					return reject(err)
 				}
 				resolve(opts.resolveWithFullResponse ? res : userStream)
@@ -429,7 +453,7 @@ function performH2(conn: Connection, { method, url, host, body, userHeaders, opt
 		})
 		req.on('end', () => {
 			if (timer) clearTimeout(timer)
-			conn.close('h2-response-complete')
+			if (!pool.release(conn)) conn.close('h2-response-complete')
 			let raw: Buffer = Buffer.concat(chunks)
 			try { raw = decompressIfNeeded(raw, resHeaders?.['content-encoding'] as string) }
 			catch (e) { return reject(new HellojsError((e as Error).message, 'EDECOMPRESS', e)) }

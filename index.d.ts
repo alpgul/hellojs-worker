@@ -141,10 +141,25 @@ export interface RequestOptions {
 	resume?: boolean
 	/** Opt in to HTTP/3 (QUIC) for this request. Off unless explicitly `true`; QUIC is tried first with a bounded TCP fallback. */
 	h3?: boolean
+	/**
+	 * Reuse live HTTP/2 connections across requests (default `false`). Each pooled origin holds
+	 * at most one multiplexed socket; caps and idle lifetime come from `pool`. A request that
+	 * finds no pool capacity opens a one-shot connection and closes it after the response, so
+	 * enabling this can never hold more sockets than the caps allow.
+	 */
+	keepAlive?: boolean
+	/** Keep-alive pool caps: process-wide sockets (default 16), sockets per origin (default 1), idle socket lifetime in ms (default 15000). */
+	pool?: Partial<PoolConfig>
 	/** When true, resolve as soon as headers arrive and expose the body as a Node Readable. */
 	stream?: boolean
 	/** Profile name, or an inline profile object shaped like lib/profiles/types.ts `Profile`. */
 	profile?: ProfileName | Record<string, unknown>
+}
+
+export interface PoolConfig {
+	maxSockets: number
+	maxPerOrigin: number
+	idleMs: number
 }
 
 export interface Response<TBody = unknown> {

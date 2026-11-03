@@ -40,6 +40,9 @@ class Connection {
 	declare h3Client: H3Client | null
 	declare quicConn: QuicConnection | null
 	declare closed: boolean
+	// Set by the keep-alive pool when the connection is registered: fired once per close so the
+	// pool can evict the entry no matter which request path tore the socket down.
+	declare onClosed: ((reason: string) => void) | null
 
 	constructor(tls: TLS | null) {
 		this.tls = tls
@@ -49,14 +52,16 @@ class Connection {
 		this.h3Client = null
 		this.quicConn = null
 		this.closed = false
+		this.onClosed = null
 	}
 
-	close(_reason: string): void {
+	close(reason = 'closed'): void {
 		if (this.closed) return
 		this.closed = true
 		try { this.quicConn?.close() } catch {}
 		try { this.h2Session?.close?.() } catch {}
 		try { this.tls?.socket?.destroy() } catch {}
+		try { this.onClosed?.(reason) } catch {}
 	}
 }
 

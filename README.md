@@ -150,6 +150,8 @@ await request({
 | `profile` | string | `'chrome147-mac'` | which fingerprint profile to emit |
 | `h3` | bool | `false` | opt in to HTTP/3 for this request; QUIC is tried first and TCP+TLS is used when the QUIC handshake cannot complete |
 | `resume` | bool | `false` | offer a cached TLS 1.3 `NewSessionTicket` (`pre_shared_key`) on the next connection to the same host. Opt-in because the extra extension changes JA3/JA4 — see [TLS 1.3 session resumption](#tls-13-session-resumption). h3 is not resumed. |
+| `keepAlive` | bool | `false` | reuse live HTTP/2 connections across requests (multiplex streams onto one socket per origin, like Chrome). When the pool has no capacity the request opens a one-shot connection and closes it after the response, so enabling this can never hold more sockets than the `pool` caps allow. Not pooled: h1 and h3 connections. |
+| `pool` | object | `{maxSockets: 16, maxPerOrigin: 1, idleMs: 15_000}` | keep-alive pool caps: process-wide pooled sockets, sockets per origin, and idle-socket lifetime in ms. Sized for runtimes with a hard per-isolate socket budget (Cloudflare Workers allow single digits). |
 | `verifyTLS` | bool | `true` | Validate the server certificate chain (RFC 5280) + hostname (RFC 6125 SubjectAltName). On by default. Set `false` to skip validation (self-signed dev servers, intentional MITM proxies). Applies to both TLS 1.3 and TLS 1.2 paths. See [Certificate validation](#certificate-validation). |
 
 ### Headers and profiles
@@ -694,7 +696,9 @@ that entry is the one that declares ML-KEM.
 ## Performance
 
 > The numbers below were captured with an earlier connection-pooled build. The current
-> tree opens a fresh connection per request, so warm-serial and concurrent timings differ.
+> tree opens a fresh connection per request unless the caller opts into the bounded
+> keep-alive pool (`keepAlive: true` — see [Request options](#request-options)), so
+> warm-serial and concurrent timings differ.
 
 Benchmarked on macOS / Node 22.11 against a local HTTP/2 server (127.0.0.1, 1 KB
 fixed-size response). Each client runs as a fresh subprocess: 1 cold request
