@@ -34,7 +34,7 @@ async function smoke(): Promise<void> {
 		gzip: true,
 		timeout: 5000,
 		timeouts: { connect: 1000, tlsHandshake: 2000, response: 3000 },
-		proxy: 'http://127.0.0.1:8080',
+		proxy: 'https://user:pass@127.0.0.1:8443',
 		retry: { limit: 2, methods: ['GET'], statusCodes: [503], baseDelayMs: 100 },
 		profile: 'chrome147-mac',
 		verifyTLS: true,

@@ -143,7 +143,7 @@ await request({
 | `maxRedirects` | number | `10` | |
 | `timeout` | ms | — | aborts request after N ms (legacy single-phase timer; applies to the response phase). Overrides the 60s response default. |
 | `timeouts` | object | — | per-phase timeouts: `{ connect, tlsHandshake, response }`, all in ms. Response phase defaults to **60_000ms** (60s) when neither `timeouts.response` nor `timeout` is set; pass `timeouts: { response: 0 }` to disable. Overrides `timeout` for the response phase. |
-| `proxy` | URL string | — | HTTP CONNECT proxy: `http://user:pass@host:port` |
+| `proxy` | URL string | — | Proxy: `http://` (CONNECT), `https://` (CONNECT over TLS), `socks5://` — see Proxies |
 | `simple` | bool | `true` | reject 4xx/5xx as errors (set `false` to resolve them as responses) |
 | `resolveWithFullResponse` | bool | `false` | resolve to `{status, headers, body}` instead of just body |
 | `retry` | object | none | `{ limit, methods, statusCodes, baseDelayMs }` |
@@ -290,6 +290,30 @@ await request({ url: 'https://example.com', proxy: 'http://user:pass@proxy:8080'
 ```
 
 Basic auth credentials in the URL are auto-encoded into `Proxy-Authorization`.
+
+### HTTPS proxy (CONNECT over TLS)
+
+```js
+await request({ url: 'https://example.com', proxy: 'https://user:pass@proxy:443' })
+```
+
+`https://` (alias `wss://`) dials the proxy with our own TLS stack first, then sends
+the CONNECT request line and `Proxy-Authorization` inside that encrypted session. The
+tunnel that follows carries the normal profile-faked handshake to the destination, so
+**the fingerprint the destination sees is unchanged** — the extra hop is only ever
+visible to the proxy, and it is the proxy's own certificate that gets validated under
+`verifyTLS` and the process-wide trusted roots.
+
+| scheme | default port | transport to the proxy |
+| --- | --- | --- |
+| `http://`, `ws://` (or no scheme) | 80 | plaintext TCP + CONNECT |
+| `https://`, `wss://` | 443 | TLS session, then CONNECT inside it |
+| `socks5://`, `socks5h://` | 1080 | SOCKS5 handshake |
+
+Known limits: HTTP/3 is not supported through a proxy (`h3: true` falls back to
+TCP+CONNECT rather than silently bypassing it), a `407` answer is an `EPROXY` error
+instead of a challenge/response round, and a tunneled session pays for two TLS
+keypairs — one per hop.
 
 ### SOCKS5 (RFC 1928 + RFC 1929)
 

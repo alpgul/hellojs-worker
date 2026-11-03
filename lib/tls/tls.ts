@@ -133,11 +133,33 @@ interface HrrContext {
 	cookieExt: Buffer | null
 }
 
+// What a TLS session drives its record layer over. Normally a TCP socket; for an HTTPS proxy it is
+// the plaintext Duplex of an outer TLS session, so the inner ClientHello travels inside the proxy's
+// app-data records. `setNoDelay` and `connecting` are TCP-only affordances, hence optional.
+interface ByteTransport {
+	write(chunk: Uint8Array | string, cb?: (err?: Error | null) => void): boolean
+	destroy(error?: Error): unknown
+	setNoDelay?(noDelay?: boolean): unknown
+	connecting?: boolean
+	remoteAddress?: string
+	remotePort?: number
+	on(event: string, listener: (...args: never[]) => void): unknown
+	once(event: string, listener: (...args: never[]) => void): unknown
+	removeListener(event: string, listener: (...args: never[]) => void): unknown
+}
+
 interface TLSOptions {
 	// Internal test affordance, see the TLS constructor.
 	_forceHRRGroup?: number | null
 	verifyTLS?: boolean
 	profile?: string | Profile
+	// Override the profile's ALPN advertisement. Used by the proxy hop of an HTTPS proxy, which
+	// must speak http/1.1 to run a CONNECT exchange (h2 CONNECT is not implemented).
+	alpn?: string[]
+	// Internal: this session is the OUTER hop of a CONNECT-over-TLS proxy tunnel. Its
+	// ClientHello is never seen by the destination, so it must not pollute the reported
+	// fingerprint, and its session tickets must not enter the resumption cache.
+	proxyTunnel?: boolean
 	// TLS 1.3 PSK resumption: offer a cached NewSessionTicket's pre_shared_key on the next
 	// connection to the same host. Off by default — a resumed ClientHello carries an extra
 	// extension (0x0029) and therefore a different JA3/JA4 than a fresh one.
@@ -198,6 +220,15 @@ class TLSTransport extends Duplex {
 		// no-op; we push from TLS when data arrives
 	}
 
+	// Peer-address readers, so a session running over this Duplex — the inner half of an
+	// HTTPS proxy tunnel — still reports the TCP peer it is really talking to (the proxy).
+	get remoteAddress(): string | undefined {
+		return this.tls.socket?.remoteAddress
+	}
+	get remotePort(): number | undefined {
+		return this.tls.socket?.remotePort
+	}
+
 	// Allow TLS/ALERT to close the readable side cleanly
 	endReadable(): void {
 		if (!this._ended) {
@@ -225,8 +256,19 @@ class TLS extends EventEmitter {
 	declare _forceHRRGroup: number | null
 	declare verifyTLS: boolean
 	declare profile: Profile
+	// ALPN override for this session's ClientHello (the proxy hop advertises http/1.1 only).
+	declare _alpnOffer: string[] | null
+	// True for the outer session of a CONNECT-over-TLS proxy tunnel.
+	declare proxyTunnel: boolean
+	// The outer session this one runs over, when an HTTPS proxy is in use. Teardown reaches it
+	// through `socket` (destroying the inner session destroys the proxy Duplex, which destroys the
+	// proxy's TCP socket); the reference is kept so callers can inspect the hop.
+	declare _proxyTls: TLS | null
+	// Set once the byte transport is usable — TCP established, SOCKS5 established, or CONNECT
+	// tunnel open. Drives the `transport-ready` event so callers can stop their connect clock.
+	declare transportEstablished: boolean
 
-	declare socket: net.Socket | null
+	declare socket: ByteTransport | null
 	declare nextStreamId: number
 	declare streams: Map<number, unknown>
 
@@ -301,6 +343,10 @@ class TLS extends EventEmitter {
 		// group in supported_groups and sends no real key_share, deterministically forcing
 		// any TLS 1.3 server to respond with HRR. Not part of the public API.
 		this._forceHRRGroup = opts._forceHRRGroup || null
+		this._alpnOffer = Array.isArray(opts.alpn) && opts.alpn.length ? opts.alpn : null
+		this.proxyTunnel = opts.proxyTunnel === true
+		this._proxyTls = null
+		this.transportEstablished = false
 
 		// Cert chain validation (RFC 5280 + RFC 6125). DEFAULT ON: the chain must terminate
 		// in a Node-bundled trusted root, the leaf must have a SubjectAltName matching the
@@ -409,96 +455,27 @@ class TLS extends EventEmitter {
 					.then((sock) => {
 						this.socket = sock
 						this._wireSocketListeners()
+						this._markTransportReady()
 						this.startClientHello()
 					})
 					.catch((err) => this.emit('error', err))
 				return
 			}
-			const proxyOptions: net.TcpNetConnectOpts = {
-				host: proxyUrl.hostname,
-				port: Number(proxyUrl.port) || 80
+			// https:// and wss:// proxies take a TLS hop to the proxy itself first, then run the
+			// CONNECT exchange inside it. Any other scheme (http://, ws://, scheme-less) speaks
+			// CONNECT over cleartext, and defaults to port 80.
+			const secureHop = proxyUrl.protocol === 'https:' || proxyUrl.protocol === 'wss:'
+			const proxyPort = Number(proxyUrl.port) || (secureHop ? 443 : 80)
+			if (secureHop) {
+				this._connectViaTlsProxy(proxyUrl, proxyPort)
+				return
 			}
+
+			const proxyOptions: net.TcpNetConnectOpts = { host: proxyUrl.hostname, port: proxyPort }
 			if (dnsCacheAvailable()) proxyOptions.lookup = cachedLookup
-
-			// CONNECT-phase timeout. Without this, a proxy that accepts TCP but never returns
-			// the CONNECT response (overloaded, blackholed, malicious) leaves createTLS in
-			// lib/connect.ts waiting on tls.on('error') forever.
-			const CONNECT_TIMEOUT_MS = 10_000
-			const MAX_PROXY_RESP_BYTES = 65536
-			let proxyDone = false
-			const connectTimer = setTimeout(() => {
-				if (proxyDone) return
-				const err: TLSError = new Error(`Proxy CONNECT timed out after ${CONNECT_TIMEOUT_MS}ms`)
-				err.code = 'ETIMEDOUT'
-				proxyFail(err)
-			}, CONNECT_TIMEOUT_MS)
-			connectTimer.unref?.()
-			const proxyFail = (err: TLSError): void => {
-				if (proxyDone) return
-				proxyDone = true
-				clearTimeout(connectTimer)
-				try {
-					this.socket?.destroy()
-				} catch {}
-				// Propagate to TLS listeners — lib/connect.ts's createTLS is awaiting this.
-				// Missing emit was the silent-hang bug: socket errors were logged, never surfaced.
-				this.emit('error', err)
-			}
-
-			this.socket = net.createConnection(proxyOptions, () => {
-				log.notify(`[socket] connected to proxy ${proxyOptions.host}:${proxyOptions.port}`)
-
-				let connectHeaders = `CONNECT ${this.host}:${this.port} HTTP/1.1\r\nHost: ${this.host}:${this.port}\r\n`
-
-				if (proxyUrl.username && proxyUrl.password) {
-					const auth = 'Basic ' + Buffer.from(`${proxyUrl.username}:${proxyUrl.password}`).toString('base64')
-					connectHeaders += `Proxy-Authorization: ${auth}\r\n`
-				}
-
-				connectHeaders += '\r\n'
-
-				this.socket!.write(connectHeaders)
-			})
-
-			let proxyBuf = Buffer.alloc(0)
-			const onProxyData = (data: Buffer): void => {
-				proxyBuf = Buffer.concat([proxyBuf, data])
-				if (proxyBuf.length > MAX_PROXY_RESP_BYTES) {
-					return proxyFail(new Error('Proxy CONNECT response header too large'))
-				}
-				const sep = proxyBuf.indexOf('\r\n\r\n')
-				if (sep === -1) return // wait for more data
-				const headerStr = proxyBuf.slice(0, sep).toString('utf8')
-				const leftover = proxyBuf.slice(sep + 4) // any TLS bytes the proxy piggybacked
-				const [statusLine] = headerStr.split('\r\n')
-				// RFC 7230: HTTP/1.x SP status-code SP reason-phrase. Accept any 2xx. Old code
-				// did .includes('200') which would match a "200" substring anywhere in the line.
-				if (/^HTTP\/1\.[01] 2\d\d\b/.test(statusLine)) {
-					log.notify('[proxy] CONNECT tunnel established')
-					proxyDone = true
-					clearTimeout(connectTimer)
-					this.socket!.removeListener('data', onProxyData)
-					this.socket!.removeListener('error', onProxyError)
-					this._wireSocketListeners()
-					if (leftover.length) this.onData(leftover)
-					this.startClientHello()
-				} else {
-					proxyFail(new Error(`Proxy connection failed: ${statusLine.trim()}`))
-				}
-			}
-
-			const onProxyError = (err: TLSError) => proxyFail(err)
-
-			this.socket!.on('data', onProxyData)
-			this.socket!.on('error', onProxyError)
-			this.socket!.on('close', () => {
-				log.notify('[socket] Connection closed.')
-				// If the socket closed before CONNECT completed, surface it as a proxy failure
-				// so the awaiting acquire rejects and its per-host slot gets released.
-				if (!proxyDone) proxyFail(new Error('proxy socket closed before CONNECT completed'))
-				if (this.h2Transport) this.h2Transport.endReadable()
-				if (this.h2Session && !this.h2Session.closed) this.h2Session.close()
-			})
+			const sock = net.createConnection(proxyOptions)
+			this.socket = sock
+			this._openTunnel(sock, proxyUrl, proxyPort, false)
 		} else {
 			// Standard TCP connect. The cached lookup keeps repeated connections to one host from
 			// resolving again; it falls back to the runtime resolver on a miss.
@@ -522,6 +499,7 @@ class TLS extends EventEmitter {
 				clearTimeout(timer)
 				sock.removeListener('error', onError)
 				this._wireSocketListeners()
+				this._markTransportReady()
 				this.startClientHello()
 			})
 			sock.once('error', onError)
@@ -539,7 +517,7 @@ class TLS extends EventEmitter {
 		// The Finished record and the first HTTP/2 frames leave as separate small writes. With
 		// Nagle on, the second write waits for the peer's delayed ACK (~40ms on Linux before the
 		// request is even on the wire). Browsers, curl and Node's http2 client all disable it.
-		this.socket!.setNoDelay(true)
+		this.socket!.setNoDelay?.(true)
 		this.socket!.on('data', (data) => this.onData(data))
 		this.socket!.on('error', (err) => {
 			if (this.h2Transport) {
@@ -550,7 +528,13 @@ class TLS extends EventEmitter {
 			this.emit('error', err)
 		})
 		this.socket!.on('close', () => {
-			if (this.h2Transport) this.h2Transport.endReadable()
+			if (this.h2Transport) {
+				// A proxy hop that dies must reach the session tunneled through it as a close, not a
+				// clean EOF: endReadable() only pushes null, and an inner handshake mid-flight would
+				// sit on that forever. The cleartext path gets this for free from its TCP socket.
+				if (this.proxyTunnel) this.h2Transport.destroy()
+				else this.h2Transport.endReadable()
+			}
 			if (this.h2Session && !this.h2Session.closed) this.h2Session.close()
 			// Pre-handshake close without a preceding error is still a failure — the peer
 			// hung up before the TLS handshake completed. Surface it so connect()
@@ -562,6 +546,192 @@ class TLS extends EventEmitter {
 				this.emit('error', err)
 			}
 		})
+	}
+
+	// Open an HTTP CONNECT tunnel for this session over `sock`. `connected` false means the
+	// transport still has to come up (wait for TCP 'connect' before writing the request); true
+	// means it is already usable — the plaintext Duplex of an established proxy TLS session — and
+	// the request goes out immediately. Everything else is common to both proxy flavours: the
+	// CONNECT-phase timeout, the response header cap, 2xx acceptance and splicing the TLS bytes a
+	// proxy piggybacks onto its CONNECT response.
+	_openTunnel(sock: ByteTransport, proxyUrl: URL, proxyPort: number, connected: boolean): void {
+		// CONNECT-phase timeout. Without this, a proxy that accepts the connection but never
+		// returns the CONNECT response (overloaded, blackholed, malicious) leaves createTLS in
+		// lib/connect.ts waiting on tls.on('error') forever.
+		const CONNECT_TIMEOUT_MS = 10_000
+		const MAX_PROXY_RESP_BYTES = 65536
+		let proxyDone = false
+		const connectTimer = setTimeout(() => {
+			if (proxyDone) return
+			const err: TLSError = new Error(`Proxy CONNECT timed out after ${CONNECT_TIMEOUT_MS}ms`)
+			err.code = 'ETIMEDOUT'
+			proxyFail(err)
+		}, CONNECT_TIMEOUT_MS)
+		connectTimer.unref?.()
+		const proxyFail = (err: TLSError): void => {
+			if (proxyDone) return
+			proxyDone = true
+			clearTimeout(connectTimer)
+			try {
+				this.socket?.destroy()
+			} catch {}
+			// Propagate to TLS listeners — lib/connect.ts's createTLS is awaiting this.
+			// Missing emit was the silent-hang bug: socket errors were logged, never surfaced.
+			this.emit('error', err)
+		}
+
+		const sendConnectRequest = (): void => {
+			log.notify(`[socket] connected to proxy ${proxyUrl.hostname}:${proxyPort}`)
+
+			let connectHeaders = `CONNECT ${this.host}:${this.port} HTTP/1.1\r\nHost: ${this.host}:${this.port}\r\n`
+
+			if (proxyUrl.username && proxyUrl.password) {
+				const auth = 'Basic ' + Buffer.from(`${proxyUrl.username}:${proxyUrl.password}`).toString('base64')
+				connectHeaders += `Proxy-Authorization: ${auth}\r\n`
+			}
+
+			connectHeaders += '\r\n'
+
+			sock.write(connectHeaders)
+		}
+
+		let proxyBuf = Buffer.alloc(0)
+		const onProxyData = (data: Buffer): void => {
+			proxyBuf = Buffer.concat([proxyBuf, data])
+			if (proxyBuf.length > MAX_PROXY_RESP_BYTES) {
+				const err: TLSError = new Error('Proxy CONNECT response header too large')
+				err.code = 'EPROXY'
+				return proxyFail(err)
+			}
+			const sep = proxyBuf.indexOf('\r\n\r\n')
+			if (sep === -1) return // wait for more data
+			const headerStr = proxyBuf.slice(0, sep).toString('utf8')
+			const leftover = proxyBuf.slice(sep + 4) // any TLS bytes the proxy piggybacked
+			const [statusLine] = headerStr.split('\r\n')
+			// RFC 7230: HTTP/1.x SP status-code SP reason-phrase. Accept any 2xx. Old code
+			// did .includes('200') which would match a "200" substring anywhere in the line.
+			if (/^HTTP\/1\.[01] 2\d\d\b/.test(statusLine)) {
+				log.notify('[proxy] CONNECT tunnel established')
+				proxyDone = true
+				clearTimeout(connectTimer)
+				sock.removeListener('data', onProxyData)
+				sock.removeListener('error', onProxyError)
+				// The tunnel outlives this handler: `_wireSocketListeners` owns close from here on,
+				// and on an HTTPS proxy `sock` is the shared transport of the proxy session.
+				sock.removeListener('close', onProxyClose)
+				this._wireSocketListeners()
+				this._markTransportReady()
+				if (leftover.length) this.onData(leftover)
+				this.startClientHello()
+			} else {
+				// A 407 is reported like any other refusal: credentials come from the proxy URL
+				// only, there is no Proxy-Authenticate challenge round.
+				const err: TLSError = new Error(`Proxy connection failed: ${statusLine.trim()}`)
+				err.code = 'EPROXY'
+				proxyFail(err)
+			}
+		}
+
+		const onProxyError = (err: TLSError): void => {
+			// A socket failure before the tunnel is open is the proxy's fault, whatever the
+			// transport reports underneath.
+			if (!err.code) err.code = 'EPROXY'
+			proxyFail(err)
+		}
+
+		const onProxyClose = (): void => {
+			log.notify('[socket] Connection closed.')
+			// If the socket closed before CONNECT completed, surface it as a proxy failure
+			// so the awaiting acquire rejects and its per-host slot gets released.
+			if (!proxyDone) {
+				const err: TLSError = new Error('proxy socket closed before CONNECT completed')
+				err.code = 'EPROXY'
+				proxyFail(err)
+			}
+			if (this.h2Transport) this.h2Transport.endReadable()
+			if (this.h2Session && !this.h2Session.closed) this.h2Session.close()
+		}
+
+		sock.on('data', onProxyData)
+		sock.on('error', onProxyError)
+		sock.on('close', onProxyClose)
+
+		if (connected) sendConnectRequest()
+		else sock.once('connect', sendConnectRequest)
+	}
+
+	// CONNECT-over-TLS: run a second TLS session to the proxy itself, send the CONNECT exchange
+	// over that session's plaintext Duplex, then handshake to the destination inside the tunnel.
+	// Only the proxy ever sees this outer ClientHello, so it is built with `proxyTunnel` (no
+	// fingerprint reporting, no resumption caching) and advertises http/1.1 — h2 CONNECT
+	// (RFC 9114) is not implemented. The destination's own handshake is untouched, so JA3/JA4 for
+	// a proxied request match the unproxied ones byte for byte.
+	_connectViaTlsProxy(proxyUrl: URL, proxyPort: number): void {
+		const outer = new TLS(proxyUrl.hostname, proxyPort, null, {
+			verifyTLS: this.verifyTLS,
+			profile: this.profile,
+			alpn: ['http/1.1'],
+			proxyTunnel: true
+		})
+		this._proxyTls = outer
+
+		const PROXY_HOP_TIMEOUT_MS = 10_000
+		let failed = false
+
+		const proxyFail = (cause: unknown, what: string): void => {
+			// One report per session: the outer socket error and its close handler both land here.
+			if (failed) return
+			failed = true
+			clearTimeout(hopTimer)
+			try {
+				outer.socket?.destroy()
+			} catch {}
+			const err: TLSError = new Error(`${what}: ${errMsg(cause)}`)
+			err.code = 'EPROXY'
+			this.emit('error', err)
+		}
+
+		// A proxy that accepts TCP and then never finishes the handshake would otherwise be bounded
+		// only by the caller's response deadline, so the hop gets the same hard budget the cleartext
+		// path gives its CONNECT exchange.
+		const hopTimer = setTimeout(() => proxyFail(new Error(`timed out after ${PROXY_HOP_TIMEOUT_MS}ms`), 'Proxy TLS handshake'), PROXY_HOP_TIMEOUT_MS)
+		hopTimer.unref?.()
+
+		// Before the tunnel opens, the outer handshake failing IS the proxy failure. Afterwards
+		// the Duplex surfaces error/close to this session itself, so don't report it twice.
+		outer.on('error', (err) => {
+			if (!outer.handshakeComplete) proxyFail(err, 'Proxy TLS handshake failed')
+		})
+
+		const onSecure = (): void => {
+			if (failed) return
+			if (outer.alpn === 'h2') {
+				try {
+					outer.socket?.destroy()
+				} catch {}
+				return proxyFail(new Error('proxy selected h2 over ALPN; CONNECT needs http/1.1'), 'Proxy TLS')
+			}
+			this.socket = outer.h2Transport
+			this._openTunnel(this.socket!, proxyUrl, proxyPort, true)
+		}
+		outer.once('ready', onSecure)
+		outer.once('ready-http1', onSecure)
+
+		// The hop budget covers TCP + outer handshake + CONNECT; the tunnel being usable ends it.
+		this.once('transport-ready', () => clearTimeout(hopTimer))
+		this.once('error', () => clearTimeout(hopTimer))
+
+		outer.connect().catch((err) => proxyFail(err, 'Proxy TLS handshake failed'))
+	}
+
+	// The byte transport is usable and CONNECT (where applicable) is open. lib/connect.ts stops its
+	// connect clock here: `net.Socket.connecting` cannot express "established" for a session running
+	// over a Duplex, so this event is the single source of truth for all four paths (direct TCP,
+	// SOCKS5, cleartext CONNECT, CONNECT-over-TLS).
+	_markTransportReady(): void {
+		if (this.transportEstablished) return
+		this.transportEstablished = true
+		this.emit('transport-ready')
 	}
 
 	_parseRecords() {
@@ -945,6 +1115,9 @@ class TLS extends EventEmitter {
 	// the ticket for the next connection to this host. Malformed tickets are ignored — they
 	// only cost a future full handshake.
 	_handleNewSessionTicket(body: Buffer): void {
+		// A proxy's ticket is useless for resuming to the destination and would key itself into
+		// the host cache under the proxy's name, so the tunnel session never caches one.
+		if (this.proxyTunnel) return
 		if (!this.resume || !this.resumptionMasterSecret || !this.cipher || !this.server) return
 		try {
 			let p = 0
@@ -1608,15 +1781,17 @@ class TLS extends EventEmitter {
 
 		// Builders keyed by IANA extension ID. Each is a thunk so we only materialize the
 		// extensions a profile actually lists. Profiles that don't set extensionOrder fall
-		// back to the legacy "every Chrome 147 extension" set defined below. key_share is the
-		// only builder that can legitimately return null (when no key_share was constructed).
+		// back to the legacy "every Chrome 147 extension" set defined below. key_share and
+		// server_name are the builders that can legitimately return null (no key_share
+		// constructed; an IP-literal proxy host, which RFC 6066 forbids in SNI).
+		const skipSni = this.proxyTunnel && net.isIP(this.host) !== 0
 		const EXT_BUILDERS: Record<number, () => Buffer | null> = {
-			0: () => CreateSNIExtension(this.host), // server_name
+			0: () => (skipSni ? null : CreateSNIExtension(this.host)), // server_name
 			5: () => CreateStatusRequestExtension(ptls.statusRequest), // status_request
 			10: () => CreateSupportedGroupsExtension(grease.c, ptls.supportedGroups, { useGrease }), // supported_groups
 			11: () => CreateECPointFormatsExtension(), // ec_point_formats
 			13: () => CreateSignatureAlgorithmsExtension(ptls.signatureAlgorithms), // signature_algorithms
-			16: () => CreateALPNExtension(ptls.alpn || ['h2', 'http/1.1']), // alpn
+			16: () => CreateALPNExtension(this._alpnOffer || ptls.alpn || ['h2', 'http/1.1']), // alpn
 			17: () => CreateStatusRequestV2Extension(ptls.statusRequestV2), // status_request_v2 (RFC 6961)
 			18: () => CreateSignedCertificateTimestampExtension(), // signed_certificate_timestamp
 			21: () => CreatePaddingExtension(ptls.paddingLength ?? 0), // padding
@@ -1697,6 +1872,9 @@ class TLS extends EventEmitter {
 		// and EXT_BUILDERS[51] would return null at runtime (the ! is TypeScript-only), which
 		// makes Buffer.concat throw. Drop it here so only buildable extensions reach the wire.
 		if (keyShareExtension == null) middleIds = middleIds.filter((id) => id !== 51)
+		// Same treatment for a suppressed server_name, so the "builder returned no body" warning
+		// below never fires for the IP-literal proxy hop.
+		if (skipSni) middleIds = middleIds.filter((id) => id !== 0)
 
 		const namedExts: Record<string, Buffer> = {}
 		for (const id of middleIds) {
@@ -1870,8 +2048,9 @@ class TLS extends EventEmitter {
 		// Observability: record the JA3 + JA4 of the CH we're putting on the wire so callers
 		// can diff against profile.expected.* without needing tls.peet.ws. parseClientHello /
 		// ja3 / ja4 are pure functions of the CH bytes — no I/O. We compute on CH1 (no hrrCtx)
-		// because hashes are conventionally taken from the first hello.
-		if (!hrrCtx) {
+		// because hashes are conventionally taken from the first hello. The outer hop of an
+		// HTTPS proxy is skipped: the reported fingerprint must stay the one the destination sees.
+		if (!hrrCtx && !this.proxyTunnel) {
 			try {
 				const parsed = parseClientHello(record)
 				const j3 = ja3(parsed)

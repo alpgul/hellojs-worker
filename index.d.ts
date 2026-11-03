@@ -119,6 +119,13 @@ export interface RequestOptions {
 	maxRedirects?: number
 	timeout?: number
 	timeouts?: PerPhaseTimeouts | null
+	/**
+	 * Proxy URL. `http://`/`ws://` sends CONNECT over plaintext TCP (default port 80),
+	 * `https://`/`wss://` first opens a TLS session to the proxy and sends CONNECT inside
+	 * it (default port 443), `socks5://`/`socks5h://` does the SOCKS5 handshake (default
+	 * port 1080). Credentials in the URL become `Proxy-Authorization: Basic`; a failed
+	 * CONNECT or an untrusted proxy certificate rejects with `EPROXY`.
+	 */
 	proxy?: string | null
 	resolveWithFullResponse?: boolean
 	simple?: boolean
@@ -307,6 +314,12 @@ export class TLS extends EventEmitter {
 	alpn: AlpnProtocol | null
 	h2Transport: Duplex | null
 	h2Session: unknown | null
+	/** JA3/JA4 of the ClientHello this session put on the wire; unset on a proxy hop. */
+	actualFingerprint?: unknown
+	/** True while the session is the outer hop of a CONNECT-over-TLS tunnel. */
+	proxyTunnel: boolean
+	/** True once bytes can flow: TCP connected, SOCKS5 opened, or the CONNECT tunnel is up. */
+	transportEstablished: boolean
 	server: {
 		legacyVersion: number
 		sessionId: Buffer
@@ -318,5 +331,7 @@ export class TLS extends EventEmitter {
 
 	on(event: 'ready', listener: () => void): this
 	on(event: 'ready-http1', listener: () => void): this
+	on(event: 'transport-ready', listener: () => void): this
+	on(event: 'fingerprint', listener: (fp: { ja3: string; ja3_str: string; ja4: string }) => void): this
 	on(event: 'error', listener: (err: TLSError) => void): this
 }

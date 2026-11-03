@@ -150,14 +150,18 @@ function createTLS(
 		const timeouts = opts.timeouts || {}
 		if (timeouts.connect) {
 			connectTimer = setTimeout(() => {
-				if (!tls.socket || !tls.socket.connecting === false) {
+				// `transportEstablished` covers every establishment path — plain TCP, SOCKS5,
+				// cleartext CONNECT and CONNECT-over-TLS. The old `socket.connecting` probe only
+				// exists on a TCP socket, and a session tunneled through an HTTPS proxy has the
+				// proxy session's Duplex as its socket.
+				if (!tls.transportEstablished) {
 					fail(new HellojsError(`TCP connect timed out after ${timeouts.connect}ms`, 'ETIMEDOUT'))
 				}
 			}, timeouts.connect)
 			connectTimer.unref?.()
-			// Once TCP is connected, cancel the connect timer.
-			const onConnect = () => { if (connectTimer) { clearTimeout(connectTimer); connectTimer = null } }
-			queueMicrotask(() => tls.socket?.once?.('connect', onConnect))
+			// Once the transport is established, cancel the connect timer.
+			const onTransportReady = () => { if (connectTimer) { clearTimeout(connectTimer); connectTimer = null } }
+			tls.once('transport-ready', onTransportReady)
 		}
 		if (timeouts.tlsHandshake) {
 			// Start the TLS-handshake stopwatch ONLY when ClientHello actually goes on the
@@ -175,7 +179,15 @@ function createTLS(
 }
 
 function connect({ host, port = 443, profile, proxy, transport = 'tcp', verifyTLS = true, resume = false, timeouts = null }: ConnectOptions): Promise<Connection> {
-	if (transport === 'quic') return createH3(host, port, timeouts)
+	if (transport === 'quic') {
+		// QUIC/HTTP/3 has no proxy path. Rejecting instead of silently dropping `proxy` is what
+		// makes connectPreferred fall through to TCP, so an `h3: true` request through a proxy
+		// still goes through the proxy rather than straight to the origin.
+		if (proxy) {
+			return Promise.reject(new HellojsError('HTTP/3 is not supported through a proxy', 'EBADOPTS'))
+		}
+		return createH3(host, port, timeouts)
+	}
 	return createTLS(host, port, profile, proxy, { verifyTLS, resume, timeouts })
 }
 
