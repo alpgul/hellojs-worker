@@ -298,6 +298,17 @@ it('Proxy-Authorization is sent from URL credentials and omitted without them', 
 	await request(full({ url: `https://127.0.0.1:${originPort}/`, proxy: `https://localhost:${proxy.port}` }))
 	expect(proxy.connectRequest).not.toMatch(/Proxy-Authorization/i)
 	await proxy.close()
+
+	// Percent-encoded userinfo is decoded before it becomes Basic credentials.
+	proxy = await startTlsProxy(key, cert)
+	const encoded = 'Basic ' + Buffer.from('a<b:c/d').toString('base64')
+	await request(full({
+		url: `https://127.0.0.1:${originPort}/`,
+		proxy: `https://a%3Cb:c%2Fd@localhost:${proxy.port}`,
+	}))
+	expect(proxy.connectRequest).toContain(`Proxy-Authorization: ${encoded}`)
+	await proxy.close()
+
 	await origin.close()
 	proxy = null
 }, 20000)

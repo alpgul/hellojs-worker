@@ -247,6 +247,16 @@ class TLSTransport extends Duplex {
 	}
 }
 
+// WHATWG URL keeps proxy userinfo percent-encoded; the credentials on the wire are the decoded
+// form. A stray '%' that is not a valid escape keeps the literal value rather than throwing.
+function decodeUserinfo(value: string): string {
+	try {
+		return decodeURIComponent(value)
+	} catch {
+		return value
+	}
+}
+
 class TLS extends EventEmitter {
 	// Fields are declared, never initialised here: `declare` emits nothing, so the object keeps
 	// exactly the shape the constructor and the handshake parsers build at runtime.
@@ -446,8 +456,8 @@ class TLS extends EventEmitter {
 				socks5Connect({
 					proxyHost: proxyUrl.hostname,
 					proxyPort: parseInt(proxyUrl.port || '1080', 10),
-					username: proxyUrl.username ? decodeURIComponent(proxyUrl.username) : null,
-					password: proxyUrl.password ? decodeURIComponent(proxyUrl.password) : null,
+					username: proxyUrl.username ? decodeUserinfo(proxyUrl.username) : null,
+					password: proxyUrl.password ? decodeUserinfo(proxyUrl.password) : null,
 					destHost: this.host,
 					destPort: this.port,
 					connectTimeoutMs: 10_000
@@ -586,7 +596,7 @@ class TLS extends EventEmitter {
 			let connectHeaders = `CONNECT ${this.host}:${this.port} HTTP/1.1\r\nHost: ${this.host}:${this.port}\r\n`
 
 			if (proxyUrl.username && proxyUrl.password) {
-				const auth = 'Basic ' + Buffer.from(`${proxyUrl.username}:${proxyUrl.password}`).toString('base64')
+				const auth = 'Basic ' + Buffer.from(`${decodeUserinfo(proxyUrl.username)}:${decodeUserinfo(proxyUrl.password)}`).toString('base64')
 				connectHeaders += `Proxy-Authorization: ${auth}\r\n`
 			}
 
