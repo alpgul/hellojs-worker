@@ -164,6 +164,12 @@ interface TLSOptions {
 	// connection to the same host. Off by default — a resumed ClientHello carries an extra
 	// extension (0x0029) and therefore a different JA3/JA4 than a fresh one.
 	resume?: boolean
+	// CONNECT tunnel auth for HTTP/HTTPS proxies. When set, used as the full Proxy-Authorization
+	// header value (e.g. "Bearer <jwt>") and overrides any Basic credentials in the proxy URL.
+	proxyAuthorization?: string | null
+	// Extra headers sent on the CONNECT request (hop-by-hop to the proxy). Proxy-Authorization
+	// here is a fallback when proxyAuthorization/URL credentials are absent.
+	proxyHeaders?: Record<string, string> | null
 }
 
 // A duplex that presents *plaintext HTTP/2 bytes* to Node's http2 session.
@@ -274,6 +280,9 @@ class TLS extends EventEmitter {
 	// through `socket` (destroying the inner session destroys the proxy Duplex, which destroys the
 	// proxy's TCP socket); the reference is kept so callers can inspect the hop.
 	declare _proxyTls: TLS | null
+	// CONNECT auth/headers, applied when this session opens an HTTP or HTTPS proxy tunnel.
+	declare proxyAuthorization: string | null
+	declare proxyHeaders: Record<string, string> | null
 	// Set once the byte transport is usable — TCP established, SOCKS5 established, or CONNECT
 	// tunnel open. Drives the `transport-ready` event so callers can stop their connect clock.
 	declare transportEstablished: boolean
@@ -356,6 +365,8 @@ class TLS extends EventEmitter {
 		this._alpnOffer = Array.isArray(opts.alpn) && opts.alpn.length ? opts.alpn : null
 		this.proxyTunnel = opts.proxyTunnel === true
 		this._proxyTls = null
+		this.proxyAuthorization = opts.proxyAuthorization ?? null
+		this.proxyHeaders = opts.proxyHeaders ?? null
 		this.transportEstablished = false
 
 		// Cert chain validation (RFC 5280 + RFC 6125). DEFAULT ON: the chain must terminate
@@ -595,10 +606,26 @@ class TLS extends EventEmitter {
 
 			let connectHeaders = `CONNECT ${this.host}:${this.port} HTTP/1.1\r\nHost: ${this.host}:${this.port}\r\n`
 
-			if (proxyUrl.username && proxyUrl.password) {
-				const auth = 'Basic ' + Buffer.from(`${decodeUserinfo(proxyUrl.username)}:${decodeUserinfo(proxyUrl.password)}`).toString('base64')
-				connectHeaders += `Proxy-Authorization: ${auth}\r\n`
+			let proxyAuthorization: string | null = this.proxyAuthorization ?? null
+			const extraHeaders: Record<string, string> = {}
+			if (this.proxyHeaders) {
+				for (const [name, value] of Object.entries(this.proxyHeaders)) {
+					if (value == null) continue
+					const lower = name.toLowerCase()
+					if (lower === 'proxy-authorization') {
+						proxyAuthorization ??= String(value)
+					} else {
+						extraHeaders[lower] = String(value)
+					}
+				}
 			}
+			if (!proxyAuthorization && proxyUrl.username && proxyUrl.password) {
+				proxyAuthorization =
+					'Basic ' +
+					Buffer.from(`${decodeUserinfo(proxyUrl.username)}:${decodeUserinfo(proxyUrl.password)}`).toString('base64')
+			}
+			if (proxyAuthorization) connectHeaders += `Proxy-Authorization: ${proxyAuthorization}\r\n`
+			for (const [name, value] of Object.entries(extraHeaders)) connectHeaders += `${name}: ${value}\r\n`
 
 			connectHeaders += '\r\n'
 

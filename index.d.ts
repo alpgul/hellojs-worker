@@ -123,10 +123,15 @@ export interface RequestOptions {
 	 * Proxy URL. `http://`/`ws://` sends CONNECT over plaintext TCP (default port 80),
 	 * `https://`/`wss://` first opens a TLS session to the proxy and sends CONNECT inside
 	 * it (default port 443), `socks5://`/`socks5h://` does the SOCKS5 handshake (default
-	 * port 1080). Credentials in the URL become `Proxy-Authorization: Basic`; a failed
-	 * CONNECT or an untrusted proxy certificate rejects with `EPROXY`.
+	 * port 1080). Credentials in the URL become `Proxy-Authorization: Basic` unless
+	 * `proxyAuthorization` is set; a failed CONNECT or an untrusted proxy certificate
+	 * rejects with `EPROXY`.
 	 */
 	proxy?: string | null
+	/** Full CONNECT `Proxy-Authorization` value (e.g. `Bearer <jwt>`). Overrides URL Basic auth. */
+	proxyAuthorization?: string | null
+	/** Extra headers sent on the CONNECT request to the proxy. */
+	proxyHeaders?: Record<string, string> | null
 	resolveWithFullResponse?: boolean
 	simple?: boolean
 	retry?: RetryPolicy

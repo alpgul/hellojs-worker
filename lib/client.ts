@@ -265,18 +265,24 @@ async function performRequest(opts: RequestOptions): Promise<unknown> {
 	const poolConfig: PoolConfig | null = opts.keepAlive === true && opts.h3 !== true
 		? { ...pool.DEFAULT_CONFIG, ...opts.pool }
 		: null
-	const poolKey = poolConfig ? pool.poolKey(host, port, opts.profile, opts.proxy, opts.verifyTLS !== false) : null
+	const poolKey = poolConfig
+		? pool.poolKey(host, port, opts.profile, opts.proxy, opts.verifyTLS !== false, opts.proxyAuthorization)
+		: null
 	let conn: Connection | null = poolConfig && poolKey ? pool.take(poolKey) : null
 	if (!conn) {
 		conn = opts.h3 === true
 			? await connectPreferred({
 				host, port, profile, proxy: opts.proxy,
+				proxyAuthorization: opts.proxyAuthorization,
+				proxyHeaders: opts.proxyHeaders,
 				verifyTLS: opts.verifyTLS !== false,
 				resume: opts.resume === true,
 				timeouts: opts.timeouts,
 			})
 			: await connect({
 				host, port, profile, proxy: opts.proxy,
+				proxyAuthorization: opts.proxyAuthorization,
+				proxyHeaders: opts.proxyHeaders,
 				transport: 'tcp',
 				verifyTLS: opts.verifyTLS !== false,
 				resume: opts.resume === true,

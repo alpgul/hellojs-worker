@@ -40,9 +40,16 @@ const DEFAULT_CONFIG: PoolConfig = { maxSockets: 16, maxPerOrigin: 1, idleMs: 15
 const entries = new Map<string, Entry[]>()
 const byConn = new WeakMap<Connection, Entry>()
 
-function poolKey(host: string, port: number, profile: unknown, proxy: string | null | undefined, verifyTLS: boolean): string {
+function poolKey(
+	host: string,
+	port: number,
+	profile: unknown,
+	proxy: string | null | undefined,
+	verifyTLS: boolean,
+	proxyAuth: string | null | undefined = ''
+): string {
 	const profileName = typeof profile === 'string' ? profile : profile ? 'inline' : 'default'
-	return `${host}:${port}|${profileName}|${proxy ?? ''}|${verifyTLS ? 1 : 0}`
+	return `${host}:${port}|${profileName}|${proxy ?? ''}|${verifyTLS ? 1 : 0}|${proxyAuth ?? ''}`
 }
 
 function sessionOf(conn: Connection): H2Session | null {

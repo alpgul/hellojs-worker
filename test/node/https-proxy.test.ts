@@ -506,3 +506,23 @@ it('regression: cleartext http:// CONNECT proxying still round-trips', async () 
 	await new Promise<void>((resolve) => plainProxy.close(() => resolve()))
 	await origin.close()
 }, 20000)
+
+
+it('proxyAuthorization overrides URL Basic auth and sends Bearer on CONNECT', async () => {
+	const originPort = await withOrigins('bearer-ok')
+	const bearer = 'Bearer eyJhbGciOiJIUzI1NiJ9.test.signature'
+	proxy = await startTlsProxy(key, cert)
+
+	const res = await request(full({
+		url: `https://127.0.0.1:${originPort}/`,
+		proxy: `https://ignored:creds@localhost:${proxy.port}`,
+		proxyAuthorization: bearer,
+	}))
+	expect(String(res.body)).toBe('bearer-ok')
+	expect(proxy.connectRequest).toContain(`Proxy-Authorization: ${bearer}`)
+	expect(proxy.connectRequest).not.toMatch(/Proxy-Authorization:\s*Basic/i)
+
+	await proxy.close()
+	await origin.close()
+	proxy = null
+}, 20000)

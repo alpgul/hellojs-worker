@@ -291,7 +291,17 @@ await request({
 await request({ url: 'https://example.com', proxy: 'http://user:pass@proxy:8080' })
 ```
 
-Basic auth credentials in the URL are auto-encoded into `Proxy-Authorization`.
+Basic auth credentials in the URL are auto-encoded into `Proxy-Authorization`. For
+proxies that require a different scheme (e.g. Guardian/Masque `Bearer`), pass the
+full header value explicitly — it overrides URL-derived Basic auth:
+
+```js
+await request({
+  url: 'https://example.com',
+  proxy: 'https://proxy.example:8443',
+  proxyAuthorization: 'Bearer <jwt>',
+})
+```
 
 ### HTTPS proxy (CONNECT over TLS)
 

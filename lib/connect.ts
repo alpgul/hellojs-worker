@@ -27,6 +27,10 @@ export interface ConnectOptions {
 	verifyTLS?: boolean
 	resume?: boolean
 	timeouts?: PerPhaseTimeouts | null
+	/** Full CONNECT Proxy-Authorization value (e.g. "Bearer <jwt>"); overrides URL Basic auth. */
+	proxyAuthorization?: string | null
+	/** Extra headers for the CONNECT request. */
+	proxyHeaders?: Record<string, string> | null
 }
 
 export type Alpn = 'h2' | 'http/1.1' | 'h3'
@@ -113,13 +117,21 @@ function createTLS(
 	port: number,
 	profile: Profile | string | null | undefined,
 	proxy: string | null | undefined,
-	opts: { verifyTLS?: boolean; resume?: boolean; timeouts?: PerPhaseTimeouts | null } = {}
+	opts: {
+		verifyTLS?: boolean
+		resume?: boolean
+		timeouts?: PerPhaseTimeouts | null
+		proxyAuthorization?: string | null
+		proxyHeaders?: Record<string, string> | null
+	} = {}
 ): Promise<Connection> {
 	return new Promise((resolve, reject) => {
 		const tlsOpts: TLSOptions = {}
 		tlsOpts.verifyTLS = opts.verifyTLS !== false
 		if (opts.resume) tlsOpts.resume = true
 		if (profile) tlsOpts.profile = profile
+		if (opts.proxyAuthorization != null) tlsOpts.proxyAuthorization = opts.proxyAuthorization
+		if (opts.proxyHeaders != null) tlsOpts.proxyHeaders = opts.proxyHeaders
 		const tls = new TLS(host, port, proxy ?? null, tlsOpts)
 		const conn = new Connection(tls)
 		let settled = false
@@ -183,7 +195,18 @@ function createTLS(
 	})
 }
 
-function connect({ host, port = 443, profile, proxy, transport = 'tcp', verifyTLS = true, resume = false, timeouts = null }: ConnectOptions): Promise<Connection> {
+function connect({
+	host,
+	port = 443,
+	profile,
+	proxy,
+	transport = 'tcp',
+	verifyTLS = true,
+	resume = false,
+	timeouts = null,
+	proxyAuthorization = null,
+	proxyHeaders = null,
+}: ConnectOptions): Promise<Connection> {
 	if (transport === 'quic') {
 		// QUIC/HTTP/3 has no proxy path. Rejecting instead of silently dropping `proxy` is what
 		// makes connectPreferred fall through to TCP, so an `h3: true` request through a proxy
@@ -193,7 +216,7 @@ function connect({ host, port = 443, profile, proxy, transport = 'tcp', verifyTL
 		}
 		return createH3(host, port, timeouts)
 	}
-	return createTLS(host, port, profile, proxy, { verifyTLS, resume, timeouts })
+	return createTLS(host, port, profile, proxy, { verifyTLS, resume, timeouts, proxyAuthorization, proxyHeaders })
 }
 
 // h3 is opt-in per request and takes priority: start QUIC, and only fall back to TCP + TLS
