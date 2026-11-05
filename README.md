@@ -143,7 +143,9 @@ await request({
 | `maxRedirects` | number | `10` | |
 | `timeout` | ms | — | aborts request after N ms (legacy single-phase timer; applies to the response phase). Overrides the 60s response default. |
 | `timeouts` | object | — | per-phase timeouts: `{ connect, tlsHandshake, response }`, all in ms. Response phase defaults to **60_000ms** (60s) when neither `timeouts.response` nor `timeout` is set; pass `timeouts: { response: 0 }` to disable. Overrides `timeout` for the response phase. |
-| `proxy` | URL string | — | Proxy: `http://` (CONNECT), `https://` (CONNECT over TLS), `socks5://` — see Proxies |
+| `proxy` | URL string | — | Proxy: `http://` (CONNECT), `https://` (CONNECT over TLS), `socks5://` — see [Proxies](#proxies) |
+| `proxyAuthorization` | string | — | Full `Proxy-Authorization` value for CONNECT (e.g. `Bearer <jwt>`); overrides URL-derived Basic auth |
+| `proxyHeaders` | object | — | Extra headers sent on the CONNECT request to the proxy |
 | `simple` | bool | `true` | reject 4xx/5xx as errors (set `false` to resolve them as responses) |
 | `resolveWithFullResponse` | bool | `false` | resolve to `{status, headers, body}` instead of just body |
 | `retry` | object | none | `{ limit, methods, statusCodes, baseDelayMs }` |
