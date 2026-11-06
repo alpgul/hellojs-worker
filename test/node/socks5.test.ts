@@ -4,6 +4,7 @@ import * as net from 'node:net'
 
 import { expect, it } from 'vitest'
 
+import request from '../../index.ts'
 import { socks5Connect } from '../../lib/socks5.ts'
 
 interface FakeServer { port: number; close: () => void }
@@ -119,3 +120,32 @@ it('SOCKS5 user/pass: correct creds succeed, wrong creds fail', async () => {
 		srv.close()
 	}
 }, 5000)
+
+// CONNECT-only options mean nothing to SOCKS5: RFC 1929 authenticates with username/password and
+// the protocol speaks no HTTP, so there is nowhere to put a Proxy-Authorization line. They are
+// rejected instead of silently dropped, because a caller that believes it supplied a credential is
+// worse off than one that gets an error. Port 1 is never dialled — EBADOPTS arriving rather than
+// ECONNREFUSED is the proof the check runs before the handshake.
+it('socks5:// rejects proxyAuthorization/proxyHeaders as EBADOPTS', async () => {
+	for (const extra of [{ proxyAuthorization: 'Bearer x' }, { proxyHeaders: { 'x-a': 'v' } }]) {
+		const err = (await request({
+			url: 'https://example.invalid/',
+			proxy: 'socks5://127.0.0.1:1',
+			timeout: 5000,
+			...extra,
+		}).catch((e: Error) => e)) as Error & { code?: string; category?: string }
+		expect(err).toBeInstanceOf(Error)
+		expect(err.code, JSON.stringify(extra)).toBe('EBADOPTS')
+		expect(err.category, JSON.stringify(extra)).toBe('usage')
+	}
+
+	// An empty map adds nothing, so it is not a usage error: the request goes on to dial the proxy.
+	const err = (await request({
+		url: 'https://example.invalid/',
+		proxy: 'socks5://127.0.0.1:1',
+		timeout: 5000,
+		proxyHeaders: {},
+	}).catch((e: Error) => e)) as Error & { code?: string }
+	expect(err).toBeInstanceOf(Error)
+	expect(err.code).not.toBe('EBADOPTS')
+}, 20000)

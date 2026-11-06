@@ -131,4 +131,49 @@ function buildH1Headers({ host, userHeaders, profile }: H1HeaderInput): string {
 	return lines.join('\r\n')
 }
 
+// CONNECT request validation. The proxy-bound CONNECT block is framed by hand in
+// lib/tls/tls.ts's sendConnectRequest, so `proxyAuthorization` and `proxyHeaders` are the only
+// caller-controlled bytes that reach it — anything unchecked there can inject CONNECT lines or
+// end the request early and desynchronize the tunnel. Stricter than RFC 9110 on purpose: field
+// values are printable ASCII only, because the JWT/Basic/bearer grammars never need more and the
+// request is written as a UTF-8 string, so a code point above 0xFF would split into multi-byte
+// sequences a proxy's Latin-1 framing parser reads as garbage. Reserved names are rejected rather
+// than silently dropped (the FORBIDDEN_H2 path above): these two options are new, so no working
+// request degrades, and a credential that would have been dropped belongs at the option boundary.
+const FIELD_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
+const PRINTABLE_ASCII = /^[\x20-\x7E]*$/
+const RESERVED_CONNECT_NAMES = new Set([
+	'host',
+	'connection',
+	'proxy-connection',
+	'te',
+	'trailer',
+	'transfer-encoding',
+	'upgrade',
+	'keep-alive'
+])
+
+function assertFieldValue(value: string, what: string): void {
+	if (!PRINTABLE_ASCII.test(value)) {
+		throw new HellojsError(`${what} must be printable ASCII: no CR, LF, control or non-ASCII characters`, 'EBADOPTS')
+	}
+}
+
+export function assertProxyConnectHeaders(proxyAuthorization?: string | null, proxyHeaders?: Record<string, string> | null): void {
+	if (proxyAuthorization != null) assertFieldValue(String(proxyAuthorization), 'proxyAuthorization')
+	if (!proxyHeaders) return
+	for (const [name, value] of Object.entries(proxyHeaders)) {
+		if (value == null) continue
+		if (!FIELD_NAME.test(name)) {
+			throw new HellojsError(`proxyHeaders name ${JSON.stringify(name)} is not a valid HTTP field name`, 'EBADOPTS')
+		}
+		const lower = name.toLowerCase()
+		// `proxy-authorization` is routed to the auth slot by the CONNECT builder, not reserved.
+		if (lower !== 'proxy-authorization' && RESERVED_CONNECT_NAMES.has(lower)) {
+			throw new HellojsError(`proxyHeaders name "${name}" is managed by the CONNECT request builder`, 'EBADOPTS')
+		}
+		assertFieldValue(String(value), `proxyHeaders[${JSON.stringify(name)}]`)
+	}
+}
+
 export { buildH2Headers, buildH1Headers, mergeProfileHeaders }

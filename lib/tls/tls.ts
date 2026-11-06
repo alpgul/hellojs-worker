@@ -5,6 +5,7 @@ import { Duplex } from 'node:stream'
 import * as zlib from 'node:zlib'
 
 import { cachedLookup, dnsCacheAvailable } from '../dns-cache.ts'
+import { HellojsError } from '../errors.ts'
 import {
 	CreateStatusRequestExtension,
 	CreateSignedCertificateTimestampExtension,
@@ -32,6 +33,7 @@ import {
 	pickGreaseTriple
 } from '../extensions/index.ts'
 import { H2Session } from '../h2/session.ts'
+import { assertProxyConnectHeaders } from '../headers.ts'
 import logFactory from '../models/log.ts'
 import * as profileRegistry from '../profiles/index.ts'
 import { socks5Connect } from '../socks5.ts'
@@ -164,11 +166,13 @@ interface TLSOptions {
 	// connection to the same host. Off by default — a resumed ClientHello carries an extra
 	// extension (0x0029) and therefore a different JA3/JA4 than a fresh one.
 	resume?: boolean
-	// CONNECT tunnel auth for HTTP/HTTPS proxies. When set, used as the full Proxy-Authorization
-	// header value (e.g. "Bearer <jwt>") and overrides any Basic credentials in the proxy URL.
+	// CONNECT tunnel auth for HTTP/HTTPS proxies. Used verbatim as the Proxy-Authorization value
+	// (e.g. "Bearer <jwt>"). Any non-null value outranks the proxy URL's Basic credentials, so
+	// '' sends no Proxy-Authorization at all.
 	proxyAuthorization?: string | null
-	// Extra headers sent on the CONNECT request (hop-by-hop to the proxy). Proxy-Authorization
-	// here is a fallback when proxyAuthorization/URL credentials are absent.
+	// Extra headers sent on the CONNECT request (hop-by-hop to the proxy). A `proxy-authorization`
+	// entry fills the auth slot when proxyAuthorization is unset — ahead of URL Basic auth, which
+	// is the last resort. Both options are validated in the constructor; see headers.ts.
 	proxyHeaders?: Record<string, string> | null
 }
 
@@ -367,6 +371,10 @@ class TLS extends EventEmitter {
 		this._proxyTls = null
 		this.proxyAuthorization = opts.proxyAuthorization ?? null
 		this.proxyHeaders = opts.proxyHeaders ?? null
+		// Validated here instead of in sendConnectRequest: the constructor is the one choke point
+		// that also covers direct `new TLS()` users, and createTLS constructs inside its Promise
+		// executor, so an injected value rejects connect before a socket is opened.
+		assertProxyConnectHeaders(this.proxyAuthorization, this.proxyHeaders)
 		this.transportEstablished = false
 
 		// Cert chain validation (RFC 5280 + RFC 6125). DEFAULT ON: the chain must terminate
@@ -464,6 +472,13 @@ class TLS extends EventEmitter {
 			const proxyUrl = new URL(this.proxy)
 			// SOCKS5: socks5:// or socks5h:// in the proxy URL → use the SOCKS5 client.
 			if (proxyUrl.protocol === 'socks5:' || proxyUrl.protocol === 'socks5h:') {
+				// SOCKS5 authenticates with the URL's username/password (RFC 1929) and speaks no
+				// HTTP, so CONNECT auth headers have nowhere to go. Rejected instead of dropped for
+				// the same reason h3+proxy is: a credential the caller believes was sent. An empty
+				// header map is a no-op, so it does not count as "supplied".
+				if (this.proxyAuthorization !== null || (this.proxyHeaders && Object.keys(this.proxyHeaders).length > 0)) {
+					throw new HellojsError('proxyAuthorization/proxyHeaders are not supported with socks5:// proxies', 'EBADOPTS')
+				}
 				socks5Connect({
 					proxyHost: proxyUrl.hostname,
 					proxyPort: parseInt(proxyUrl.port || '1080', 10),
@@ -606,25 +621,31 @@ class TLS extends EventEmitter {
 
 			let connectHeaders = `CONNECT ${this.host}:${this.port} HTTP/1.1\r\nHost: ${this.host}:${this.port}\r\n`
 
+			// Precedence: explicit proxyAuthorization > proxyHeaders['proxy-authorization'] > URL
+			// Basic. A non-null proxyAuthorization is a complete answer, so '' — or a blank string —
+			// sends no Proxy-Authorization even when the proxy URL carries credentials.
 			let proxyAuthorization: string | null = this.proxyAuthorization ?? null
-			const extraHeaders: Record<string, string> = {}
+			// Null prototype: a header literally named `__proto__` must land as an own entry rather
+			// than disappear into the inherited setter.
+			const extraHeaders: Record<string, string> = Object.create(null) as Record<string, string>
 			if (this.proxyHeaders) {
 				for (const [name, value] of Object.entries(this.proxyHeaders)) {
 					if (value == null) continue
 					const lower = name.toLowerCase()
 					if (lower === 'proxy-authorization') {
-						proxyAuthorization ??= String(value)
+						if (proxyAuthorization === null) proxyAuthorization = String(value)
 					} else {
 						extraHeaders[lower] = String(value)
 					}
 				}
 			}
-			if (!proxyAuthorization && proxyUrl.username && proxyUrl.password) {
+			if (proxyAuthorization === null && proxyUrl.username && proxyUrl.password) {
 				proxyAuthorization =
 					'Basic ' +
 					Buffer.from(`${decodeUserinfo(proxyUrl.username)}:${decodeUserinfo(proxyUrl.password)}`).toString('base64')
 			}
-			if (proxyAuthorization) connectHeaders += `Proxy-Authorization: ${proxyAuthorization}\r\n`
+			const authValue = proxyAuthorization?.trim() ?? ''
+			if (authValue) connectHeaders += `Proxy-Authorization: ${authValue}\r\n`
 			for (const [name, value] of Object.entries(extraHeaders)) connectHeaders += `${name}: ${value}\r\n`
 
 			connectHeaders += '\r\n'

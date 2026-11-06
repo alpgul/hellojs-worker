@@ -123,14 +123,25 @@ export interface RequestOptions {
 	 * Proxy URL. `http://`/`ws://` sends CONNECT over plaintext TCP (default port 80),
 	 * `https://`/`wss://` first opens a TLS session to the proxy and sends CONNECT inside
 	 * it (default port 443), `socks5://`/`socks5h://` does the SOCKS5 handshake (default
-	 * port 1080). Credentials in the URL become `Proxy-Authorization: Basic` unless
-	 * `proxyAuthorization` is set; a failed CONNECT or an untrusted proxy certificate
-	 * rejects with `EPROXY`.
+	 * port 1080) and authenticates with the URL's username/password only. Credentials in
+	 * the URL become `Proxy-Authorization: Basic` unless `proxyAuthorization` is set; a
+	 * failed CONNECT or an untrusted proxy certificate rejects with `EPROXY`.
 	 */
 	proxy?: string | null
-	/** Full CONNECT `Proxy-Authorization` value (e.g. `Bearer <jwt>`). Overrides URL Basic auth. */
+	/**
+	 * Full CONNECT `Proxy-Authorization` value (e.g. `Bearer <jwt>`). Overrides URL Basic
+	 * auth: any value, including `''`, suppresses the URL-derived header, so `''` sends no
+	 * `Proxy-Authorization` at all. Not supported with `socks5://`. Rejects CR, LF, control
+	 * and non-ASCII characters with `EBADOPTS` before the proxy is dialled.
+	 */
 	proxyAuthorization?: string | null
-	/** Extra headers sent on the CONNECT request to the proxy. */
+	/**
+	 * Extra headers sent on the CONNECT request to the proxy. `proxy-authorization` fills
+	 * the auth slot when `proxyAuthorization` is unset, ahead of URL Basic auth. Names
+	 * managed by the CONNECT builder (`host`, `connection`, `proxy-connection`, `te`,
+	 * `trailer`, `transfer-encoding`, `upgrade`, `keep-alive`) and any value outside
+	 * printable ASCII reject with `EBADOPTS`. Not supported with `socks5://`.
+	 */
 	proxyHeaders?: Record<string, string> | null
 	resolveWithFullResponse?: boolean
 	simple?: boolean

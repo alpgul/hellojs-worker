@@ -15,6 +15,8 @@
 // Only healthy, non-GOAWAYed h2 sessions are ever handed out. Any stream-level teardown path
 // that closes the connection evicts its pool entry, so a poisoned socket cannot be reused.
 
+import { createHash } from 'node:crypto'
+
 import * as frame from './h2/frame.ts'
 
 import type { Connection } from './connect.ts'
@@ -40,16 +42,39 @@ const DEFAULT_CONFIG: PoolConfig = { maxSockets: 16, maxPerOrigin: 1, idleMs: 15
 const entries = new Map<string, Entry[]>()
 const byConn = new WeakMap<Connection, Entry>()
 
+// The proxy segment is a digest, never the raw material: a proxy URL can carry `user:pass` and
+// `proxyAuthorization` can be a bearer token, and this key lives in a process-wide Map for as long
+// as its socket stays pooled. Digesting also partitions by CONNECT shape — a tunnel opened with one
+// header set must not answer for a request configured with another, whose hop-by-hop headers would
+// then never be sent.
+function proxySegment(
+	proxy: string | null | undefined,
+	proxyAuth: string | null | undefined,
+	proxyHeaders: Record<string, string> | null | undefined
+): string {
+	// Lowercased and sorted, so an equivalent header map — different order, different casing —
+	// reaches the same bucket.
+	const headers = proxyHeaders
+		? Object.entries(proxyHeaders)
+				.map(([name, value]) => `${name.toLowerCase()}\u0000${String(value)}`)
+				.sort()
+				.join('&')
+		: ''
+	if (!proxy && !proxyAuth && !headers) return ''
+	return createHash('sha256').update(`${proxy ?? ''}\u0000${proxyAuth ?? ''}\u0000${headers}`).digest('base64url')
+}
+
 function poolKey(
 	host: string,
 	port: number,
 	profile: unknown,
 	proxy: string | null | undefined,
 	verifyTLS: boolean,
-	proxyAuth: string | null | undefined = ''
+	proxyAuth?: string | null,
+	proxyHeaders?: Record<string, string> | null
 ): string {
 	const profileName = typeof profile === 'string' ? profile : profile ? 'inline' : 'default'
-	return `${host}:${port}|${profileName}|${proxy ?? ''}|${verifyTLS ? 1 : 0}|${proxyAuth ?? ''}`
+	return `${host}:${port}|${profileName}|${verifyTLS ? 1 : 0}|${proxySegment(proxy, proxyAuth, proxyHeaders)}`
 }
 
 function sessionOf(conn: Connection): H2Session | null {

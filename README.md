@@ -144,8 +144,8 @@ await request({
 | `timeout` | ms | — | aborts request after N ms (legacy single-phase timer; applies to the response phase). Overrides the 60s response default. |
 | `timeouts` | object | — | per-phase timeouts: `{ connect, tlsHandshake, response }`, all in ms. Response phase defaults to **60_000ms** (60s) when neither `timeouts.response` nor `timeout` is set; pass `timeouts: { response: 0 }` to disable. Overrides `timeout` for the response phase. |
 | `proxy` | URL string | — | Proxy: `http://` (CONNECT), `https://` (CONNECT over TLS), `socks5://` — see [Proxies](#proxies) |
-| `proxyAuthorization` | string | — | Full `Proxy-Authorization` value for CONNECT (e.g. `Bearer <jwt>`); overrides URL-derived Basic auth |
-| `proxyHeaders` | object | — | Extra headers sent on the CONNECT request to the proxy |
+| `proxyAuthorization` | string | — | Full `Proxy-Authorization` value for CONNECT (e.g. `Bearer <jwt>`); overrides URL-derived Basic auth, and `''` sends no header at all. Not supported with `socks5://` |
+| `proxyHeaders` | object | — | Extra headers sent on the CONNECT request to the proxy. Names the CONNECT builder owns (`host`, `connection`, `keep-alive`, …) and values outside printable ASCII reject with `EBADOPTS`. Not supported with `socks5://` |
 | `simple` | bool | `true` | reject 4xx/5xx as errors (set `false` to resolve them as responses) |
 | `resolveWithFullResponse` | bool | `false` | resolve to `{status, headers, body}` instead of just body |
 | `retry` | object | none | `{ limit, methods, statusCodes, baseDelayMs }` |
@@ -304,6 +304,14 @@ await request({
   proxyAuthorization: 'Bearer <jwt>',
 })
 ```
+
+`proxyAuthorization` is the whole answer: a blank value (`''`) sends no `Proxy-Authorization` even
+when the proxy URL carries credentials. Extra CONNECT headers go in `proxyHeaders`, where a
+`proxy-authorization` entry fills the same slot when `proxyAuthorization` is unset — ahead of URL
+Basic, which is the last resort. Both are validated before the proxy is dialled: CR, LF, control or
+non-ASCII characters and CONNECT-owned names (`host`, `connection`, `keep-alive`, …) reject with
+`EBADOPTS` instead of being written into the CONNECT request. Neither option applies to
+`socks5://`, which authenticates from the URL's username/password and rejects them with `EBADOPTS`.
 
 ### HTTPS proxy (CONNECT over TLS)
 

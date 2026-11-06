@@ -9,6 +9,9 @@
 //   5. non-2xx CONNECT and an untrusted proxy certificate surface as EPROXY
 //   6. h3 through a proxy falls back to TCP+CONNECT instead of bypassing the proxy
 //   7. the cleartext http:// CONNECT path is unchanged
+//   8. `proxyAuthorization`/`proxyHeaders` own the CONNECT auth line — explicit value beats a
+//      `proxy-authorization` header beats URL Basic, a blank value sends none, and a value that
+//      could reframe the CONNECT request rejects as EBADOPTS before the proxy is dialled
 
 import { execSync } from 'node:child_process'
 import * as fs from 'node:fs'
@@ -508,10 +511,19 @@ it('regression: cleartext http:// CONNECT proxying still round-trips', async () 
 }, 20000)
 
 
-it('proxyAuthorization overrides URL Basic auth and sends Bearer on CONNECT', async () => {
+// A proxy that answers 200 only for the exact token it issued. Without the hook the tunnel opens
+// for any Proxy-Authorization value, which proves ordering but not that the credential is real.
+const requireAuth = (token: string) => (req: string): string => {
+	const lines = req.split('\r\n').filter((line) => /^proxy-authorization:/i.test(line))
+	return lines.length === 1 && lines[0] === `Proxy-Authorization: ${token}`
+		? 'HTTP/1.1 200 Connection established\r\n\r\n'
+		: 'HTTP/1.1 407 Proxy Authentication Required\r\n\r\n'
+}
+
+it('proxyAuthorization overrides URL Basic auth and the proxy accepts the bearer', async () => {
 	const originPort = await withOrigins('bearer-ok')
 	const bearer = 'Bearer eyJhbGciOiJIUzI1NiJ9.test.signature'
-	proxy = await startTlsProxy(key, cert)
+	proxy = await startTlsProxy(key, cert, requireAuth(bearer))
 
 	const res = await request(full({
 		url: `https://127.0.0.1:${originPort}/`,
@@ -520,9 +532,115 @@ it('proxyAuthorization overrides URL Basic auth and sends Bearer on CONNECT', as
 	}))
 	expect(String(res.body)).toBe('bearer-ok')
 	expect(proxy.connectRequest).toContain(`Proxy-Authorization: ${bearer}`)
-	expect(proxy.connectRequest).not.toMatch(/Proxy-Authorization:\s*Basic/i)
+	// Exactly one line: the URL credentials lose to the explicit value instead of joining it.
+	expect(proxy.connectRequest.match(/Proxy-Authorization:/gi)).toHaveLength(1)
 
 	await proxy.close()
 	await origin.close()
 	proxy = null
+}, 20000)
+
+it('proxyAuthorization authenticates a proxy URL that carries no credentials', async () => {
+	const originPort = await withOrigins('bearer-ok')
+	const bearer = 'Bearer headerless-tunnel'
+	proxy = await startTlsProxy(key, cert, requireAuth(bearer))
+
+	const res = await request(full({
+		url: `https://127.0.0.1:${originPort}/`,
+		proxy: `https://localhost:${proxy.port}`,
+		proxyAuthorization: bearer,
+	}))
+	expect(String(res.body)).toBe('bearer-ok')
+
+	await proxy.close()
+	await origin.close()
+	proxy = null
+}, 20000)
+
+it('a bearer the proxy refuses rejects as EPROXY with the 407 status line', async () => {
+	const originPort = await withOrigins('nope')
+	proxy = await startTlsProxy(key, cert, requireAuth('Bearer expected-token'))
+
+	const err = await request(full({
+		url: `https://127.0.0.1:${originPort}/`,
+		proxy: `https://localhost:${proxy.port}`,
+		proxyAuthorization: 'Bearer wrong-token',
+	})).catch((e: Error) => e) as Error & { code?: string; category?: string }
+	expect(err.code).toBe('EPROXY')
+	expect(err.category).toBe('transport')
+	expect(err.message).toContain('407')
+
+	await proxy.close()
+	await origin.close()
+	proxy = null
+}, 20000)
+
+it('a blank proxyAuthorization sends no Proxy-Authorization, URL credentials included', async () => {
+	const originPort = await withOrigins('anon-ok')
+	// The proxy only opens the tunnel for a request with no auth line at all, so a leak of the
+	// URL-derived Basic header fails the round-trip rather than just an assertion.
+	const anonymousOnly = (req: string): string =>
+		/Proxy-Authorization/i.test(req)
+			? 'HTTP/1.1 407 Proxy Authentication Required\r\n\r\n'
+			: 'HTTP/1.1 200 Connection established\r\n\r\n'
+
+	for (const extra of [{ proxyAuthorization: '' }, { proxyHeaders: { 'proxy-authorization': '   ' } }]) {
+		proxy = await startTlsProxy(key, cert, anonymousOnly)
+		const res = await request(full({
+			url: `https://127.0.0.1:${originPort}/`,
+			proxy: `https://alice:secret@localhost:${proxy.port}`,
+			...extra,
+		}))
+		expect(String(res.body)).toBe('anon-ok')
+		expect(proxy.connectRequest, JSON.stringify(extra)).not.toMatch(/Proxy-Authorization/i)
+		await proxy.close()
+		proxy = null
+	}
+
+	await origin.close()
+}, 20000)
+
+it('proxyHeaders adds CONNECT headers and its proxy-authorization outranks URL Basic', async () => {
+	const originPort = await withOrigins('hdr-ok')
+	const bearer = 'Bearer from-proxy-headers'
+	proxy = await startTlsProxy(key, cert, requireAuth(bearer))
+
+	const res = await request(full({
+		url: `https://127.0.0.1:${originPort}/`,
+		proxy: `https://ignored:creds@localhost:${proxy.port}`,
+		proxyHeaders: { 'X-Jwt-Kid': 'a1', 'Proxy-Authorization': bearer },
+	}))
+	expect(String(res.body)).toBe('hdr-ok')
+	// CONNECT headers are emitted lowercased; the auth slot is filled from proxyHeaders before the
+	// URL is consulted, so Basic never appears.
+	expect(proxy.connectRequest).toContain('x-jwt-kid: a1')
+	expect(proxy.connectRequest.match(/Proxy-Authorization:/gi)).toHaveLength(1)
+
+	await proxy.close()
+	await origin.close()
+	proxy = null
+}, 20000)
+
+it('a CONNECT-reframing proxyAuthorization/proxyHeaders rejects as EBADOPTS, before any socket', async () => {
+	// Port 1 is never dialled: the values are validated while the TLS session is constructed, so a
+	// bad one surfaces as a usage error instead of ECONNREFUSED. That ordering is the fail-fast proof.
+	const cases: Record<string, unknown>[] = [
+		{ proxyAuthorization: 'Bearer x\r\nX-Injected: 1' },
+		{ proxyAuthorization: 'Bearer x\nX-Injected: 1' },
+		{ proxyHeaders: { 'x-a': 'v\r\n\r\nGET /evil' } },
+		{ proxyHeaders: { 'x-c': 'ünïcode' } },
+		{ proxyHeaders: { 'bad name': 'v' } },
+		{ proxyHeaders: { '': 'v' } },
+		{ proxyHeaders: { host: 'evil.example' } },
+		{ proxyHeaders: { 'Proxy-Connection': 'keep-alive' } },
+		{ proxyHeaders: { connection: 'close' } },
+	]
+
+	for (const extra of cases) {
+		const err = (await request(full({ url: 'https://example.invalid/', proxy: 'http://127.0.0.1:1', ...extra }))
+			.catch((e: Error) => e)) as Error & { code?: string; category?: string }
+		expect(err).toBeInstanceOf(Error)
+		expect(err.code, JSON.stringify(extra)).toBe('EBADOPTS')
+		expect(err.category, JSON.stringify(extra)).toBe('usage')
+	}
 }, 20000)

@@ -61,6 +61,31 @@ describe('pool', () => {
 		expect(poolKey('a.com', 443, 'p', null, true)).toBe(base)
 	})
 
+	it('poolKey separates by proxy auth material and keeps it out of the key', () => {
+		const proxied = poolKey('a.com', 443, 'p', 'http://proxy:1', true)
+		const bearerA = poolKey('a.com', 443, 'p', 'http://proxy:1', true, 'Bearer a')
+		expect(bearerA).not.toBe(proxied)
+		expect(bearerA).toBe(poolKey('a.com', 443, 'p', 'http://proxy:1', true, 'Bearer a'))
+		expect(bearerA).not.toBe(poolKey('a.com', 443, 'p', 'http://proxy:1', true, 'Bearer b'))
+
+		// A tunnel opened with one CONNECT header set must not answer for another: the second
+		// request's hop-by-hop headers would never be sent.
+		expect(poolKey('a.com', 443, 'p', 'http://proxy:1', true, null, { 'x-a': '1' })).not.toBe(proxied)
+		expect(poolKey('a.com', 443, 'p', 'http://proxy:1', true, null, { 'x-a': '1' })).not.toBe(
+			poolKey('a.com', 443, 'p', 'http://proxy:1', true, null, { 'x-a': '2' })
+		)
+		// Header maps are canonicalized, so insertion order and casing cannot fork the bucket.
+		expect(poolKey('a.com', 443, 'p', null, true, null, { a: '1', b: '2' })).toBe(
+			poolKey('a.com', 443, 'p', null, true, null, { B: '2', A: '1' })
+		)
+		expect(poolKey('a.com', 443, 'p', null, true)).toBe(poolKey('a.com', 443, 'p', null, true, null, null))
+		expect(poolKey('a.com', 443, 'p', null, true)).toBe(poolKey('a.com', 443, 'p', '', true, '', {}))
+
+		// Credentials live in the process-wide map only as a digest.
+		expect(proxied).not.toContain('proxy:1')
+		expect(poolKey('a.com', 443, 'p', 'http://alice:secret@proxy:1', true, 'Bearer abc123')).not.toContain('abc123')
+	})
+
 	it('register hands a fresh connection to later takers', () => {
 		const { conn } = fakeConn()
 		expect(register(conn, KEY, DEFAULT_CONFIG)).toBe(true)

@@ -73,6 +73,16 @@ export interface RequestOptions {
 	timeout?: number
 	timeouts?: PerPhaseTimeouts | null
 	proxy?: string | null
+	/**
+	 * Full CONNECT `Proxy-Authorization` value (e.g. `Bearer <jwt>`). Overrides URL Basic auth;
+	 * `''` sends no header. Validated at construction, and unused by `socks5://`.
+	 */
+	proxyAuthorization?: string | null
+	/**
+	 * Extra headers sent on the CONNECT request to the proxy. CONNECT-owned names and values
+	 * outside printable ASCII reject with `EBADOPTS`; unused by `socks5://`.
+	 */
+	proxyHeaders?: Record<string, string> | null
 	resolveWithFullResponse?: boolean
 	simple?: boolean
 	retry?: RetryPolicy
@@ -266,7 +276,7 @@ async function performRequest(opts: RequestOptions): Promise<unknown> {
 		? { ...pool.DEFAULT_CONFIG, ...opts.pool }
 		: null
 	const poolKey = poolConfig
-		? pool.poolKey(host, port, opts.profile, opts.proxy, opts.verifyTLS !== false, opts.proxyAuthorization)
+		? pool.poolKey(host, port, opts.profile, opts.proxy, opts.verifyTLS !== false, opts.proxyAuthorization, opts.proxyHeaders)
 		: null
 	let conn: Connection | null = poolConfig && poolKey ? pool.take(poolKey) : null
 	if (!conn) {
