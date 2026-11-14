@@ -37,8 +37,8 @@ it('request lifecycle emits start, headersSent, firstByte, end', async () => {
 	for (const e of LIFECYCLE) request.observability.on(e, recorder(e))
 
 	try {
-		const res = await request({ url: `https://127.0.0.1:${port}/`, verifyTLS: false, resolveWithFullResponse: true })
-		expect(res.statusCode).toBe(200)
+		const res = await request({ url: `https://127.0.0.1:${port}/`, verifyTLS: false,  })
+		expect(res.status).toBe(200)
 
 		const names = new Set(events.map((e) => e.name))
 		expect(names.has('request:start')).toBe(true)
@@ -63,8 +63,8 @@ it('throwing in a hook listener does not break the request', async () => {
 
 	request.observability.on('request:start', () => { throw new Error('boom') })
 	try {
-		const res = await request({ url: `https://127.0.0.1:${port}/`, verifyTLS: false, resolveWithFullResponse: true })
-		expect(res.statusCode).toBe(200)
+		const res = await request({ url: `https://127.0.0.1:${port}/`, verifyTLS: false,  })
+		expect(res.status).toBe(200)
 	} finally {
 		request.observability.removeAllListeners('request:start')
 		server.close()

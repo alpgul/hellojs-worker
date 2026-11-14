@@ -94,65 +94,70 @@ function baseUrl(): string {
 
 const opts = (extra: Record<string, unknown>) => ({
 	simple: false,
+	bodyOnly: true,
 	verifyTLS: false,
 	timeout: 5000,
 	...extra,
 })
 
+// The public API resolves a fetch Response; `bodyOnly` opts into the parsed body and this
+// cast restores the concrete echo shape the assertions read.
+const echoBody = async (p: Promise<unknown>): Promise<Echo> => (await p) as Echo
+
 describe('HTTP methods via shortcut API', () => {
 	it('GET — server sees GET, empty body echoed back', async () => {
-		const body = await request<Echo>(opts({ url: `${baseUrl()}/get`, json: true, method: 'GET' }))
+		const body = await echoBody(request(opts({ url: `${baseUrl()}/get`, json: true, method: 'GET' })))
 		expect(body.method).toBe('GET')
 		expect(body.path).toBe('/get')
 		expect(body.body).toBe('')
 	})
 
 	it('request.get shortcut issues GET', async () => {
-		const body = await request.get<Echo>(opts({ url: `${baseUrl()}/g`, json: true }))
+		const body = await echoBody(request.get(opts({ url: `${baseUrl()}/g`, json: true })))
 		expect(body.method).toBe('GET')
 	})
 
 	it('POST — body round-trips', async () => {
-		const res = await request.post<Echo>(opts({ url: `${baseUrl()}/p`, json: true, body: 'payload-1' }))
+		const res = await echoBody(request.post(opts({ url: `${baseUrl()}/p`, json: true, body: 'payload-1' })))
 		expect(res.method).toBe('POST')
 		expect(res.body).toBe('payload-1')
 	})
 
 	it('PUT — full resource body round-trips', async () => {
-		const res = await request.put<Echo>(opts({ url: `${baseUrl()}/r/1`, json: true, body: '{"name":"full"}' }))
+		const res = await echoBody(request.put(opts({ url: `${baseUrl()}/r/1`, json: true, body: '{"name":"full"}' })))
 		expect(res.method).toBe('PUT')
 		expect(res.body).toBe('{"name":"full"}')
 		expect(res.path).toBe('/r/1')
 	})
 
 	it('PATCH — partial body round-trips', async () => {
-		const res = await request.patch<Echo>(opts({ url: `${baseUrl()}/r/1`, json: true, body: '{"name":"part"}' }))
+		const res = await echoBody(request.patch(opts({ url: `${baseUrl()}/r/1`, json: true, body: '{"name":"part"}' })))
 		expect(res.method).toBe('PATCH')
 		expect(res.body).toBe('{"name":"part"}')
 	})
 
 	it('DELETE — server sees DELETE, del + delete shortcuts agree', async () => {
-		const viaDelete = await request.del<Echo>(opts({ url: `${baseUrl()}/r/2`, json: true }))
+		const viaDelete = await echoBody(request.del(opts({ url: `${baseUrl()}/r/2`, json: true })))
 		expect(viaDelete.method).toBe('DELETE')
-		const viaAlias = await request.delete<Echo>(opts({ url: `${baseUrl()}/r/2`, json: true }))
+		const viaAlias = await echoBody(request.delete(opts({ url: `${baseUrl()}/r/2`, json: true })))
 		expect(viaAlias.method).toBe('DELETE')
 	})
 
 	it('HEAD — status/headers returned, body empty', async () => {
-		const res = await request.head({ url: `${baseUrl()}/h`, simple: false, verifyTLS: false, timeout: 5000, resolveWithFullResponse: true })
+		const res = await request.head({ url: `${baseUrl()}/h`, simple: false, verifyTLS: false, timeout: 5000 })
 		expect(res.status).toBe(200)
-		expect(res.headers['content-type']).toBe('application/json')
+		expect(res.headers.get('content-type')).toBe('application/json')
 		// A GET-style request to this endpoint advertises content-length, but a HEAD response
 		// must carry headers and never a body (RFC 9110 §9.3.4). The library keeps non-text /
 		// non-JSON bodies as the raw Buffer, so an empty body surfaces as a zero-length buffer
 		// (or '' ) — assert emptiness regardless of representation, not the concrete type.
-		expect(res.headers['content-length']).toBeTruthy()
-		const empty = res.body === '' || (Buffer.isBuffer(res.body) && res.body.length === 0)
-		expect(empty).toBe(true)
+		expect(res.headers.get('content-length')).toBeTruthy()
+		expect(res.body).toBeNull()
+		expect(await res.text()).toBe('')
 	})
 
 	it('OPTIONS — server sees OPTIONS verb', async () => {
-		const res = await request.options<Echo>(opts({ url: `${baseUrl()}/o`, json: true }))
+		const res = await echoBody(request.options(opts({ url: `${baseUrl()}/o`, json: true })))
 		expect(res.method).toBe('OPTIONS')
 	})
 })
@@ -161,13 +166,13 @@ describe('HTTP methods via generic `method` option', () => {
 	const verbs = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'] as const
 	for (const verb of verbs) {
 		it(`${verb} via method option`, async () => {
-			const res = await request<Echo>(opts({ url: `${baseUrl()}/m`, json: true, method: verb, body: verb === 'GET' ? undefined : 'x' }))
+			const res = await echoBody(request(opts({ url: `${baseUrl()}/m`, json: true, method: verb, body: verb === 'GET' ? undefined : 'x' })))
 			expect(res.method).toBe(verb)
 		})
 	}
 
 	it('lowercase method string is normalised to the wire verb', async () => {
-		const res = await request<Echo>(opts({ url: `${baseUrl()}/lc`, json: true, method: 'post', body: 'y' }))
+		const res = await echoBody(request(opts({ url: `${baseUrl()}/lc`, json: true, method: 'post', body: 'y' })))
 		expect(res.method).toBe('POST')
 	})
 })

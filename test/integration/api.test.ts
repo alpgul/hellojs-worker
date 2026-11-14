@@ -21,32 +21,33 @@ interface Report {
 }
 
 it('promise+json+full-response', async () => {
-	const data = await request<Report>({ url: URL, json: true, resolveWithFullResponse: true })
-	expect(data.status).toBe(200)
-	expect(data.body?.url).toBe(URL)
+	const res = await request({ url: URL, json: true })
+	expect(res.status).toBe(200)
+	const data = (await res.json()) as Report
+	expect(data.url).toBe(URL)
 })
 
 it('callback form', async () => {
 	let err: unknown = null
 	const body = await new Promise<Report | undefined>((resolve) => {
-		request<Report>({ url: URL, json: true }, (e, _res, b) => { err = e; resolve(b) })
+		request({ url: URL, json: true, bodyOnly: true }, (e, _res, b) => { err = e; resolve(b as Report | undefined) })
 	})
 	expect(err).toBeNull()
 	expect(body?.url).toBe(URL)
 })
 
 it('request.get shortcut', async () => {
-	const body = await request.get<Report>({ url: URL, json: true })
-	expect(body?.method).toBe('GET')
+	const body = (await request.get({ url: URL, json: true, bodyOnly: true })) as Report
+	expect(body.method).toBe('GET')
 })
 
 it('request.defaults', async () => {
 	const r = request.defaults({ json: true, headers: { 'x-custom': 'hellojs' } })
-	const body = await r<Report>({ url: URL })
-	expect(body?.headers?.['X-Custom']).toStrictEqual(['hellojs'])
+	const body = (await r({ url: URL, bodyOnly: true })) as Report
+	expect(body.headers?.['X-Custom']).toStrictEqual(['hellojs'])
 })
 
 it('qs builder', async () => {
-	const body = await request<Report>({ url: URL, qs: { foo: 'bar', baz: 1 }, json: true })
-	expect(body?.args).toStrictEqual({ baz: ['1'], foo: ['bar'] })
+	const body = (await request({ url: URL, qs: { foo: 'bar', baz: 1 }, json: true, bodyOnly: true })) as Report
+	expect(body.args).toStrictEqual({ baz: ['1'], foo: ['bar'] })
 })

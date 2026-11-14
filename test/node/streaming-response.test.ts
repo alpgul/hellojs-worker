@@ -1,4 +1,5 @@
-// opts.stream returns a Readable that delivers chunks as they arrive (no buffer).
+// opts.stream resolves a fetch Response as soon as the headers arrive; `body` is a web
+// ReadableStream that delivers chunks progressively (no buffering).
 
 import { execSync } from 'node:child_process'
 import * as crypto from 'node:crypto'
@@ -12,8 +13,6 @@ import { expect, it } from 'vitest'
 import request from '../../index.ts'
 import { listenOnLoopback } from '../helpers/tcp.ts'
 
-import type { Readable } from 'node:stream'
-
 function genServerCert(): { key: Buffer; cert: Buffer } {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hjsrv-'))
 	const k = path.join(dir, 'k.pem'), c = path.join(dir, 'c.pem')
@@ -26,7 +25,7 @@ function genServerCert(): { key: Buffer; cert: Buffer } {
 	}
 }
 
-it('opts.stream resolves with a Readable that yields chunks progressively', async () => {
+it('opts.stream resolves a Response whose body yields chunks progressively', async () => {
 	const { key, cert } = genServerCert()
 	const server = http2.createSecureServer({ key, cert, allowHTTP1: false })
 	server.on('stream', (stream) => {
@@ -45,19 +44,22 @@ it('opts.stream resolves with a Readable that yields chunks progressively', asyn
 
 	try {
 		// localhost cert is not in trust store, so we must disable cert validation.
-		const stream = await request({
+		const res = await request({
 			url: `https://127.0.0.1:${port}/`,
 			stream: true,
 			verifyTLS: false,
-		}) as unknown as Readable
+		})
 
+		expect(res.body).toBeInstanceOf(ReadableStream)
+		const reader = res.body!.getReader()
 		let bytes = 0
 		let chunkCount = 0
-		await new Promise<void>((resolve, reject) => {
-			stream.on('data', (c: Buffer) => { bytes += c.length; chunkCount++ })
-			stream.on('end', resolve)
-			stream.on('error', reject)
-		})
+		for (;;) {
+			const { done, value } = await reader.read()
+			if (done) break
+			bytes += value.length
+			chunkCount++
+		}
 
 		expect(bytes, 'all bytes received').toBe(16 * 8192)
 		expect(chunkCount, `expected multiple progressive chunks, got ${chunkCount}`).toBeGreaterThanOrEqual(2)
@@ -66,7 +68,7 @@ it('opts.stream resolves with a Readable that yields chunks progressively', asyn
 	}
 }, 10_000)
 
-it('opts.stream + resolveWithFullResponse exposes status, headers, body Readable', async () => {
+it('opts.stream exposes status, headers and a web body stream', async () => {
 	const { key, cert } = genServerCert()
 	const server = http2.createSecureServer({ key, cert })
 	server.on('stream', (stream) => {
@@ -79,17 +81,12 @@ it('opts.stream + resolveWithFullResponse exposes status, headers, body Readable
 		const res = await request({
 			url: `https://127.0.0.1:${port}/`,
 			stream: true,
-			resolveWithFullResponse: true,
 			verifyTLS: false,
 		})
-		expect(res.statusCode).toBe(201)
-		expect(res.headers['x-hello']).toBe('world')
-		// opts.stream puts a Readable in body, which the Response<TBody> default cannot know.
-		const body = res.body as Readable
-		expect(typeof body.pipe).toBe('function')
-		const chunks: Buffer[] = []
-		for await (const c of body) chunks.push(c)
-		expect(Buffer.concat(chunks).toString()).toBe('payload')
+		expect(res.status).toBe(201)
+		expect(res.headers.get('x-hello')).toBe('world')
+		expect(res.body).toBeInstanceOf(ReadableStream)
+		expect(await res.text()).toBe('payload')
 	} finally {
 		server.close()
 	}

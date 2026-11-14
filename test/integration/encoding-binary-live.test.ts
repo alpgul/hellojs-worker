@@ -28,54 +28,57 @@ interface Echo {
 }
 
 const get = (url: string) =>
-	request<Echo>({ simple: false, verifyTLS: false, json: true, timeout: 30_000, url, resolveWithFullResponse: true })
+	request({ simple: false, verifyTLS: false, timeout: 30_000, url })
 
 describe('response content-encoding — auto-decompress', () => {
 	it('gzip (httpbingo)', async () => {
 		const res = await get(`${GO}/gzip`)
-		expect(res.headers['content-encoding']).toBe('gzip')
+		expect(res.headers.get('content-encoding')).toBe('gzip')
 		// Decoded + JSON-parsed successfully → the gzip body was inflated.
 		expect(res.status).toBe(200)
-		expect(res.body?.method).toBe('GET')
-		expect(res.body?.gzipped).toBe(true)
+		const body = (await res.json()) as Echo
+		expect(body.method).toBe('GET')
+		expect(body.gzipped).toBe(true)
 	})
 
 	it('deflate (httpbingo)', async () => {
 		const res = await get(`${GO}/deflate`)
-		expect(res.headers['content-encoding']).toBe('deflate')
-		expect(res.body?.method).toBe('GET')
-		expect(res.body?.deflated).toBe(true)
+		expect(res.headers.get('content-encoding')).toBe('deflate')
+		const body = (await res.json()) as Echo
+		expect(body.method).toBe('GET')
+		expect(body.deflated).toBe(true)
 	})
 
 	it('brotli (httpbin.io — also drives TLS1.2 + HTTP/1.1)', async () => {
 		const res = await get(`${PY}/brotli`)
-		expect(res.headers['content-encoding']).toBe('br')
-		expect(res.body?.method).toBe('GET')
+		expect(res.headers.get('content-encoding')).toBe('br')
+		const body = (await res.json()) as Echo
+		expect(body.method).toBe('GET')
 	})
 
 	it('zstd (httpbin.io — also drives TLS1.2 + HTTP/1.1)', async () => {
 		const res = await get(`${PY}/zstd`)
-		expect(res.headers['content-encoding']).toBe('zstd')
-		expect(res.body?.method).toBe('GET')
+		expect(res.headers.get('content-encoding')).toBe('zstd')
+		const body = (await res.json()) as Echo
+		expect(body.method).toBe('GET')
 	})
 })
 
 describe('binary downloads — no content-encoding, raw bytes preserved', () => {
 	it('/bytes/1024 returns exactly 1024 raw bytes', async () => {
-		// No json:true — the body must stay a byte Buffer, not be coerced to text.
-		const res = await request<Buffer>({ simple: false, verifyTLS: false, timeout: 30_000, url: `${GO}/bytes/1024`, resolveWithFullResponse: true })
+		// No JSON parsing — the body must stay raw bytes, not be coerced to text.
+		const res = await request({ simple: false, verifyTLS: false, timeout: 30_000, url: `${GO}/bytes/1024` })
 		expect(res.status).toBe(200)
-		expect(res.headers['content-type']).toContain('application/octet-stream')
-		expect(Buffer.isBuffer(res.rawBody)).toBe(true)
-		expect((res.rawBody as Buffer).length).toBe(1024)
+		expect(res.headers.get('content-type')).toContain('application/octet-stream')
+		const raw = Buffer.from(await res.arrayBuffer())
+		expect(raw.length).toBe(1024)
 	})
 
 	it('/image/jpeg returns a real JPEG (SOI magic FF D8 FF)', async () => {
-		const res = await request<Buffer>({ simple: false, verifyTLS: false, timeout: 30_000, url: `${GO}/image/jpeg`, resolveWithFullResponse: true })
+		const res = await request({ simple: false, verifyTLS: false, timeout: 30_000, url: `${GO}/image/jpeg` })
 		expect(res.status).toBe(200)
-		expect(res.headers['content-type']).toContain('image/jpeg')
-		const buf = res.rawBody as Buffer
-		expect(Buffer.isBuffer(buf)).toBe(true)
+		expect(res.headers.get('content-type')).toContain('image/jpeg')
+		const buf = Buffer.from(await res.arrayBuffer())
 		expect(buf.length).toBeGreaterThan(1000)
 		// JPEG starts with the SOI marker and ends with the EOI marker.
 		expect([buf[0], buf[1], buf[2]]).toEqual([0xff, 0xd8, 0xff])

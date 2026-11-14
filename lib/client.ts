@@ -17,7 +17,7 @@
 //   Accept-Encoding to `identity` in headers; servers will then respond uncompressed.
 
 import * as querystring from 'node:querystring'
-import { PassThrough } from 'node:stream'
+import { PassThrough, Readable } from 'node:stream'
 import { URL } from 'node:url'
 import * as zlib from 'node:zlib'
 
@@ -28,7 +28,9 @@ import { buildH2Headers, buildH1Headers, mergeProfileHeaders } from './headers.t
 import { observability, nextRequestId } from './observability.ts'
 import * as pool from './pool.ts'
 import * as profileRegistry from './profiles/index.ts'
+import { statusTextFor } from './status-text.ts'
 import { summarizeConn } from './tls-summary.ts'
+import { buildResponse, createPushStream, isWebReadableStream, nodeToWebStream, webToNodeStream } from './web-response.ts'
 
 import type { Connection, PerPhaseTimeouts } from './connect.ts'
 import type { ErrorCode } from './errors.ts'
@@ -36,7 +38,8 @@ import type { H2Stream } from './h2/session.ts'
 import type { HeaderMap } from './headers.ts'
 import type { PoolConfig } from './pool.ts'
 import type { Profile } from './profiles/types.ts'
-import type { Readable, Transform } from 'node:stream'
+import type { PushStream } from './web-response.ts'
+import type { Transform } from 'node:stream'
 
 // RFC 6265-compliant cookie jar lives in lib/cookies.ts.
 
@@ -47,7 +50,9 @@ import type { Readable, Transform } from 'node:stream'
 // Any positive number overrides the default.
 const DEFAULT_RESPONSE_TIMEOUT_MS = 60_000
 
-export type RequestBodyValue = string | Buffer | Uint8Array | Readable | Record<string, unknown> | unknown[]
+export type RequestBodyValue = BodyInit | Buffer | Readable | Record<string, unknown> | unknown[]
+
+export type RedirectMode = 'follow' | 'manual' | 'error'
 
 export interface RetryPolicy {
 	limit?: number
@@ -60,15 +65,15 @@ export interface RequestOptions {
 	url?: string
 	uri?: string
 	method?: string
-	headers?: Record<string, string | string[]>
+	headers?: HeadersInit | Record<string, string | string[]>
 	body?: RequestBodyValue | null
 	json?: boolean | unknown
 	form?: Record<string, string | number>
 	qs?: Record<string, string | number | (string | number)[]>
 	jar?: Jar | null
 	gzip?: boolean
-	/** Redirect handling: 'follow' (default) auto-follows 3xx; 'manual' stops and returns the 3xx response. */
-	redirect?: 'follow' | 'manual'
+	/** Redirect handling: 'follow' (default) auto-follows 3xx; 'manual' stops and returns the 3xx response; 'error' rejects on any redirect. */
+	redirect?: RedirectMode
 	maxRedirects?: number
 	timeout?: number
 	timeouts?: PerPhaseTimeouts | null
@@ -83,7 +88,17 @@ export interface RequestOptions {
 	 * outside printable ASCII reject with `EBADOPTS`; unused by `socks5://`.
 	 */
 	proxyHeaders?: Record<string, string> | null
+	/**
+	 * Legacy request.js escape hatch: resolve the parsed body (string, Buffer, or the value
+	 * `json: true` produced) instead of the fetch-compatible `Response`. Deprecated.
+	 */
+	bodyOnly?: boolean
+	/** Deprecated no-op: `request()` always resolves a full `Response` unless `bodyOnly` is set. */
 	resolveWithFullResponse?: boolean
+	/**
+	 * Opt in to request.js error semantics: reject with `EHTTP` when the status is >= 400.
+	 * Default is `false`, matching `fetch()` (inspect `res.ok` instead).
+	 */
 	simple?: boolean
 	retry?: RetryPolicy
 
@@ -106,35 +121,61 @@ export interface RequestOptions {
 	keepAlive?: boolean
 	/** Keep-alive pool caps: process-wide sockets, sockets per origin, idle socket lifetime. */
 	pool?: Partial<PoolConfig>
-	/** When true, resolve as soon as headers arrive and expose the body as a Node Readable. */
+	/**
+	 * Resolve as soon as the response headers arrive and expose the body as a progressive
+	 * `ReadableStream` on `Response.body`. Works for H1, H2 and H3. When false (default) the
+	 * body is buffered first; `Response.body` is still a web stream over the buffered bytes.
+	 */
 	stream?: boolean
 	/** Profile name, or an inline profile object. */
 	profile?: string | Profile
+
+	/** Fetch `RequestInit` fields accepted for drop-in compatibility (ignored by this client). */
+	credentials?: 'omit' | 'same-origin' | 'include'
+	mode?: 'cors' | 'no-cors' | 'same-origin' | 'navigate'
+	cache?: string
+	integrity?: string
+	keepalive?: boolean
+	referrer?: string
+	referrerPolicy?: string
+	/** Present for fetch signature compatibility; a streaming request body is always half-duplex here. */
+	duplex?: 'half'
+	/** Abort the request (or an in-flight response body) when this signal fires. */
+	signal?: AbortSignal | null
 	// Carried across redirects so every attempt shares one observability id.
 	_reqId?: number
+	// Internal: set once a redirect has been followed, so `Response.redirected` is accurate.
+	_redirected?: boolean
 }
 
-export interface Response<TBody = unknown> {
-	statusCode: number
-	status: number
-	headers: Record<string, string | string[]>
-	body: TBody
-	rawBody: TBody | Buffer
-}
+/**
+ * The result of `request()`: the platform's own fetch `Response`, so every consumer —
+ * DOM, Node's undici, or Workers — understands it without a cast.
+ */
+export type Response = globalThis.Response
 
-export type Callback<TBody = unknown> = (
+/** Fetch-style init accepted as the second argument; request.js options may be mixed in. */
+export type FetchInit = Omit<RequestInit, 'body' | 'headers' | 'method' | 'redirect' | 'signal'> & RequestOptions
+
+export type Callback = (
 	err: HellojsError | null,
-	res: Response<TBody> | undefined,
-	body: TBody | undefined,
+	res: Response | undefined,
+	body: unknown | undefined,
 ) => void
 
-type MethodFn = (urlOrOpts: RequestOptions | string, cb?: Callback) => Promise<unknown>
+type MethodFn = (input: string | URL | Request | RequestOptions, initOrCb?: FetchInit | Callback) => Promise<unknown>
 
-// The public call shape, mirrored by index.d.ts: `resolveWithFullResponse: true` written as a
-// literal resolves the full Response, anything else resolves just the body.
+/**
+ * The public call shape, mirrored by index.d.ts: the result is always a fetch `Response`
+ * unless the deprecated `bodyOnly: true` escape hatch is requested.
+ */
 export interface Invokable {
-	<TBody = unknown>(opts: RequestOptions & { resolveWithFullResponse: true }, cb?: Callback<TBody>): Promise<Response<TBody>>
-	<TBody = unknown>(opts: RequestOptions | string, cb?: Callback<TBody>): Promise<TBody>
+	(input: string | URL | Request, init?: FetchInit): Promise<Response>
+	(input: string | URL | Request, cb: Callback): Promise<Response>
+	(opts: RequestOptions & { bodyOnly: true }, cb: Callback): Promise<unknown>
+	(opts: RequestOptions, cb: Callback): Promise<Response>
+	(opts: RequestOptions & { bodyOnly: true }): Promise<unknown>
+	(opts: RequestOptions): Promise<Response>
 }
 
 interface Shortcuts {
@@ -175,6 +216,73 @@ type H1Headers = Record<string, string | string[]>
 
 const isReadable = (b: unknown): b is Readable =>
 	!!b && typeof b === 'object' && typeof (b as { pipe?: unknown }).pipe === 'function'
+
+// Normalize the three `HeadersInit` spellings (Headers, tuple list, record) into the plain
+// record the transports already build from. Repeated fields stay repeated so `set-cookie`
+// arrays survive; every name is lowercased the way the wire layer expects.
+function headersToRecord(input?: HeadersInit | HeaderMap | null): Record<string, string | string[]> {
+	const out: Record<string, string | string[]> = {}
+	if (!input) return out
+	const maybeHeaders = input as Headers
+	if (typeof maybeHeaders.forEach === 'function') {
+		maybeHeaders.forEach((value, name) => {
+			const key = name.toLowerCase()
+			const prev = out[key]
+			out[key] = prev === undefined ? value : Array.isArray(prev) ? [...prev, value] : [String(prev), value]
+		})
+		// Undici and Workers expose combined set-cookie values through getSetCookie; forEach
+		// collapses them into one comma-joined string, which cookies must not do.
+		const getSetCookie = (input as { getSetCookie?: () => string[] }).getSetCookie
+		if (typeof getSetCookie === 'function') {
+			const cookies = getSetCookie.call(input)
+			if (cookies.length) out['set-cookie'] = cookies
+		}
+		return out
+	}
+	if (Array.isArray(input)) {
+		for (const [name, value] of input) {
+			const key = String(name).toLowerCase()
+			const prev = out[key]
+			out[key] = prev === undefined ? String(value) : Array.isArray(prev) ? [...prev, String(value)] : [String(prev), String(value)]
+		}
+		return out
+	}
+	for (const [name, value] of Object.entries(input as HeaderMap)) {
+		if (value === undefined || value === null) continue
+		out[name.toLowerCase()] = Array.isArray(value) ? value.map(String) : String(value)
+	}
+	return out
+}
+
+function isBlob(value: unknown): value is Blob {
+	return typeof Blob !== 'undefined' && value instanceof Blob
+}
+
+function isFormData(value: unknown): value is FormData {
+	return typeof FormData !== 'undefined' && value instanceof FormData
+}
+
+function isUrlSearchParams(value: unknown): value is URLSearchParams {
+	return typeof URLSearchParams !== 'undefined' && value instanceof URLSearchParams
+}
+
+function abortReason(signal?: AbortSignal | null): unknown {
+	const reason = signal?.reason
+	return reason !== undefined ? reason : new DOMException('The operation was aborted.', 'AbortError')
+}
+
+function throwIfAborted(signal?: AbortSignal | null): void {
+	if (signal?.aborted) throw abortReason(signal)
+}
+
+// Register a fetch-style abort hook and return the cleanup. `{ once: true }` plus the
+// explicit removal keeps a long-lived signal from retaining closed requests.
+function onAbort(signal: AbortSignal | null | undefined, handler: () => void): () => void {
+	if (!signal) return () => {}
+	if (signal.aborted) { handler(); return () => {} }
+	signal.addEventListener('abort', handler, { once: true })
+	return () => signal.removeEventListener('abort', handler)
+}
 
 function decompressIfNeeded(buf: Buffer, encoding: string): Buffer {
 	const e = (encoding || '').toLowerCase()
@@ -217,21 +325,40 @@ function buildUrl(opts: RequestOptions): URL {
 	return new URL(url)
 }
 
-function prepareBody(opts: RequestOptions): Buffer | Readable | null {
-	if (opts.body !== undefined) {
+interface PreparedBody {
+	body: Buffer | Readable | null
+	/** Content type computed by the BodyInit serializer (FormData boundary, URLSearchParams). */
+	contentType: string | null
+}
+
+async function prepareBody(opts: RequestOptions): Promise<PreparedBody> {
+	const raw = opts.body
+	if (raw !== undefined && raw !== null) {
 		// Streaming bodies: pass the Readable through; we'll send it as h2 DATA frames or h1 chunked.
-		if (isReadable(opts.body)) return opts.body
-		if (typeof opts.body === 'string' || Buffer.isBuffer(opts.body)) return Buffer.from(opts.body)
-		if (opts.json && typeof opts.body === 'object') return Buffer.from(JSON.stringify(opts.body))
-		if (typeof opts.body === 'object') return Buffer.from(JSON.stringify(opts.body))
+		if (isReadable(raw)) return { body: raw, contentType: null }
+		if (isWebReadableStream(raw)) return { body: webToNodeStream(raw), contentType: null }
+		if (typeof raw === 'string') return { body: Buffer.from(raw), contentType: null }
+		if (Buffer.isBuffer(raw)) return { body: raw, contentType: null }
+		if (raw instanceof ArrayBuffer) return { body: Buffer.from(raw), contentType: null }
+		if (ArrayBuffer.isView(raw)) return { body: Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength), contentType: null }
+		// BodyInit types that need serialization rules (multipart boundary, form encoding).
+		// A real Response performs exactly the encoding fetch would, so reuse it.
+		if (isBlob(raw) || isFormData(raw) || isUrlSearchParams(raw)) {
+			const wrapped = new Response(raw as BodyInit)
+			return {
+				body: Buffer.from(await wrapped.arrayBuffer()),
+				contentType: wrapped.headers.get('content-type'),
+			}
+		}
+		if (typeof raw === 'object') return { body: Buffer.from(JSON.stringify(raw)), contentType: null }
 	}
 	if (opts.json && typeof opts.json !== 'boolean') {
-		return Buffer.from(JSON.stringify(opts.json))
+		return { body: Buffer.from(JSON.stringify(opts.json)), contentType: null }
 	}
 	if (opts.form) {
-		return Buffer.from(querystring.stringify(opts.form))
+		return { body: Buffer.from(querystring.stringify(opts.form)), contentType: null }
 	}
-	return null
+	return { body: null, contentType: null }
 }
 
 function shouldDoJsonContentType(opts: RequestOptions, body: Buffer | Readable | null): boolean {
@@ -241,6 +368,7 @@ function shouldDoJsonContentType(opts: RequestOptions, body: Buffer | Readable |
 }
 
 async function performRequest(opts: RequestOptions): Promise<unknown> {
+	throwIfAborted(opts.signal)
 	const url = buildUrl(opts)
 	const method = (opts.method || 'GET').toUpperCase()
 	const host = url.hostname
@@ -302,7 +430,7 @@ async function performRequest(opts: RequestOptions): Promise<unknown> {
 	}
 
 	// Build headers
-	const userHeaders: HeaderMap = { ...opts.headers }
+	const userHeaders: HeaderMap = headersToRecord(opts.headers)
 	// Case-insensitive header presence check. Callers may Title-Case headers (e.g.
 	// `Content-Length`, `Content-Type`) to match Chrome's HTTP/1.1 casing, which is a
 	// DataDome fingerprint. The auto-adds below must NOT inject a lowercase DUPLICATE
@@ -331,9 +459,11 @@ async function performRequest(opts: RequestOptions): Promise<unknown> {
 			}
 		}
 	}
-	const body = prepareBody(opts)
+	const prepared = await prepareBody(opts)
+	const body = prepared.body
 	if (body && !_hasHeader('content-type')) {
-		if (shouldDoJsonContentType(opts, body)) userHeaders['content-type'] = 'application/json'
+		if (prepared.contentType) userHeaders['content-type'] = prepared.contentType
+		else if (shouldDoJsonContentType(opts, body)) userHeaders['content-type'] = 'application/json'
 		else if (opts.form) userHeaders['content-type'] = 'application/x-www-form-urlencoded'
 	}
 	const isStream = isReadable(body)
@@ -351,41 +481,113 @@ async function performRequest(opts: RequestOptions): Promise<unknown> {
 	if (isStream && !_hasHeader('content-length') && !_hasHeader('transfer-encoding') && conn.alpn === 'http/1.1') userHeaders['transfer-encoding'] = 'chunked'
 
 	const ctx: RequestContext = { method, url, host, body, userHeaders, opts, profileObj }
+	const transport = (async () => {
+		if (conn.alpn === 'h3') return performH3(conn, ctx)
+		if (conn.alpn === 'h2') return performH2(conn, ctx)
+		return performH1(conn, ctx)
+	})()
+	let removeAbort = () => {}
 	try {
-		if (conn.alpn === 'h3') return await performH3(conn, ctx)
-		if (conn.alpn === 'h2') return await performH2(conn, ctx)
-		return await performH1(conn, ctx)
+		if (opts.signal) {
+			let rejectAbort: (reason: unknown) => void = () => {}
+			const aborted = new Promise<never>((_, reject) => { rejectAbort = reject })
+			removeAbort = onAbort(opts.signal, () => {
+				try { conn.close('abort') } catch {}
+				rejectAbort(abortReason(opts.signal))
+			})
+			return await Promise.race([transport, aborted])
+		}
+		return await transport
 	} catch (e) {
 		// Synchronous setup failures (e.g. a header builder throwing) must not leak the socket.
 		// A pooled socket survives with its slot returned so sibling streams are unaffected;
 		// one-shot sockets close. close() is idempotent.
 		if (!pool.release(conn)) conn.close('error')
 		throw e
+	} finally {
+		removeAbort()
 	}
 }
 
 async function performH3(conn: Connection, { method, url, host, body, userHeaders, opts, profileObj }: RequestContext): Promise<unknown> {
 	const headers = mergeProfileHeaders(userHeaders, profileObj)
-	let res
-	try {
-		res = await conn.h3Client!.request({
-			method,
-			path: url.pathname + url.search,
-			host,
-			headers,
-			body,
-		})
-	} catch (e) {
-		conn.close('h3-error')
-		throw e
+	const path = url.pathname + url.search
+	const close = () => { try { conn.close('h3-response-complete') } catch { /* already closed */ } }
+
+	if (!opts.stream) {
+		let res
+		try {
+			res = await conn.h3Client!.request({ method, path, host, headers, body })
+		} catch (e) {
+			conn.close('h3-error')
+			throw e
+		}
+		close()
+		let raw: Buffer = res.body
+		try { raw = decompressIfNeeded(raw, res.headers['content-encoding']) }
+		catch (e) { throw new HellojsError((e as Error).message, 'EDECOMPRESS', e) }
+		if (opts.jar && res.headers['set-cookie']) opts.jar.setCookie(res.headers['set-cookie'], url.toString())
+		return new Promise((resolve, reject) => handleResponse({
+			status: res.status, statusText: statusTextFor(res.status), headers: res.headers, raw, opts, resolve, reject,
+		}))
 	}
-	conn.close('h3-response-complete')
-	const raw: Buffer = decompressIfNeeded(res.body, res.headers['content-encoding'])
-	if (opts.jar && res.headers['set-cookie']) opts.jar.setCookie(res.headers['set-cookie'], url.toString())
-	let bodyOut: unknown = raw
-	if (opts.json && raw.length) { try { bodyOut = JSON.parse(raw.toString('utf8')) } catch {} }
-	else if (raw.length && res.headers['content-type']?.includes('text')) bodyOut = raw.toString('utf8')
-	return new Promise((resolve, reject) => handleResponse({ status: res.status, headers: res.headers, body: bodyOut, raw, opts, resolve, reject }))
+
+	// Progressive path: resolve at HEADERS, stream DATA frames as they arrive. Redirects and
+	// simple-mode errors are buffered so the normal handleResponse logic still applies to them.
+	return new Promise((resolve, reject) => {
+		let pass: PassThrough | null = null
+		let userStream: Readable | null = null
+		let buffering = false
+		let buffered: Buffer[] = []
+		let status = 0
+		let resHeaders: Record<string, string> = {}
+		let resolved = false
+
+		conn.h3Client!.requestStream({ method, path, host, headers, body }, {
+			onHeaders: (s, h) => {
+				status = s
+				resHeaders = h
+				if (opts.jar && h['set-cookie']) opts.jar.setCookie(h['set-cookie'], url.toString())
+				const isRedirect = opts.redirect !== 'manual' && s >= 300 && s < 400 && !!h.location
+				if (isRedirect || (opts.simple === true && s >= 400)) {
+					buffering = true
+					return
+				}
+				pass = new PassThrough()
+				const decoder = decompressStreamForEncoding(h['content-encoding'])
+				userStream = decoder ? pass.pipe(decoder) : pass
+				const web = nodeToWebStream(userStream, () => { try { conn.close('abort') } catch { /* closed */ } })
+				const res = buildResponse({
+					status: s, statusText: statusTextFor(s), headers: h, body: web, ...responseMeta(opts),
+				})
+				resolved = true
+				resolve(opts.bodyOnly ? userStream : res)
+			},
+			onData: (chunk) => {
+				if (buffering) { buffered.push(chunk); return }
+				if (pass && !pass.destroyed && !pass.write(chunk)) {
+					// H3 flow control is owned by the QUIC layer; the stream controller queues
+					// the excess, so there is no source to pause here.
+				}
+			},
+			onEnd: () => {
+				close()
+				if (buffering) {
+					let raw: Buffer = Buffer.concat(buffered)
+					try { raw = decompressIfNeeded(raw, resHeaders['content-encoding']) }
+					catch (e) { reject(new HellojsError((e as Error).message, 'EDECOMPRESS', e)); return }
+					handleResponse({ status, statusText: statusTextFor(status), headers: resHeaders, raw, opts, resolve, reject })
+					return
+				}
+				pass?.end()
+			},
+			onError: (e) => {
+				close()
+				if (pass) pass.destroy(e)
+				else if (!resolved) reject(new HellojsError(e.message, 'EH3STREAM', e))
+			},
+		})
+	})
 }
 
 function performH2(conn: Connection, { method, url, host, body, userHeaders, opts, profileObj }: RequestContext): Promise<unknown> {
@@ -411,38 +613,88 @@ function performH2(conn: Connection, { method, url, host, body, userHeaders, opt
 		}, respMs) : null
 		let firstByteEmitted = false
 
-		// Streaming response path: when opts.stream is true, resolve as soon as headers arrive
-		// with the body exposed as a Readable that callers can `.pipe()` into a Writable.
+		// Streaming response path: resolve as soon as headers arrive and expose the rest as a
+		// web ReadableStream. Redirects and simple-mode errors need their (small) body to
+		// apply the normal policy, so those are buffered and handed to handleResponse.
 		if (opts.stream) {
 			let settled = false
+			let resolved = false
+			let buffering = false
+			const buffered: Buffer[] = []
+			let bufferedStatus = 0
+			let bufferedHeaders: H1Headers | undefined
+			let pass: PassThrough | null = null
+			let userStream: Readable | null = null
+
 			req.on('response', (h: H1Headers) => {
 				if (settled) return
 				settled = true
 				if (timer) clearTimeout(timer)
 				const status = parseInt(String(h[':status'] ?? 0), 10)
 				if (opts.jar && h['set-cookie']) opts.jar.setCookie(h['set-cookie'], url.toString())
-
-				const pt = new PassThrough()
+				const isRedirect = opts.redirect !== 'manual' && status >= 300 && status < 400 && !!h.location
+				if (isRedirect || (opts.simple === true && status >= 400)) {
+					buffering = true
+					bufferedStatus = status
+					bufferedHeaders = h
+					return
+				}
+				pass = new PassThrough()
 				const decoder = decompressStreamForEncoding(h['content-encoding'] as string)
-				const userStream: Readable = decoder ? pt.pipe(decoder) : pt
+				userStream = decoder ? pass.pipe(decoder) : pass
 
-				req.on('data', (c: Buffer) => pt.write(c))
+				req.on('data', (c: Buffer) => {
+					if (pass && !pass.destroyed && !pass.write(c)) {
+						// H2 flow control is per-stream; the web controller queues what the
+						// consumer has not read yet.
+					}
+				})
 				req.on('end', () => {
-					pt.end()
+					pass?.end()
 					if (!pool.release(conn)) conn.close('h2-stream-end')
 				})
-				req.on('error', (e: Error) => { conn.close('h2-stream-error'); pt.destroy(new HellojsError(e.message, 'EH2STREAM', e)) })
+				req.on('error', (e: Error) => {
+					conn.close('h2-stream-error')
+					pass?.destroy(new HellojsError(e.message, 'EH2STREAM', e))
+				})
 
-				const res: Response<Readable> = { statusCode: status, status, headers: h, body: userStream, rawBody: userStream }
-				if (opts.simple !== false && status >= 400) {
-					const err = new HellojsError(`HTTP ${status}`, 'EHTTP')
-					err.response = res
-					req.close(0x8); if (!pool.release(conn)) conn.close('h2-http-error'); pt.destroy(err)
-					return reject(err)
-				}
-				resolve(opts.resolveWithFullResponse ? res : userStream)
+				const web = nodeToWebStream(userStream, () => {
+					try { req.close(0x8) } catch { /* already closed */ }
+					if (!pool.release(conn)) conn.close('h2-stream-cancel')
+				})
+				const res = buildResponse({
+					status, statusText: statusTextFor(status), headers: h, body: web, ...responseMeta(opts),
+				})
+				resolved = true
+				resolve(opts.bodyOnly ? userStream : res)
 			})
-			req.on('error', (e: Error) => { if (settled) return; settled = true; if (timer) clearTimeout(timer); conn.close('h2-stream-error'); reject(new HellojsError(e.message, 'EH2STREAM', e)) })
+			req.on('data', (c: Buffer) => {
+				if (!buffering) return
+				buffered.push(c)
+				if (!firstByteEmitted) {
+					firstByteEmitted = true
+					observability.safeEmit('request:firstByte', { id: reqId, durationMs: Date.now() - reqT0 })
+				}
+			})
+			req.on('end', () => {
+				if (!buffering) return
+				if (timer) clearTimeout(timer)
+				if (!pool.release(conn)) conn.close('h2-response-complete')
+				let raw: Buffer = Buffer.concat(buffered)
+				try { raw = decompressIfNeeded(raw, bufferedHeaders?.['content-encoding'] as string) }
+				catch (e) { return reject(new HellojsError((e as Error).message, 'EDECOMPRESS', e)) }
+				handleResponse({
+					status: bufferedStatus, statusText: statusTextFor(bufferedStatus),
+					headers: bufferedHeaders ?? {}, raw, opts, resolve, reject,
+				})
+			})
+			req.on('error', (e: Error) => {
+				if (settled) return
+				settled = true
+				if (timer) clearTimeout(timer)
+				conn.close('h2-stream-error')
+				reject(new HellojsError(e.message, 'EH2STREAM', e))
+			})
 			if (streamingBody) {
 				// req.write returns false when the peer's flow-control window is full and the chunk
 				// is queued; pause the source until the session drains it (emits 'drain').
@@ -484,13 +736,7 @@ function performH2(conn: Connection, { method, url, host, body, userHeaders, opt
 				tls: summarizeConn(conn),
 			})
 			if (opts.jar && resHeaders?.['set-cookie']) opts.jar.setCookie(resHeaders['set-cookie'], url.toString())
-			let bodyOut: unknown = raw
-			if (opts.json && raw.length) {
-				try { bodyOut = JSON.parse(raw.toString('utf8')) } catch { /* leave as buffer */ }
-			} else if (raw.length && (resHeaders?.['content-type'] as string)?.includes('utf-8')) {
-				bodyOut = raw.toString('utf8')
-			}
-			handleResponse({ status, headers: resHeaders!, body: bodyOut, raw, opts, resolve, reject })
+			handleResponse({ status, statusText: statusTextFor(status), headers: resHeaders!, raw, opts, resolve, reject })
 		})
 		req.on('error', (e: Error) => { if (timer) clearTimeout(timer); conn.close('h2-error'); reject(new HellojsError(e.message, 'EH2STREAM', e)) })
 		if (streamingBody) {
@@ -532,10 +778,26 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 		let buf: Buffer = Buffer.alloc(0)
 		let settled = false, headersParsed = false
 		let status = 0
+		let statusText = ''
 		let headers: H1Headers = {}
 		let mode: HeadMode | null = null
 		let contentLength = 0
 		let bodyStart = 0
+		// Progressive-response state. `streamingStarted` means headers have been handed off to
+		// the web stream (or to the redirect/simple buffer), so later chunks bypass `buf`.
+		let streamingStarted = false
+		let streaming = false
+		let buffering = false
+		let streamDone = false
+		const buffered: Buffer[] = []
+		let pass: PassThrough | null = null
+		let userStream: Readable | null = null
+		let bodyAbortCleanup = () => {}
+		// Incremental framing state for the streaming chunked parser.
+		let frameBuf: Buffer = Buffer.alloc(0)
+		let chunkRemaining = 0
+		let chunkState: 'size' | 'data' | 'data-crlf' | 'trailers' = 'size'
+		let received = 0
 
 		const respMs = opts.timeouts?.response ?? opts.timeout ?? DEFAULT_RESPONSE_TIMEOUT_MS
 		let timer: ReturnType<typeof setTimeout> | null = respMs ? setTimeout(() => {
@@ -593,6 +855,7 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 			// next one from the stream (RFC 7230 3.3.3 rule 1 — e.g. 100 Continue, 103 Early Hints).
 			if (st >= 100 && st < 200) { buf = buf.subarray(he + 4); return 'interim' }
 			status = st
+			statusText = m[3] ?? ''
 			headers = {}
 			for (const ln of lines) {
 				const idx = ln.indexOf(':')
@@ -620,6 +883,128 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 			}
 			headersParsed = true
 			return 'ok'
+		}
+
+		// Write decoded entity bytes into the progressive Node stream, pausing the socket when
+		// the consumer has stopped reading. `pass` is piped through the decompressor when the
+		// response is encoded, so its writable side is the backpressure signal.
+		function writeOut(data: Buffer): void {
+			if (!pass || pass.destroyed || data.length === 0) return
+			received += data.length
+			if (!pass.write(data)) {
+				try { transport.pause() } catch { /* not a Node stream */ }
+				pass.once('drain', () => { try { transport.resume() } catch { /* closed */ } })
+			}
+		}
+
+		// Incremental chunked decoder for the streaming path. The buffered path keeps its
+		// whole-buffer `dechunk` helper; this one never retains more than partial framing.
+		function feedChunked(chunk: Buffer): void {
+			frameBuf = frameBuf.length ? Buffer.concat([frameBuf, chunk]) : chunk
+			for (;;) {
+				if (chunkState === 'size') {
+					const nl = frameBuf.indexOf(CRLF)
+					if (nl < 0) return
+					const token = frameBuf.subarray(0, nl).toString('ascii').split(';')[0].trim()
+					if (!/^[0-9a-fA-F]+$/.test(token)) { failStream('bad chunk size', 'EBADRESP'); return }
+					const size = Number.parseInt(token, 16)
+					frameBuf = frameBuf.subarray(nl + 2)
+					if (size === 0) { chunkState = 'trailers'; continue }
+					chunkRemaining = size
+					chunkState = 'data'
+				}
+				if (chunkState === 'data') {
+					if (frameBuf.length === 0) return
+					const take = Math.min(chunkRemaining, frameBuf.length)
+					writeOut(frameBuf.subarray(0, take))
+					frameBuf = frameBuf.subarray(take)
+					chunkRemaining -= take
+					if (chunkRemaining > 0) return
+					chunkState = 'data-crlf'
+				}
+				if (chunkState === 'data-crlf') {
+					if (frameBuf.length < 2) return
+					frameBuf = frameBuf.subarray(2)
+					chunkState = 'size'
+				}
+				if (chunkState === 'trailers') {
+					const end = findTrailerEnd(frameBuf, 0)
+					if (end < 0) return
+					completeStream()
+					return
+				}
+			}
+		}
+
+		function feedStream(chunk: Buffer): void {
+			if (streamDone) return
+			if (buffering) { if (chunk.length) buffered.push(chunk); return }
+			if (!streaming) return
+			if (mode === 'none') return
+			if (mode === 'length') {
+				const take = Math.min(chunk.length, contentLength - received)
+				if (take > 0) writeOut(chunk.subarray(0, take))
+				if (received >= contentLength) completeStream()
+				return
+			}
+			if (mode === 'eof') { writeOut(chunk); return }
+			if (mode === 'chunked') feedChunked(chunk)
+		}
+
+		function failStream(message: string, code: ErrorCode | string): void {
+			if (streamDone) return
+			streamDone = true
+			settled = true
+			cleanup()
+			bodyAbortCleanup()
+			try { conn.close('h1-stream-error') } catch { /* closed */ }
+			pass?.destroy(new HellojsError(message, code))
+		}
+
+		function completeStream(): void {
+			if (streamDone) return
+			streamDone = true
+			settled = true
+			cleanup()
+			bodyAbortCleanup()
+			try { conn.close('h1-response-complete') } catch { /* closed */ }
+			if (buffering) {
+				let raw: Buffer = Buffer.concat(buffered)
+				if (raw.length) {
+					try { raw = decompressIfNeeded(raw, coerce(headers['content-encoding']) || '') }
+					catch (e) { reject(new HellojsError((e as Error).message, 'EDECOMPRESS', e)); return }
+				}
+				if (opts.jar && headers['set-cookie']) opts.jar.setCookie(headers['set-cookie'], url.toString())
+				handleResponse({ status, statusText, headers, raw, opts, resolve, reject })
+				return
+			}
+			observability.safeEmit('request:end', {
+				id: opts._reqId, status, headers, totalBytes: received,
+				durationMs: Date.now() - h1T0, tls: summarizeConn(conn),
+			})
+			pass?.end()
+		}
+
+		// Hand the response off as soon as its headers are complete. Redirects and simple-mode
+		// errors are buffered because their (small) body decides what handleResponse must do;
+		// everything else becomes a progressive web stream.
+		function startStreaming(): void {
+			streamingStarted = true
+			const isRedirect = opts.redirect !== 'manual' && status >= 300 && status < 400 && !!headers.location
+			if (isRedirect || (opts.simple === true && status >= 400)) { buffering = true; return }
+			streaming = true
+			pass = new PassThrough()
+			const decoder = decompressStreamForEncoding(coerce(headers['content-encoding']) || '')
+			userStream = decoder ? pass.pipe(decoder) : pass
+			const web = nodeToWebStream(userStream, () => { try { conn.close('h1-stream-cancel') } catch { /* closed */ } })
+			const res = buildResponse({ status, statusText, headers, body: web, ...responseMeta(opts) })
+			bodyAbortCleanup = onAbort(opts.signal, () => {
+				try { conn.close('abort') } catch { /* closed */ }
+				const reason = abortReason(opts.signal)
+				pass?.destroy(reason instanceof Error ? reason : new HellojsError(String(reason), 'EABORT'))
+			})
+			if (timer) { clearTimeout(timer); timer = null }
+			resolve(opts.bodyOnly ? userStream : res)
 		}
 
 		// Returns true if the request settled (resolved/failed), false if more bytes are needed.
@@ -668,21 +1053,29 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 					totalBytes: raw.length, durationMs: Date.now() - h1T0, responseBody: raw,
 					tls: summarizeConn(conn),
 				})
-				let bodyOut: unknown = raw
-				if (opts.json && raw.length) { try { bodyOut = JSON.parse(raw.toString('utf8')) } catch {} }
-				else if (raw.length) bodyOut = raw.toString('utf8')
-				handleResponse({ status, headers, body: bodyOut, raw, opts, resolve, reject })
+				handleResponse({ status, statusText, headers, raw, opts, resolve, reject })
 			})
 		}
 
 		const onData = (c: Buffer) => {
 			if (settled) return
+			// After the header hand-off every chunk is body bytes; `buf` only ever holds the
+			// unparsed head, so the two paths never compete for the same offset.
+			if (streamingStarted) { if (c.length) feedStream(c); return }
 			if (c.length) buf = buf.length ? Buffer.concat([buf, c]) : c
 			while (!settled) {
 				if (!headersParsed) {
 					const r = parseHead()
 					if (r === 'need-more' || r === 'error') return
 					if (r === 'interim') continue  // 1xx consumed; parse the next head
+				}
+				if (opts.stream) {
+					startStreaming()
+					if (mode === 'none' || (mode === 'length' && contentLength === 0)) { completeStream(); return }
+					const leftover = buf.subarray(bodyStart)
+					buf = Buffer.alloc(0)
+					if (leftover.length) feedStream(leftover)
+					return
 				}
 				tryComplete()
 				return
@@ -691,6 +1084,13 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 		const onEnd = () => {
 			if (settled) return
 			if (!headersParsed) return fail('incomplete h1 response', 'EBADRESP')
+			if (streamingStarted) {
+				if (mode === 'eof') { completeStream(); return }
+				// Length/chunked framing completes on a full frame; a close before then is truncation.
+				if (buffering) { completeStream(); return }
+				failStream('connection closed before response complete', 'EBADRESP')
+				return
+			}
 			if (mode === 'eof') return finish(buf.length)  // close-delimited body: end == complete
 			fail('connection closed before response complete', 'EBADRESP')  // truncated CL/chunked body
 		}
@@ -749,26 +1149,63 @@ function withoutHeaders(opts: RequestOptions, names: string[]): RequestOptions {
 
 interface HandleResponseInput {
 	status: number
+	statusText?: string
 	headers: H1Headers
-	body: unknown
+	/** Fully decoded response bytes. */
 	raw: Buffer
 	opts: RequestOptions
 	resolve: (value: unknown) => void
 	reject: (reason: unknown) => void
 }
 
-function handleResponse({ status, headers, body, raw, opts, resolve, reject }: HandleResponseInput): void {
-	const res: Response = { statusCode: status, status, headers, body, rawBody: raw }
-	if (opts.simple !== false && status >= 400) {
+// Request.js-shaped body for the deprecated `bodyOnly` escape hatch (and the callback form).
+// `json: true` still parses; text-ish content types become strings; everything else stays raw.
+function legacyBody(raw: Buffer, headers: H1Headers, opts: RequestOptions): unknown {
+	if (opts.json && raw.length) {
+		try { return JSON.parse(raw.toString('utf8')) } catch { return raw }
+	}
+	const ct = headers['content-type']
+	const value = Array.isArray(ct) ? ct[0] : ct
+	if (raw.length && value && /(utf-?8|text\/|application\/(json|xml|javascript))/i.test(value)) {
+		return raw.toString('utf8')
+	}
+	return raw
+}
+
+function responseMeta(opts: RequestOptions): { url: string; redirected: boolean; method: string } {
+	return {
+		url: opts.url ?? opts.uri ?? '',
+		redirected: opts._redirected === true,
+		method: (opts.method || 'GET').toUpperCase(),
+	}
+}
+
+function attachLegacyBody(res: Response, body: unknown): Response {
+	try {
+		Object.defineProperty(res, '__legacyBody', { value: body, enumerable: false, configurable: true })
+	} catch { /* non-extensible Response */ }
+	return res
+}
+
+function handleResponse({ status, statusText, headers, raw, opts, resolve, reject }: HandleResponseInput): void {
+	const res = buildResponse({ status, statusText, headers, body: raw, ...responseMeta(opts) })
+	const body = legacyBody(raw, headers, opts)
+	attachLegacyBody(res, body)
+
+	if (opts.simple === true && status >= 400) {
 		const err = new HellojsError(`HTTP ${status}`, 'EHTTP')
 		err.response = res
 		return reject(err)
+	}
+	if (opts.redirect === 'error' && status >= 300 && status < 400 && headers.location) {
+		return reject(new HellojsError(`redirect not allowed with redirect: 'error' (HTTP ${status})`, 'EHTTP'))
 	}
 	if (opts.redirect !== 'manual' && status >= 300 && status < 400 && headers.location && (opts.maxRedirects ?? 10) > 0) {
 		const location = Array.isArray(headers.location) ? headers.location[0] : headers.location
 		const currentUrl = new URL(opts.url ?? opts.uri ?? '')
 		const target = new URL(location, currentUrl)
-		let newOpts: RequestOptions = { ...opts, url: target.toString(), maxRedirects: (opts.maxRedirects ?? 10) - 1 }
+		// `_redirected` survives the recursive call so the final Response reports it.
+		let newOpts: RequestOptions = { ...opts, url: target.toString(), maxRedirects: (opts.maxRedirects ?? 10) - 1, _redirected: true }
 		// The Location URL carries its own query string; don't re-append opts.qs to it.
 		delete newOpts.qs
 		const method = (opts.method || 'GET').toUpperCase()
@@ -789,8 +1226,8 @@ function handleResponse({ status, headers, body, raw, opts, resolve, reject }: H
 		}
 		return resolve(performRequest(newOpts))
 	}
-	if (opts.resolveWithFullResponse) return resolve(res)
-	resolve(opts.json ? body : (typeof body === 'string' ? body : raw))
+	if (opts.bodyOnly) return resolve(body)
+	resolve(res)
 }
 
 // Public API ------------------------------------------------------------
@@ -808,6 +1245,10 @@ async function performWithRetry(opts: RequestOptions): Promise<unknown> {
 		try {
 			return await performRequest(opts)
 		} catch (e) {
+			// Abort is not a retryable transport failure, and fetch rejects with the signal's
+			// reason (a DOMException by default), not a HellojsError.
+			if (opts.signal?.aborted) throw abortReason(opts.signal)
+			if (typeof DOMException !== 'undefined' && e instanceof DOMException && e.name === 'AbortError') throw e
 			// Normalize: every error leaving this function is a HellojsError with a stable .code.
 			lastErr = wrapError(e)
 			const status = lastErr.response?.status
@@ -821,21 +1262,63 @@ async function performWithRetry(opts: RequestOptions): Promise<unknown> {
 	throw lastErr
 }
 
-function requestImpl(opts: RequestOptions | string, cb?: Callback): Promise<unknown> {
-	const o = typeof opts === 'string' ? { url: opts } : opts
-	const p = performWithRetry(o)
-	if (cb) {
-		p.then(
-			(r) => cb(null, r as Response, o.resolveWithFullResponse ? (r as Response).body : r),
-			(e: HellojsError) => cb(e, e?.response, e?.response?.body)
-		)
+function inputToOptions(input: RequestOptions | string | URL | Request, init?: FetchInit): RequestOptions {
+	let opts: RequestOptions
+	if (typeof input === 'string' || input instanceof URL) {
+		opts = { ...(init ?? {}), url: input.toString() }
+	} else if (typeof Request !== 'undefined' && input instanceof Request) {
+		const headers = headersToRecord(input.headers)
+		opts = {
+			...inputToRequestOptions(input),
+			...(init ?? {}),
+			url: init?.url ?? input.url,
+			method: init?.method ?? input.method,
+			headers: init?.headers ? headersToRecord(init.headers) : headers,
+			body: init?.body !== undefined ? init.body : (input.body as ReadableStream<Uint8Array> | null),
+			redirect: (init?.redirect ?? input.redirect) as RedirectMode,
+			signal: init?.signal ?? input.signal,
+		}
+	} else {
+		opts = { ...(input as RequestOptions), ...(init ?? {}) }
 	}
-	return p
+	opts.headers = headersToRecord(opts.headers)
+	return opts
+}
+
+// Pull the fetch fields off a `Request` without copying its (already consumed) body twice.
+function inputToRequestOptions(input: Request): Partial<RequestOptions> {
+	return {
+		method: input.method,
+		redirect: input.redirect as RedirectMode,
+		signal: input.signal,
+	}
+}
+
+function requestImpl(input: RequestOptions | string | URL | Request, initOrCb?: FetchInit | Callback): Promise<unknown> {
+	if (typeof initOrCb === 'function') {
+		const cb = initOrCb
+		const opts = inputToOptions(input)
+		const p = performWithRetry(opts)
+		p.then(
+			(r) => {
+				const res = r as Response
+				cb(null, res, (res as unknown as { __legacyBody?: unknown }).__legacyBody)
+			},
+			(e: HellojsError) => {
+				const res = e?.response as unknown as Response | undefined
+				cb(e, res, (res as unknown as { __legacyBody?: unknown } | undefined)?.__legacyBody)
+			},
+		)
+		return p
+	}
+	return performWithRetry(inputToOptions(input, initOrCb))
 }
 
 function method(m: string, dispatch: MethodFn = requestImpl): MethodFn {
-	return (urlOrOpts, cb) => {
-		const opts = typeof urlOrOpts === 'string' ? { url: urlOrOpts } : { ...urlOrOpts }
+	return (input, initOrCb) => {
+		const init = typeof initOrCb === 'function' ? undefined : initOrCb
+		const cb = typeof initOrCb === 'function' ? initOrCb : undefined
+		const opts = inputToOptions(input, init)
 		opts.method = m
 		return dispatch(opts, cb)
 	}
@@ -844,13 +1327,7 @@ function method(m: string, dispatch: MethodFn = requestImpl): MethodFn {
 // Deep-merge defaults + per-call opts, with `headers` lowercased and merged (later wins).
 function mergeOpts(base: Partial<RequestOptions>, over: RequestOptions): RequestOptions {
 	const out: RequestOptions = { ...base, ...over }
-	const lowerCaseHeaders = (h?: Record<string, string | string[]>) => {
-		const o: Record<string, string | string[]> = {}
-		if (!h) return o
-		for (const [k, v] of Object.entries(h)) o[k.toLowerCase()] = v
-		return o
-	}
-	out.headers = { ...lowerCaseHeaders(base.headers), ...lowerCaseHeaders(over.headers) }
+	out.headers = { ...headersToRecord(base.headers), ...headersToRecord(over.headers) }
 	return out
 }
 
@@ -876,9 +1353,10 @@ function withShortcuts<T extends object>(fn: T, dispatch: MethodFn): T {
 const request = withShortcuts(
 	Object.assign(requestImpl, {
 		defaults: (defaults: Partial<RequestOptions> = {}) => {
-			const wrapped: MethodFn = (urlOrOpts, cb) => {
-				const opts = typeof urlOrOpts === 'string' ? { url: urlOrOpts } : urlOrOpts
-				return requestImpl(mergeOpts(defaults, opts), cb)
+			const wrapped: MethodFn = (input, initOrCb) => {
+				const init = typeof initOrCb === 'function' ? undefined : initOrCb
+				const cb = typeof initOrCb === 'function' ? initOrCb : undefined
+				return requestImpl(mergeOpts(defaults, inputToOptions(input, init)), cb)
 			}
 			return withShortcuts(
 				Object.assign(wrapped, {

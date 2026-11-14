@@ -88,11 +88,10 @@ afterAll(async () => {
 	}
 })
 
-const full = (extra: Record<string, unknown>): RequestOptions & { resolveWithFullResponse: true } => ({
+const full = (extra: Record<string, unknown>): RequestOptions => ({
 	simple: false,
 	verifyTLS: false,
 	timeout: 5000,
-	resolveWithFullResponse: true,
 	...extra,
 })
 
@@ -100,20 +99,21 @@ describe('1xx informational', () => {
 	it('103 Early Hints is not surfaced; the final 200 is returned', async () => {
 		const res = await request(full({ url: `${base}/s103` }))
 		expect(res.status).toBe(200)
-		expect(String(res.body)).toBe('final-after-hints')
+		expect(await res.text()).toBe('final-after-hints')
 	})
 
 	it('100 Continue is not surfaced; the final 201 is returned', async () => {
 		const res = await request(full({ url: `${base}/s100`, method: 'POST', body: 'payload' }))
 		expect(res.status).toBe(201)
-		expect(String(res.body)).toBe('continue-accepted')
+		expect(await res.text()).toBe('continue-accepted')
 	})
 })
 
 describe('2xx success', () => {
-	it('200 resolves as a success (default simple:true)', async () => {
-		const body = await request({ verifyTLS: false, timeout: 5000, url: `${base}/s200` })
-		expect(String(body)).toBe('ok')
+	it('200 resolves as a success', async () => {
+		const res = await request({ verifyTLS: false, timeout: 5000, url: `${base}/s200` })
+		expect(res.status).toBe(200)
+		expect(await res.text()).toBe('ok')
 	})
 
 	it('201 Created resolves and surfaces the status', async () => {
@@ -124,14 +124,14 @@ describe('2xx success', () => {
 	it('204 No Content resolves with an empty body and survives json:true', async () => {
 		const res = await request(full({ url: `${base}/s204`, json: true }))
 		expect(res.status).toBe(204)
-		const empty = res.body === '' || res.body === undefined || (Buffer.isBuffer(res.body) && res.body.length === 0)
-		expect(empty).toBe(true)
+		expect(res.body).toBeNull()
+		expect(await res.text()).toBe('')
 	})
 })
 
 describe('4xx client error', () => {
 	it('simple:true rejects with EHTTP and the status on the error', async () => {
-		await expect(request({ verifyTLS: false, timeout: 5000, url: `${base}/e404` })).rejects.toMatchObject({
+		await expect(request({ simple: true, verifyTLS: false, timeout: 5000, url: `${base}/e404` })).rejects.toMatchObject({
 			code: 'EHTTP',
 			response: { status: 404 },
 		})
@@ -140,18 +140,18 @@ describe('4xx client error', () => {
 	it('simple:false resolves the 4xx response instead of rejecting', async () => {
 		const res = await request(full({ url: `${base}/e404` }))
 		expect(res.status).toBe(404)
-		expect(String(res.body)).toBe('not found')
+		expect(await res.text()).toBe('not found')
 	})
 
 	it('429 is treated as an error (rejects under simple:true)', async () => {
-		await expect(request({ verifyTLS: false, timeout: 5000, url: `${base}/e429` })).rejects.toMatchObject({
+		await expect(request({ simple: true, verifyTLS: false, timeout: 5000, url: `${base}/e429` })).rejects.toMatchObject({
 			code: 'EHTTP',
 			response: { status: 429 },
 		})
 	})
 
 	it('400 rejects under simple:true', async () => {
-		await expect(request({ verifyTLS: false, timeout: 5000, url: `${base}/e400` })).rejects.toMatchObject({
+		await expect(request({ simple: true, verifyTLS: false, timeout: 5000, url: `${base}/e400` })).rejects.toMatchObject({
 			code: 'EHTTP',
 			response: { status: 400 },
 		})
@@ -160,7 +160,7 @@ describe('4xx client error', () => {
 
 describe('5xx server error', () => {
 	it('simple:true rejects with EHTTP for 500', async () => {
-		await expect(request({ verifyTLS: false, timeout: 5000, url: `${base}/e500` })).rejects.toMatchObject({
+		await expect(request({ simple: true, verifyTLS: false, timeout: 5000, url: `${base}/e500` })).rejects.toMatchObject({
 			code: 'EHTTP',
 			response: { status: 500 },
 		})
@@ -169,21 +169,21 @@ describe('5xx server error', () => {
 	it('simple:false resolves the 5xx response', async () => {
 		const res = await request(full({ url: `${base}/e503` }))
 		expect(res.status).toBe(503)
-		expect(String(res.body)).toBe('unavailable')
+		expect(await res.text()).toBe('unavailable')
 	})
 
 	it('a transient 500 is retried on GET and the retry succeeds', async () => {
 		// Retry only fires on a thrown (simple:true) transient status: the first 500 must reject
 		// for the policy to re-issue the GET. simple:false would resolve 500 immediately, no retry.
-		const res = await request<unknown>({
+		const res = await request({
+			simple: true,
 			verifyTLS: false,
 			timeout: 5000,
-			resolveWithFullResponse: true,
 			url: `${base}/flaky`,
 			retry: { limit: 1, baseDelayMs: 10 },
 		})
 		expect(res.status).toBe(200)
-		expect(String(res.body)).toBe('second attempt ok')
+		expect(await res.text()).toBe('second attempt ok')
 	})
 
 	it('without a retry policy the 500 propagates (simple:false still resolves it)', async () => {

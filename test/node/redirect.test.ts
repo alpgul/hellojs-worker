@@ -57,9 +57,9 @@ it('cross-origin redirect strips Authorization and Cookie', async () => {
 		const res = await request({
 			url: `https://127.0.0.1:${origin.port}/`,
 			headers: { authorization: 'Bearer secret', cookie: 'sid=abc' },
-			verifyTLS: false, timeout: 5000, resolveWithFullResponse: true,
+			verifyTLS: false, timeout: 5000,
 		})
-		expect(String(res.body)).toBe('landed')
+		expect(await res.text()).toBe('landed')
 		expect(landed.headers?.authorization, 'Authorization must not cross origins').toBeUndefined()
 		expect(landed.headers?.cookie, 'Cookie must not cross origins').toBeUndefined()
 	} finally {

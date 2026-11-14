@@ -79,13 +79,15 @@ const CODES = Object.freeze({
 export type ErrorCode = keyof typeof CODES
 
 // The response shape lib/client.ts attaches to an `EHTTP` error (simple mode). Kept
-// structural so errors stays free of any dependency on the request layer.
+// structural so errors stays free of any dependency on the request layer; the client
+// now attaches a real fetch `Response`, of which these are the relevant fields.
 export interface ErrorResponse {
-	statusCode: number
 	status: number
-	headers: Record<string, string | string[]>
-	body: unknown
-	rawBody: unknown
+	statusText?: string
+	headers: unknown
+	url?: string
+	redirected?: boolean
+	body?: unknown
 }
 
 const CODE_TABLE: Record<string, { category: ErrorCategory; msg: string }> = CODES

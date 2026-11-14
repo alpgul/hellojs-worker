@@ -199,11 +199,10 @@ async function waitFor(cond: () => boolean, ms = 3000): Promise<void> {
 	}
 }
 
-const full = (extra: Record<string, unknown>): RequestOptions & { resolveWithFullResponse: true } => ({
+const full = (extra: Record<string, unknown>): RequestOptions => ({
 	simple: false,
 	verifyTLS: false,
 	timeout: 8000,
-	resolveWithFullResponse: true,
 	...extra,
 })
 
@@ -240,8 +239,8 @@ it('HTTPS proxy: the request round-trips through the tunnel', async () => {
 		url: `https://127.0.0.1:${originPort}/`,
 		proxy: `https://localhost:${proxy.port}`,
 	}))
-	expect(res.statusCode).toBe(200)
-	expect(String(res.body)).toBe('proxied-ok')
+	expect(res.status).toBe(200)
+	expect(await res.text()).toBe('proxied-ok')
 	expect(proxy.connectRequest).toMatch(new RegExp(`^CONNECT 127\\.0\\.0\\.1:${originPort} HTTP/1\\.1`))
 	expect(proxy.connectRequest).toMatch(new RegExp(`Host: 127\\.0\\.0\\.1:${originPort}`))
 
@@ -258,7 +257,7 @@ it('the CONNECT pre-tile travels encrypted, and the proxy sees the proxy hostnam
 		url: `https://127.0.0.1:${originPort}/`,
 		proxy: `https://localhost:${proxy.port}`,
 	}))
-	expect(String(res.body)).toBe('encrypted-ok')
+	expect(await res.text()).toBe('encrypted-ok')
 	// The pre-tile was decoded from a TLS session, so it cannot have been sent in the clear.
 	expect(proxy.alpn).toBe('http/1.1')
 	expect(proxy.servername).toBe('localhost')
@@ -293,7 +292,7 @@ it('Proxy-Authorization is sent from URL credentials and omitted without them', 
 		url: `https://127.0.0.1:${originPort}/`,
 		proxy: `https://alice:secret@localhost:${proxy.port}`,
 	}))
-	expect(String(res.body)).toBe('auth-ok')
+	expect(await res.text()).toBe('auth-ok')
 	expect(proxy.connectRequest).toContain(`Proxy-Authorization: ${expected}`)
 	await proxy.close()
 
@@ -343,7 +342,6 @@ it('an untrusted proxy certificate is rejected by default, as EPROXY', async () 
 	const err = await request({
 		simple: false,
 		timeout: 8000,
-		resolveWithFullResponse: true,
 		url: `https://127.0.0.1:${originPort}/`,
 		proxy: `https://localhost:${proxy.port}`,
 	} as RequestOptions).catch((e: Error) => e) as Error & { code?: string }
@@ -403,7 +401,7 @@ it('h3 through a proxy falls back to TCP+CONNECT instead of bypassing it', async
 		proxy: `https://localhost:${proxy.port}`,
 		h3: true,
 	}))
-	expect(String(res.body)).toBe('h3-fallback')
+	expect(await res.text()).toBe('h3-fallback')
 	expect(proxy.connectRequest).toMatch(/^CONNECT /)
 
 	await proxy.close()
@@ -420,7 +418,7 @@ it('timeouts.connect covers the proxy hop without a false timeout', async () => 
 		proxy: `https://localhost:${proxy.port}`,
 		timeouts: { connect: 5000 },
 	}))
-	expect(String(res.body)).toBe('timed-ok')
+	expect(await res.text()).toBe('timed-ok')
 
 	await proxy.close()
 	await origin.close()
@@ -501,7 +499,7 @@ it('regression: cleartext http:// CONNECT proxying still round-trips', async () 
 		url: `https://127.0.0.1:${originPort}/`,
 		proxy: `http://127.0.0.1:${proxyAddr.port}`,
 	}))
-	expect(String(res.body)).toBe('clear-ok')
+	expect(await res.text()).toBe('clear-ok')
 	expect(connectRequest).toMatch(new RegExp(`^CONNECT 127\\.0\\.0\\.1:${originPort} HTTP/1\\.1`))
 
 	for (const t of targets) t.destroy()
@@ -530,7 +528,7 @@ it('proxyAuthorization overrides URL Basic auth and the proxy accepts the bearer
 		proxy: `https://ignored:creds@localhost:${proxy.port}`,
 		proxyAuthorization: bearer,
 	}))
-	expect(String(res.body)).toBe('bearer-ok')
+	expect(await res.text()).toBe('bearer-ok')
 	expect(proxy.connectRequest).toContain(`Proxy-Authorization: ${bearer}`)
 	// Exactly one line: the URL credentials lose to the explicit value instead of joining it.
 	expect(proxy.connectRequest.match(/Proxy-Authorization:/gi)).toHaveLength(1)
@@ -550,7 +548,7 @@ it('proxyAuthorization authenticates a proxy URL that carries no credentials', a
 		proxy: `https://localhost:${proxy.port}`,
 		proxyAuthorization: bearer,
 	}))
-	expect(String(res.body)).toBe('bearer-ok')
+	expect(await res.text()).toBe('bearer-ok')
 
 	await proxy.close()
 	await origin.close()
@@ -591,7 +589,7 @@ it('a blank proxyAuthorization sends no Proxy-Authorization, URL credentials inc
 			proxy: `https://alice:secret@localhost:${proxy.port}`,
 			...extra,
 		}))
-		expect(String(res.body)).toBe('anon-ok')
+		expect(await res.text()).toBe('anon-ok')
 		expect(proxy.connectRequest, JSON.stringify(extra)).not.toMatch(/Proxy-Authorization/i)
 		await proxy.close()
 		proxy = null
@@ -610,7 +608,7 @@ it('proxyHeaders adds CONNECT headers and its proxy-authorization outranks URL B
 		proxy: `https://ignored:creds@localhost:${proxy.port}`,
 		proxyHeaders: { 'X-Jwt-Kid': 'a1', 'Proxy-Authorization': bearer },
 	}))
-	expect(String(res.body)).toBe('hdr-ok')
+	expect(await res.text()).toBe('hdr-ok')
 	// CONNECT headers are emitted lowercased; the auth slot is filled from proxyHeaders before the
 	// URL is consulted, so Basic never appears.
 	expect(proxy.connectRequest).toContain('x-jwt-kid: a1')

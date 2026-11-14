@@ -19,7 +19,7 @@ it(`${TLS12_HOST} negotiates against a TLS 1.2-capable server`, async () => {
 })
 
 it('end-to-end GET over TLS 1.2', async () => {
-	const res = await request({ url: `https://${TLS12_HOST}/ip`, timeout: 15_000, resolveWithFullResponse: true })
-	expect(res.statusCode).toBe(200)
-	expect(String(res.body).length).toBeGreaterThan(0)
+	const res = await request({ url: `https://${TLS12_HOST}/ip`, timeout: 15_000 })
+	expect(res.status).toBe(200)
+	expect((await res.text()).length).toBeGreaterThan(0)
 })

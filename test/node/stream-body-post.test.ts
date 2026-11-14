@@ -120,9 +120,9 @@ afterAll(async () => {
 	h1 = null
 })
 
-const base = () => ({ simple: false, verifyTLS: false, json: true, timeout: 15_000 })
-const echo = (body: Readable, extra: Record<string, unknown> = {}) =>
-	request<Received>({ ...base(), ...extra, url: `${h2Base}/echo`, method: 'POST', body })
+const base = () => ({ simple: false, bodyOnly: true, verifyTLS: false, json: true, timeout: 15_000 })
+const echo = async (body: Readable, extra: Record<string, unknown> = {}) =>
+	(await request({ ...base(), ...extra, url: `${h2Base}/echo`, method: 'POST', body })) as unknown as Received
 
 describe('POST with a Readable body — HTTP/2', () => {
 	it('streams multiple string chunks, reassembled in order', async () => {
@@ -200,12 +200,12 @@ describe('POST with a Readable body — HTTP/2', () => {
 describe('POST with a Readable body — HTTP/1.1 chunked', () => {
 	it('streams a body over HTTP/1.1 using transfer-encoding: chunked', async () => {
 		const body = Readable.from(['h1:', 'streamed:', 'body'])
-		const res = await request<{ method?: string; text?: string; chunked?: boolean }>({
+		const res = (await request({
 			...base(),
 			url: `${h1Base}/echo`,
 			method: 'POST',
 			body,
-		})
+		})) as unknown as { method?: string; text?: string; chunked?: boolean }
 		expect(res.method).toBe('POST')
 		expect(res.text).toBe('h1:streamed:body')
 		// The client must frame a bodyless-length stream as chunked on HTTP/1.1.
@@ -225,13 +225,13 @@ describe('POST with a Readable body — HTTP/1.1 chunked', () => {
 				yield Buffer.alloc(n, 0x42) // 'B'
 			}
 		})
-		const res = await request<{ method?: string; length?: number; chunked?: boolean }>({
+		const res = (await request({
 			...base(),
 			url: `${h1Base}/echo`,
 			method: 'POST',
 			body: Readable.from(gen()),
 			timeout: 30_000,
-		})
+		})) as unknown as { method?: string; length?: number; chunked?: boolean }
 		expect(res.method).toBe('POST')
 		expect(res.length).toBe(TOTAL)
 		expect(res.chunked).toBe(true)

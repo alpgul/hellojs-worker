@@ -119,11 +119,10 @@ afterAll(async () => {
 	}
 })
 
-const call = (extra: Record<string, unknown>): RequestOptions & { resolveWithFullResponse: true } => ({
+const call = (extra: Record<string, unknown>): RequestOptions => ({
 	simple: false,
 	verifyTLS: false,
 	timeout: 5000,
-	resolveWithFullResponse: true,
 	...extra,
 })
 
@@ -131,8 +130,8 @@ describe('3xx redirect codes — method/body semantics', () => {
 	it('300 Multiple Choices: no Location → returned as-is, not followed', async () => {
 		const res = await request(call({ url: `${base}/from/300` }))
 		expect(res.status).toBe(300)
-		expect(res.headers.location).toBeUndefined()
-		expect(String(res.body)).toContain('choices')
+		expect(res.headers.get('location')).toBeNull()
+		expect(await res.text()).toContain('choices')
 	})
 
 	it('301: GET stays GET and is followed', async () => {
@@ -169,9 +168,9 @@ describe('3xx redirect codes — method/body semantics', () => {
 	it('304 Not Modified: no Location, no body → returned as-is, not followed', async () => {
 		const res = await request(call({ url: `${base}/from/304` }))
 		expect(res.status).toBe(304)
-		expect(res.headers.location).toBeUndefined()
-		expect(res.headers.etag).toBe('"v1"')
-		expect(String(res.body)).toBe('')
+		expect(res.headers.get('location')).toBeNull()
+		expect(res.headers.get('etag')).toBe('"v1"')
+		expect(await res.text()).toBe('')
 	})
 
 	it('307: POST method AND body preserved', async () => {
@@ -197,7 +196,7 @@ describe('redirect controls', () => {
 	it("redirect:'manual' stops at the 3xx and surfaces Location", async () => {
 		const res = await request(call({ url: `${base}/from/302`, redirect: 'manual' }))
 		expect(res.status).toBe(302)
-		expect(res.headers.location).toBe('/target')
+		expect(res.headers.get('location')).toBe('/target')
 	})
 
 	it("redirect:'follow' explicitly follows the 3xx to the target", async () => {

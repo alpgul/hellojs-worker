@@ -33,12 +33,11 @@ export type RegisteredHttpStatusCode =
 export type HttpStatusCode = RegisteredHttpStatusCode | (number & {})
 
 /**
- * Redirect handling, as the Fetch standard defines the mode. Only the two modes this client
- * implements are accepted: `'follow'` (default) follows 3xx with a `Location` up to
- * `maxRedirects`; `'manual'` stops and returns the 3xx response itself. Fetch's `'error'` is
- * deliberately not offered until the client rejects on it.
+ * Redirect handling, as the Fetch standard defines the mode. `'follow'` (default) follows
+ * 3xx with a `Location` up to `maxRedirects`; `'manual'` stops and returns the 3xx response
+ * itself; `'error'` rejects the request when a redirect is seen.
  */
-export type RedirectMode = 'follow' | 'manual'
+export type RedirectMode = 'follow' | 'manual' | 'error'
 
 /** ALPN identifiers this client can negotiate. */
 export type AlpnProtocol = 'h2' | 'http/1.1'
@@ -107,8 +106,8 @@ export interface RequestOptions {
 	url?: string
 	uri?: string
 	method?: HttpMethod
-	headers?: HttpRequestHeaders
-	body?: string | Buffer | Uint8Array | NodeJS.ReadableStream | JsonValue | null
+	headers?: HeadersInit
+	body?: BodyInit | Buffer | NodeJS.ReadableStream | Record<string, unknown> | unknown[] | null
 	/** `true` parses the response as JSON; an RFC 8259 value is serialized and sent as the body. */
 	json?: boolean | JsonValue
 	form?: QueryParams
@@ -143,7 +142,17 @@ export interface RequestOptions {
 	 * printable ASCII reject with `EBADOPTS`. Not supported with `socks5://`.
 	 */
 	proxyHeaders?: Record<string, string> | null
+	/**
+	 * Legacy request.js escape hatch: resolve the parsed body (string, Buffer, or the value
+	 * `json: true` produced) instead of the fetch-compatible `Response`. Deprecated.
+	 */
+	bodyOnly?: boolean
+	/** Deprecated no-op: `request()` always resolves a full `Response` unless `bodyOnly` is set. */
 	resolveWithFullResponse?: boolean
+	/**
+	 * Opt in to request.js error semantics: reject with `EHTTP` when the status is >= 400.
+	 * Default is `false`, matching `fetch()` (inspect `res.ok` instead).
+	 */
 	simple?: boolean
 	retry?: RetryPolicy
 
@@ -166,11 +175,31 @@ export interface RequestOptions {
 	keepAlive?: boolean
 	/** Keep-alive pool caps: process-wide sockets (default 16), sockets per origin (default 1), idle socket lifetime in ms (default 15000). */
 	pool?: Partial<PoolConfig>
-	/** When true, resolve as soon as headers arrive and expose the body as a Node Readable. */
+	/**
+	 * Resolve as soon as the response headers arrive and expose the body as a progressive
+	 * `ReadableStream` on `Response.body`. Works for H1, H2 and H3. When false (default) the
+	 * body is buffered first; `Response.body` is still a web stream over the buffered bytes.
+	 */
 	stream?: boolean
 	/** Profile name, or an inline profile object shaped like lib/profiles/types.ts `Profile`. */
 	profile?: ProfileName | Record<string, unknown>
+
+	/* Fetch `RequestInit` fields accepted for drop-in compatibility. */
+	credentials?: 'omit' | 'same-origin' | 'include'
+	mode?: 'cors' | 'no-cors' | 'same-origin' | 'navigate'
+	cache?: string
+	integrity?: string
+	keepalive?: boolean
+	referrer?: string
+	referrerPolicy?: string
+	/** Present for fetch signature compatibility; a streaming request body is always half-duplex here. */
+	duplex?: 'half'
+	/** Abort the request (or an in-flight response body) when this signal fires. */
+	signal?: AbortSignal | null
 }
+
+/** Fetch-style init accepted as the second argument; request.js options may be mixed in. */
+export type FetchInit = Omit<RequestInit, 'body' | 'headers' | 'method' | 'redirect' | 'signal'> & RequestOptions
 
 export interface PoolConfig {
 	maxSockets: number
@@ -178,14 +207,12 @@ export interface PoolConfig {
 	idleMs: number
 }
 
-export interface Response<TBody = unknown> {
-	statusCode: HttpStatusCode
-	status: HttpStatusCode
-	headers: Record<string, string | string[]>
-	body: TBody
-	/** Wire bytes as read; with `stream: true` this is the same Readable as `body`. */
-	rawBody: TBody | Buffer
-}
+/**
+ * The result of `request()`: the platform's own fetch `Response`. On Node that is undici's
+ * `Response`; on Workers it is the runtime's. Either way `ok`, `status`, `statusText`,
+ * `headers`, `body`, `url`, `redirected` and `clone()` behave exactly as they do after `fetch()`.
+ */
+export type Response = globalThis.Response
 
 export type HellojsErrorCategory =
 	| 'usage' | 'transport' | 'tls' | 'protocol' | 'http' | 'body' | 'timeout'
@@ -225,21 +252,26 @@ export class HellojsError extends Error {
 	code: HellojsErrorCode | (string & {})
 	category: HellojsErrorCategory
 	cause?: unknown
+	/** Set when `simple: true` rejected a >=400 status; this is the real fetch `Response`. */
 	response?: Response
 }
 
-export type Callback<TBody = unknown> = (
+export type Callback = (
 	err: HellojsError | null,
-	res: Response<TBody> | undefined,
-	body: TBody | undefined,
+	res: Response | undefined,
+	body: unknown | undefined,
 ) => void
 
-// Both the root export and the `defaults()`-derived entry point (and every shortcut) resolve
-// the same way: the full Response when `resolveWithFullResponse: true` is passed as a literal,
-// otherwise the body — a string, the raw Buffer, or the parsed value for `json: true`.
+// The root export and every `defaults()`-derived entry point share one call shape: fetch's
+// `(input, init)` plus the request.js object form. The result is always a real `Response`
+// unless the deprecated `bodyOnly: true` escape hatch is requested.
 interface Invokable {
-	<TBody = unknown>(opts: RequestOptions & { resolveWithFullResponse: true }, cb?: Callback<TBody>): Promise<Response<TBody>>
-	<TBody = unknown>(opts: RequestOptions | string, cb?: Callback<TBody>): Promise<TBody>
+	(input: string | URL | Request, init?: FetchInit): Promise<Response>
+	(input: string | URL | Request, cb: Callback): Promise<Response>
+	(opts: RequestOptions & { bodyOnly: true }, cb: Callback): Promise<unknown>
+	(opts: RequestOptions, cb: Callback): Promise<Response>
+	(opts: RequestOptions & { bodyOnly: true }): Promise<unknown>
+	(opts: RequestOptions): Promise<Response>
 }
 
 interface Shortcuts {

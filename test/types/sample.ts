@@ -15,16 +15,41 @@ import type {
 	HellojsErrorCategory,
 	Response,
 	RequestOptions,
+	FetchInit,
+	RedirectMode,
 	DefaultsFn,
 	PerPhaseTimeouts,
 } from '@unreleased/hellojs'
-import type { Readable, Writable } from 'node:stream'
 
 async function smoke(): Promise<void> {
-	// Basic GET, promise form.
-	const body: unknown = await request('https://example.com')
+	// Basic GET: fetch semantics, a real Response.
+	const res: Response = await request('https://example.com')
+	const ok: boolean = res.ok
+	const status: number = res.status
+	const statusText: string = res.statusText
+	const headers: Headers = res.headers
+	const url: string = res.url
+	const redirected: boolean = res.redirected
+	const clone: Response = res.clone()
+	const text: string = await res.text()
+	const json: unknown = await res.json()
+	void ok; void status; void statusText; void headers; void url; void redirected
+	void clone; void text; void json
 
-	// Full request opts.
+	// Fetch-style signature: (input, init). Request.js options may be mixed into init.
+	const init: FetchInit = {
+		method: 'POST',
+		headers: { authorization: 'Bearer x' },
+		body: JSON.stringify({ name: 'foo' }),
+		signal: new AbortController().signal,
+		redirect: 'follow',
+		timeout: 5000,
+		retry: { limit: 2 },
+	}
+	const posted: Response = await request('https://example.com/api', init)
+	void posted
+
+	// Full request opts (object form).
 	const r = await request({
 		url: 'https://example.com/api',
 		method: 'POST',
@@ -38,29 +63,33 @@ async function smoke(): Promise<void> {
 		retry: { limit: 2, methods: ['GET'], statusCodes: [503], baseDelayMs: 100 },
 		profile: 'chrome147-mac',
 		verifyTLS: true,
-		resolveWithFullResponse: true,
 	})
-	// `resolveWithFullResponse: true` as a literal types the result as the full Response.
 	{
-		const code: number = r.statusCode
-		const headers: Record<string, string | string[]> = r.headers
-		const _b: unknown = r.body
-		const _raw: unknown = r.rawBody
-		void code; void headers; void _b; void _raw
+		const code: number = r.status
+		const h: Headers = r.headers
+		void code; void h
 	}
 
-	// The README's TypeScript example, verbatim — docs snippets get compiled here.
-	const opts: RequestOptions = {
-		url: 'https://api.example.com',
-		json: true,
-		timeouts: { connect: 2000, tlsHandshake: 5000, response: 10_000 },
-	}
-	{
-		const res: Response<{ name: string }> = await request<{ name: string }>({ ...opts, resolveWithFullResponse: true })
-		const code: number = res.statusCode
-		const name: string = res.body.name
-		void code; void name
-	}
+	// Legacy escape hatch returns the parsed body instead of a Response.
+	const legacy: unknown = await request({ url: 'https://example.com', bodyOnly: true, json: true })
+	void legacy
+
+	// HeaderInit spellings all work.
+	await request('https://example.com', { headers: [['x-a', '1']] })
+	await request('https://example.com', { headers: new Headers({ 'x-b': '2' }) })
+	await request('https://example.com', { headers: { 'x-c': '3' } })
+
+	// Request object input and callbacks.
+	const req = new Request('https://example.com')
+	await request(req)
+	await request('https://example.com', (err, response, body) => {
+		if (err) {
+			const code: string = err.code
+			void code
+		}
+		void response?.status
+		void body
+	})
 
 	// Method shortcuts.
 	await request.get('https://example.com')
@@ -84,7 +113,8 @@ async function smoke(): Promise<void> {
 		if (e instanceof HellojsError) {
 			const code: HellojsErrorCode | string = e.code
 			const cat: HellojsErrorCategory = e.category
-			void code; void cat
+			const failed: Response | undefined = e.response
+			void code; void cat; void failed
 		}
 	}
 
@@ -93,16 +123,25 @@ async function smoke(): Promise<void> {
 	t.on('ready', () => {})
 	t.on('error', (_err: Error) => {})
 
-	// Streaming response: when stream:true, body is a Readable.
-	const stream = await request({ url: 'https://example.com', stream: true }) as Readable
-	const sinks: Writable[] = []
-	stream.pipe(sinks[0])
+	// Streaming response: `body` is a web ReadableStream, for H1, H2 and H3 alike.
+	const streamed = await request({ url: 'https://example.com', stream: true })
+	const reader = streamed.body?.getReader()
+	if (reader) {
+		const { done, value } = await reader.read()
+		void done
+		if (value) {
+			const bytes: Uint8Array = value
+			void bytes
+		}
+		await reader.cancel()
+	}
 
-	// Streaming request body: Readable as body.
+	// Streaming request body: any BodyInit, including a web stream.
 	const streamingReq: RequestOptions = {
 		url: 'https://example.com',
 		method: 'POST',
-		body: process.stdin,   // any Readable
+		body: new ReadableStream<Uint8Array>(),
+		duplex: 'half',
 	}
 	void streamingReq
 
@@ -116,13 +155,14 @@ async function smoke(): Promise<void> {
 	await request({ url: 'https://example.com', method: 'get' })                 // any case is fine
 	await request({ url: 'https://example.com', method: 'PURGE' })               // extension methods allowed
 	await request({ url: 'https://example.com', redirect: 'manual' })
+	await request({ url: 'https://example.com', redirect: 'error' })
 	await request({ url: 'https://example.com', qs: { tag: ['a', 'b'], page: 2 } })
 	await request({ url: 'https://example.com', headers: { authorization: 'Bearer x', 'x-trace': '1' } })
 	await request({ url: 'https://example.com', retry: { statusCodes: [408, 429, 503], methods: ['GET'] } })
+	const mode: RedirectMode = 'manual'
+	void mode
 	// @ts-expect-error redirect is the Fetch enum, not an arbitrary string
 	await request({ url: 'https://example.com', redirect: 'nope' })
-	// @ts-expect-error 'error' is in the Fetch spec but not implemented here — reject it loudly
-	await request({ url: 'https://example.com', redirect: 'error' })
 	// @ts-expect-error a method is a token, not a number
 	await request({ url: 'https://example.com', method: 123 })
 	// @ts-expect-error a timeout is milliseconds, not a numeric string
@@ -139,10 +179,10 @@ async function smoke(): Promise<void> {
 	request.observability.on('request:bogus', () => {})
 
 	// Statuses and codes carry the registry/taxonomy types.
-	const status: number = (await request({ url: 'https://example.com', resolveWithFullResponse: true })).status
+	const statusNum: number = (await request({ url: 'https://example.com' })).status
 	const code: HellojsErrorCode = 'ETLS_HANDSHAKE'
 	const cat: HellojsErrorCategory = 'protocol'
-	void status; void code; void cat
+	void statusNum; void code; void cat
 	// @ts-expect-error codes outside the documented taxonomy do not narrow to HellojsErrorCode
 	const badCode: HellojsErrorCode = 'ENOPE'
 	void badCode
@@ -150,7 +190,8 @@ async function smoke(): Promise<void> {
 	// defaults() carries the callable, its shortcuts and a further defaults() — and nothing
 	// else, since only the root export is decorated with TLS/udp/profiles helpers.
 	const api: DefaultsFn = request.defaults({ headers: { 'x-default': 'yes' } })
-	await api.get('https://example.com')
+	const apiRes: Response = await api.get('https://example.com')
+	void apiRes
 	await api.post({ url: 'https://example.com', json: {} })
 	void api.jar().getCookieString('https://example.com')
 	void api.defaults({ timeout: 1000 })
@@ -162,8 +203,6 @@ async function smoke(): Promise<void> {
 	void request.profiles.list()
 	void request.udp.udpAvailable()
 	void TlsCtor
-
-	void body
 }
 
 void smoke

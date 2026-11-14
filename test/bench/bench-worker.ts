@@ -36,11 +36,8 @@ async function makeAdapter(name: string | undefined): Promise<Adapter> {
 		const { default: request } = await import('../../index.ts')
 		return {
 			fn: async (url) => {
-				const r = (await request({ url, verifyTLS: VERIFY_TLS, resolveWithFullResponse: true })) as {
-					body?: Buffer
-					rawBody?: Buffer
-				}
-				return r.body?.length || r.rawBody?.length || 0
+				const r = await request({ url, verifyTLS: VERIFY_TLS })
+				return (await r.arrayBuffer()).byteLength
 			},
 			cleanup: () => {},
 		}
