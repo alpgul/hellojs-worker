@@ -10,17 +10,20 @@ npm install @unreleased/hellojs
 ```
 
 ```js
-const request = require('@unreleased/hellojs')
+import request from '@unreleased/hellojs'
 
-const html = await request('https://www.cloudflare.com/')
+// Fetch-style: resolves a real Response.
+const res = await request('https://www.cloudflare.com/')
+console.log(res.status, res.ok, await res.text())
 
-const res = await request({
+// request.js-style options and helpers are still supported.
+const post = await request({
   url: 'https://api.example.com/v1/things',
   method: 'POST',
+  json: { name: 'foo' },            // serializes + sets content-type
   headers: { authorization: 'Bearer …' },
-  json: { name: 'foo' },
-  resolveWithFullResponse: true,
 })
+const data = await post.json()
 ```
 
 ---
@@ -89,26 +92,24 @@ handshake — same as a real Chrome browser.
 ## Quick start
 
 ```js
-const request = require('@unreleased/hellojs')
+// `simple` is false by default (like fetch): 4xx/5xx resolve as a Response.
+// Opt in to request.js errors with `simple: true`.
+const r = await request({
+  url: 'https://httpbingo.org/status/418',
+  simple: true,
+}).catch((e) => e)
+console.log(r.code, r.response?.status) // EHTTP 418
 
-// GET, body returned as Buffer (or string if content-type says utf-8, or
-// object if json:true)
-const body = await request({ url: 'https://httpbingo.org/get' })
+// Legacy escape hatch: resolve the parsed body instead of a Response.
+const body = await request({ url: 'https://httpbingo.org/get', json: true, bodyOnly: true })
+console.log(body.url)
 
-// POST with JSON
-const res = await request({
+// POST JSON (request.js form)
+await request({
   url: 'https://httpbingo.org/post',
   method: 'POST',
   json: { hello: 'world' },
 })
-
-// Full response
-const r = await request({
-  url: 'https://httpbingo.org/status/418',
-  simple: false,
-  resolveWithFullResponse: true,
-})
-console.log(r.status, r.headers, r.body)
 
 // POST form
 await request({
@@ -132,29 +133,32 @@ await request({
 |---|---|---|---|
 | `url` / `uri` | string | required | |
 | `method` | string | `'GET'` | |
-| `headers` | object | `{}` | merged into the profile's header set; non-identity keys override in place, new keys append. Identity headers (`user-agent`, `sec-ch-ua*`) are fixed by the profile — a different value throws `EHEADERFIXED`. |
-| `body` | string \| Buffer \| object \| Readable | `null` | object → JSON when `json: true`. A Node `Readable` is sent as a streaming request body (chunked h2 DATA frames or h1 `Transfer-Encoding: chunked`). |
-| `json` | bool \| object | `false` | parses response as JSON; if object, used as the request body with `content-type: application/json` |
+| `headers` | `HeadersInit` | `{}` | merged into the profile's header set; non-identity keys override in place, new keys append. Identity headers (`user-agent`, `sec-ch-ua*`) are fixed by the profile — a different value throws `EHEADERFIXED`. |
+| `body` | `BodyInit` \| Buffer \| object \| Readable | `null` | object → JSON when `json: true`. Accepts fetch `BodyInit` (including `Blob`, `FormData`, `URLSearchParams`, web `ReadableStream`) and Node `Readable`. |
+| `json` | bool \| object | `false` | parses response via `res.json()` semantics when used with `bodyOnly`/legacy flows; if object, used as the request body with `content-type: application/json` |
 | `form` | object | — | `application/x-www-form-urlencoded` body |
 | `qs` | object | — | querystring appended to url |
 | `jar` | `request.jar()` | — | cookie persistence across requests |
 | `gzip` | bool | — | accepted for request.js compatibility; **no-op**. Response bodies are auto-decompressed based on the response's `Content-Encoding` header. To receive raw compressed bytes, override `Accept-Encoding: identity` in `headers`. |
-| `redirect` | `'follow' \| 'manual'` | `'follow'` | `'follow'` auto-follows 3xx up to `maxRedirects`; `'manual'` stops and returns the 3xx response (with its `Location` header). |
+| `redirect` | `'follow' \| 'manual' \| 'error'` | `'follow'` | fetch-style redirect handling. |
 | `maxRedirects` | number | `10` | |
 | `timeout` | ms | — | aborts request after N ms (legacy single-phase timer; applies to the response phase). Overrides the 60s response default. |
 | `timeouts` | object | — | per-phase timeouts: `{ connect, tlsHandshake, response }`, all in ms. Response phase defaults to **60_000ms** (60s) when neither `timeouts.response` nor `timeout` is set; pass `timeouts: { response: 0 }` to disable. Overrides `timeout` for the response phase. |
 | `proxy` | URL string | — | Proxy: `http://` (CONNECT), `https://` (CONNECT over TLS), `socks5://` — see [Proxies](#proxies) |
 | `proxyAuthorization` | string | — | Full `Proxy-Authorization` value for CONNECT (e.g. `Bearer <jwt>`); overrides URL-derived Basic auth, and `''` sends no header at all. Not supported with `socks5://` |
 | `proxyHeaders` | object | — | Extra headers sent on the CONNECT request to the proxy. Names the CONNECT builder owns (`host`, `connection`, `keep-alive`, …) and values outside printable ASCII reject with `EBADOPTS`. Not supported with `socks5://` |
-| `simple` | bool | `true` | reject 4xx/5xx as errors (set `false` to resolve them as responses) |
-| `resolveWithFullResponse` | bool | `false` | resolve to `{status, headers, body}` instead of just body |
+| `simple` | bool | `false` | `false` matches `fetch()` (4xx/5xx resolve; inspect `res.ok`). Set `true` to reject 4xx/5xx with `EHTTP`. |
+| `bodyOnly` | bool | `false` | **Deprecated.** Resolve the parsed body (string/Buffer/JSON value) instead of a `Response`, request.js-style. |
+| `resolveWithFullResponse` | bool | — | **Deprecated no-op.** `request()` always resolves a `Response` unless `bodyOnly` is set. |
 | `retry` | object | none | `{ limit, methods, statusCodes, baseDelayMs }` |
 | `profile` | string | `'chrome147-mac'` | which fingerprint profile to emit |
 | `h3` | bool | `false` | opt in to HTTP/3 for this request; QUIC is tried first and TCP+TLS is used when the QUIC handshake cannot complete |
 | `resume` | bool | `false` | offer a cached TLS 1.3 `NewSessionTicket` (`pre_shared_key`) on the next connection to the same host. Opt-in because the extra extension changes JA3/JA4 — see [TLS 1.3 session resumption](#tls-13-session-resumption). h3 is not resumed. |
 | `keepAlive` | bool | `false` | reuse live HTTP/2 connections across requests (multiplex streams onto one socket per origin, like Chrome). When the pool has no capacity the request opens a one-shot connection and closes it after the response, so enabling this can never hold more sockets than the `pool` caps allow. Not pooled: h1 and h3 connections. |
-| `pool` | object | `{maxSockets: 16, maxPerOrigin: 1, idleMs: 15_000}` | keep-alive pool caps: process-wide pooled sockets, sockets per origin, and idle-socket lifetime in ms. Sized for runtimes with a hard per-isolate socket budget (Cloudflare Workers allow single digits). |
-| `verifyTLS` | bool | `true` | Validate the server certificate chain (RFC 5280) + hostname (RFC 6125 SubjectAltName). On by default. Set `false` to skip validation (self-signed dev servers, intentional MITM proxies). Applies to both TLS 1.3 and TLS 1.2 paths. See [Certificate validation](#certificate-validation). |
+| `pool` | object | `{maxSockets: 16, maxPerOrigin: 1, idleMs: 15_000}` | keep-alive pool caps. |
+| `verifyTLS` | bool | `true` | Validate the server certificate chain (RFC 5280) + hostname (RFC 6125 SubjectAltName). |
+| `signal` | `AbortSignal` | — | Abort the request or an in-flight response body. |
+| `stream` | bool | `false` | Resolve as soon as headers arrive. The `Response.body` is still a web `ReadableStream` in both modes; with `stream: true` bytes arrive progressively and redirects / `simple: true` errors are still handled before resolution when possible. |
 
 ### Headers and profiles
 
@@ -182,11 +186,10 @@ await request.options('https://...')
 
 const api = request.defaults({
   headers: { 'x-api-key': '…' },
-  json: true,
-  resolveWithFullResponse: true,
 })
 
-const r = await api({ url: 'https://api.example.com/users' })
+const r = await api({ url: 'https://api.example.com/users' }) // Response
+const data = await r.json()
 const r2 = await api.get('https://api.example.com/things/42')
 ```
 
@@ -246,40 +249,39 @@ explicitly (long-poll, SSE, download of unknown duration), pass `timeouts: { res
 
 ### Streaming response bodies
 
-Pass `stream: true` and the promise resolves as soon as headers arrive, with the
-response body as a Node `Readable`. The body auto-decompresses (gzip / brotli /
-deflate / zstd — all through `node:zlib`, so Node ≥ 24).
+`request()` always resolves a real fetch `Response`, so `res.body` is a web
+`ReadableStream<Uint8Array>` for H1, H2, and H3. With the default buffered mode the
+stream contains the complete response; with `stream: true` the promise resolves as soon
+as headers arrive and bytes flow progressively.
 
 ```js
-const { createWriteStream } = require('node:fs')
-const body = await request({
-  url: 'https://example.com/big.iso',
-  stream: true,
-})
-body.pipe(createWriteStream('./big.iso'))
-
-// Or with full response shape:
 const res = await request({
   url: 'https://example.com/big.iso',
   stream: true,
-  resolveWithFullResponse: true,
 })
-console.log(res.statusCode, res.headers['content-length'])
-res.body.pipe(createWriteStream('./big.iso'))
+console.log(res.status, res.headers.get('content-length'))
+for await (const chunk of res.body) { /* Uint8Array */ }
+
+// Node stream interop:
+import { Readable } from 'node:stream'
+Readable.fromWeb(res.body).pipe(createWriteStream('./big.iso'))
 ```
+
+The body is auto-decompressed (gzip / brotli / deflate / zstd — through `node:zlib`) before
+it reaches `res.body`/`res.text()`/`res.json()`.
 
 ### Streaming request bodies
 
-For large uploads, pass a Node `Readable` as `body`. On h2 it streams as DATA
-frames; on h1 it streams via `Transfer-Encoding: chunked`.
+For large uploads, pass a Node `Readable`, a web `ReadableStream`, or any `BodyInit`.
+On H2/H3 it streams as DATA frames; on H1 it streams via `Transfer-Encoding: chunked`.
 
 ```js
-const { createReadStream } = require('node:fs')
-await request({
-  url: 'https://upload.example.com/blob',
+import { createReadStream } from 'node:fs'
+await request('https://upload.example.com/blob', {
   method: 'POST',
   body: createReadStream('./big-file.bin'),
   headers: { 'content-type': 'application/octet-stream' },
+  duplex: 'half',
 })
 ```
 
@@ -682,26 +684,47 @@ clearSessionTickets()                  // forget every stored ticket
 
 ---
 
+## Migration (fetch-compatible Response)
+
+Recent releases return a **real WHATWG `Response`** (the same object shape as `fetch()`),
+with full streaming on H1/H2/H3 in Node and Cloudflare Workers.
+
+| Old (request.js style) | New (fetch style) |
+|---|---|
+| `resolveWithFullResponse: true` | default; remove it |
+| `res.statusCode` | `res.status` |
+| `res.headers['x']` (plain object) | `res.headers.get('x')` (`Headers`) |
+| parsed `res.body` / returned body | `await res.text()` / `await res.json()` / `res.body` (`ReadableStream`) |
+| `simple: true` default (4xx/5xx throw) | `simple: false` default (inspect `res.ok`); pass `simple: true` for old behavior |
+| `stream: true` resolved a Node `Readable` body | `stream: true` resolves a `Response` whose `res.body` is a web `ReadableStream` |
+| Node stream consumption | `for await (const chunk of res.body)` or `Readable.fromWeb(res.body)` |
+| `request<T>({ ... })` typed body | `const data = await res.json() as T` |
+| request.js callback/parsed-body flow | `bodyOnly: true` (deprecated) returns the parsed body |
+
+---
+
 ## TypeScript
 
 Type declarations ship with the package (`index.d.ts`) and are validated under
 `tsc --strict` in CI.
 
 ```ts
-import request, { HellojsError, HellojsErrorCode, Response, RequestOptions } from '@unreleased/hellojs'
-
-const opts: RequestOptions = {
-  url: 'https://api.example.com',
-  json: true,
-  timeouts: { connect: 2000, tlsHandshake: 5000, response: 10_000 },
-}
+import request, { HellojsError, type Response } from '@unreleased/hellojs'
 
 try {
-  const res = await request<{ name: string }>({ ...opts, resolveWithFullResponse: true })
-  console.log(res.statusCode, res.body.name)
+  const res: Response = await request('https://api.example.com', {
+    method: 'POST',
+    json: { name: 'x' },
+  })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const data = (await res.json()) as { name: string }
+  console.log(res.headers.get('content-type'), data.name)
 } catch (e) {
   if (e instanceof HellojsError && e.code === 'ETIMEDOUT') { /* retry */ }
 }
+
+// request.js-style escape hatch (deprecated):
+const body = await request({ url: 'https://api.example.com', json: true, bodyOnly: true })
 ```
 
 The test suite is TypeScript too: `test/**/*.ts` and `vitest.config.ts` are inside the
