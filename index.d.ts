@@ -99,7 +99,16 @@ export interface RetryPolicy {
 export interface PerPhaseTimeouts {
 	connect?: number
 	tlsHandshake?: number
+	/**
+	 * Deadline for the response headers. Responses always stream, so this no longer covers
+	 * the body; use `bodyIdle` for long-running progressive responses.
+	 */
 	response?: number
+	/**
+	 * Cancel a progressive response body when no bytes move for this many milliseconds.
+	 * `0` / unset disables the watchdog (fetch-like behavior).
+	 */
+	bodyIdle?: number
 }
 
 export interface RequestOptions {
@@ -145,6 +154,7 @@ export interface RequestOptions {
 	/**
 	 * Legacy request.js escape hatch: resolve the parsed body (string, Buffer, or the value
 	 * `json: true` produced) instead of the fetch-compatible `Response`. Deprecated.
+	 * Buffers the whole body to produce that value.
 	 */
 	bodyOnly?: boolean
 	/** Deprecated no-op: `request()` always resolves a full `Response` unless `bodyOnly` is set. */
@@ -175,12 +185,6 @@ export interface RequestOptions {
 	keepAlive?: boolean
 	/** Keep-alive pool caps: process-wide sockets (default 16), sockets per origin (default 1), idle socket lifetime in ms (default 15000). */
 	pool?: Partial<PoolConfig>
-	/**
-	 * Resolve as soon as the response headers arrive and expose the body as a progressive
-	 * `ReadableStream` on `Response.body`. Works for H1, H2 and H3. When false (default) the
-	 * body is buffered first; `Response.body` is still a web stream over the buffered bytes.
-	 */
-	stream?: boolean
 	/** Profile name, or an inline profile object shaped like lib/profiles/types.ts `Profile`. */
 	profile?: ProfileName | Record<string, unknown>
 
@@ -194,7 +198,10 @@ export interface RequestOptions {
 	referrerPolicy?: string
 	/** Present for fetch signature compatibility; a streaming request body is always half-duplex here. */
 	duplex?: 'half'
-	/** Abort the request (or an in-flight response body) when this signal fires. */
+	/**
+	 * Abort the request (or an in-flight response body) when this signal fires. Before
+	 * headers the promise rejects; after headers `Response.body` errors.
+	 */
 	signal?: AbortSignal | null
 }
 
@@ -230,7 +237,7 @@ export type HellojsErrorCode =
 	| 'EH2STREAM' | 'EH2GOAWAY' | 'EH2COMPRESS' | 'EH2KEEPALIVE'
 	| 'EH3STREAM' | 'EH3CONN' | 'EH3PARSE' | 'EPROTO'
 	| 'EHTTP' | 'EBADRESP' | 'EDECOMPRESS'
-	| 'EBODYSTREAM'
+	| 'EBODYSTREAM' | 'EBODYBACKPRESSURE' | 'EBODYIDLE'
 	| 'ETIMEDOUT'
 
 /**

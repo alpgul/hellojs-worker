@@ -128,6 +128,7 @@ export function createPushStream(): PushStream {
 export function nodeToWebStream(
 	source: Readable,
 	onCancel?: (reason: unknown) => void,
+	onPull?: () => void,
 ): ReadableStream<Uint8Array> {
 	let controller!: ReadableStreamDefaultController<Uint8Array>
 	let closed = false
@@ -164,6 +165,7 @@ export function nodeToWebStream(
 		},
 		pull() {
 			try { source.resume() } catch { /* not a Node stream */ }
+			onPull?.()
 		},
 		cancel(reason) {
 			closed = true

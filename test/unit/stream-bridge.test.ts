@@ -57,4 +57,13 @@ describe('nodeToWebStream', () => {
 		// A cancelled/destroyed PassThrough stops accepting writes.
 		expect(src.destroyed).toBe(true)
 	})
+
+	it('runs the onPull hook when the consumer asks for more data', async () => {
+		const src = new PassThrough()
+		let pulls = 0
+		const web = nodeToWebStream(src, undefined, () => { pulls++ })
+		src.end('hello')
+		expect(await readAll(web)).toBe('hello')
+		expect(pulls).toBeGreaterThan(0)
+	})
 })

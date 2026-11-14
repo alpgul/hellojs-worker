@@ -58,7 +58,7 @@ async function smoke(): Promise<void> {
 		jar: request.jar(),
 		gzip: true,
 		timeout: 5000,
-		timeouts: { connect: 1000, tlsHandshake: 2000, response: 3000 },
+		timeouts: { connect: 1000, tlsHandshake: 2000, response: 3000, bodyIdle: 30_000 },
 		proxy: 'https://user:pass@127.0.0.1:8443',
 		retry: { limit: 2, methods: ['GET'], statusCodes: [503], baseDelayMs: 100 },
 		profile: 'chrome147-mac',
@@ -123,8 +123,9 @@ async function smoke(): Promise<void> {
 	t.on('ready', () => {})
 	t.on('error', (_err: Error) => {})
 
-	// Streaming response: `body` is a web ReadableStream, for H1, H2 and H3 alike.
-	const streamed = await request({ url: 'https://example.com', stream: true })
+	// Streaming response: the promise resolves at headers; `body` is a web ReadableStream,
+	// for H1, H2 and H3 alike.
+	const streamed = await request({ url: 'https://example.com' })
 	const reader = streamed.body?.getReader()
 	if (reader) {
 		const { done, value } = await reader.read()
@@ -146,7 +147,7 @@ async function smoke(): Promise<void> {
 	void streamingReq
 
 	// Per-phase timeouts type.
-	const ts: PerPhaseTimeouts = { connect: 1000 }
+	const ts: PerPhaseTimeouts = { connect: 1000, bodyIdle: 30_000 }
 	void ts
 
 	// Values with a standard are validated, not left as free strings/numbers.
@@ -181,8 +182,10 @@ async function smoke(): Promise<void> {
 	// Statuses and codes carry the registry/taxonomy types.
 	const statusNum: number = (await request({ url: 'https://example.com' })).status
 	const code: HellojsErrorCode = 'ETLS_HANDSHAKE'
+	const bodyIdle: HellojsErrorCode = 'EBODYIDLE'
+	const bodyBackpressure: HellojsErrorCode = 'EBODYBACKPRESSURE'
 	const cat: HellojsErrorCategory = 'protocol'
-	void statusNum; void code; void cat
+	void statusNum; void code; void bodyIdle; void bodyBackpressure; void cat
 	// @ts-expect-error codes outside the documented taxonomy do not narrow to HellojsErrorCode
 	const badCode: HellojsErrorCode = 'ENOPE'
 	void badCode

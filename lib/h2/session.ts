@@ -125,6 +125,13 @@ class H2Stream extends EventEmitter {
 	declare _pendingEnd: boolean
 	declare _endSent: boolean
 	declare _headersEndStream: boolean
+	// Inbound backpressure. While paused, DATA frames are queued here instead of being
+	// emitted, and the per-stream WINDOW_UPDATE is deferred (connection credit continues
+	// so sibling streams keep moving). The peer can therefore send at most the advertised
+	// stream window before it stalls.
+	declare _inboundPaused: boolean
+	declare _pausedData: Buffer[]
+	declare _pausedEnd: boolean
 
 	constructor(session: H2Session, id: number) {
 		super()
@@ -142,6 +149,9 @@ class H2Stream extends EventEmitter {
 		this._pendingEnd = false
 		this._endSent = false
 		this._headersEndStream = false
+		this._inboundPaused = false
+		this._pausedData = []
+		this._pausedEnd = false
 	}
 	_onHeaders(payload: Buffer, flags: number): void {
 		// HEADERS may have PADDED or PRIORITY flags affecting payload layout.
@@ -187,26 +197,68 @@ class H2Stream extends EventEmitter {
 		if (this._headerEndStream) this._endStream()
 	}
 	_onData(payload: Buffer, flags: number): void {
+		if (this._inboundPaused) {
+			this._pausedData.push(Buffer.from(payload))
+			// Connection-level credit must keep flowing or one slow consumer would stall
+			// every other stream multiplexed on this socket. The per-stream window is the
+			// actual brake.
+			this.session._creditFlow(payload.length)
+			if (flags & frame.FLAG.END_STREAM) this._pausedEnd = true
+			return
+		}
 		this.emit('data', payload)
-		// Auto-replenish flow control on the stream + connection.
-		this.recvUsed += payload.length
+		this._creditStream(payload.length)
 		this.session._creditFlow(payload.length)
+		if (flags & frame.FLAG.END_STREAM) this._endStream()
+	}
+	_creditStream(bytes: number): void {
+		this.recvUsed += bytes
 		// Per-stream replenish: when this stream has consumed >32KB, issue a stream WINDOW_UPDATE.
 		if (this.recvUsed >= 32768) {
 			this.session._sendFrame(frame.TYPE.WINDOW_UPDATE, 0, this.id, frame.buildWindowUpdate(this.recvUsed))
 			this.recvUsed = 0
 		}
-		if (flags & frame.FLAG.END_STREAM) this._endStream()
+	}
+	/** Stop emitting body bytes until the consumer catches up. */
+	pauseInbound(): void {
+		this._inboundPaused = true
+	}
+	/** Resume a paused stream, flushing everything queued in order. */
+	resumeInbound(): void {
+		if (!this._inboundPaused) return
+		this._inboundPaused = false
+		const queued = this._pausedData
+		this._pausedData = []
+		for (let i = 0; i < queued.length; i++) {
+			if (this.closed) return
+			// The consumer can fall behind again while we drain; keep the tail queued
+			// instead of forcing it into an already-full pipe.
+			if (this._inboundPaused) {
+				this._pausedData = queued.slice(i)
+				return
+			}
+			const chunk = queued[i]!
+			this.emit('data', chunk)
+			this._creditStream(chunk.length)
+		}
+		if (this._pausedEnd && !this.closed) {
+			this._pausedEnd = false
+			this._endStream()
+		}
 	}
 	_endStream(): void {
 		if (this._endRecvd) return
 		this._endRecvd = true
 		this.closed = true
+		this._pausedData = []
+		this._pausedEnd = false
 		this.session._closeStream(this.id)
 		this.emit('end')
 	}
 	_onRst(errorCode: number): void {
 		this.closed = true
+		this._pausedData = []
+		this._pausedEnd = false
 		this.session._closeStream(this.id)
 		const err: H2Error = new Error(`stream reset by peer (code=${errorCode})`)
 		err.code = 'EH2STREAM'

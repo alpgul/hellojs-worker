@@ -91,14 +91,14 @@ describe('fetch-compatible Response shape', () => {
 })
 
 describe('streaming (progressive web ReadableStream body)', () => {
-	it('H2 stream:true resolves at headers with a readable body', async () => {
+	it('H2 resolves at headers with a readable body', async () => {
 		const { server, url } = await startH2((s) => {
 			s.respond({ ':status': 200 })
 			s.write('a')
 			setTimeout(() => s.end('b'), 10)
 		})
 		try {
-			const res = await req(url, { stream: true })
+			const res = await req(url)
 			expect(res.body).toBeInstanceOf(ReadableStream)
 			const reader = res.body!.getReader()
 			const chunks: Uint8Array[] = []
@@ -107,14 +107,14 @@ describe('streaming (progressive web ReadableStream body)', () => {
 		} finally { server.close() }
 	})
 
-	it('H1 stream:true resolves at headers with a readable body', async () => {
+	it('H1 resolves at headers with a readable body', async () => {
 		const { server, url } = await startH1((_req, res) => {
 			res.writeHead(200, { 'content-type': 'text/plain' })
 			res.write('one-')
 			setTimeout(() => res.end('two'), 10)
 		})
 		try {
-			const res = await req(url, { stream: true })
+			const res = await req(url)
 			expect(res.body).toBeInstanceOf(ReadableStream)
 			expect(await res.text()).toBe('one-two')
 		} finally { server.close() }
@@ -189,16 +189,34 @@ describe('status and redirect semantics (fetch parity)', () => {
 })
 
 describe('abort', () => {
-	it('rejects a buffered request when the signal aborts', async () => {
+	it('rejects when the signal aborts before headers', async () => {
 		const { server, url } = await startH2((s) => {
-			s.respond({ ':status': 200 })
-			// never ends
+			// Never respond: the promise is still waiting for headers.
 			void s
 		})
 		const ac = new AbortController()
 		setTimeout(() => ac.abort(), 30)
 		try {
 			await expect(req(url, { signal: ac.signal, timeout: 5000 })).rejects.toThrow()
+		} finally { server.close() }
+	})
+
+	it('resolves at headers, then errors the streamed body when the signal aborts', async () => {
+		const { server, url } = await startH2((s) => {
+			s.respond({ ':status': 200 })
+			s.write('first')
+			// never ends
+			void s
+		})
+		const ac = new AbortController()
+		try {
+			// Headers resolve immediately; the body is still open.
+			const res = await req(url, { signal: ac.signal })
+			expect(res.status).toBe(200)
+			const reader = res.body!.getReader()
+			expect(new TextDecoder().decode((await reader.read()).value)).toBe('first')
+			ac.abort()
+			await expect(reader.read()).rejects.toThrow()
 		} finally { server.close() }
 	})
 })

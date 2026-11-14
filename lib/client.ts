@@ -17,7 +17,6 @@
 //   Accept-Encoding to `identity` in headers; servers will then respond uncompressed.
 
 import * as querystring from 'node:querystring'
-import { PassThrough, Readable } from 'node:stream'
 import { URL } from 'node:url'
 import * as zlib from 'node:zlib'
 
@@ -28,9 +27,10 @@ import { buildH2Headers, buildH1Headers, mergeProfileHeaders } from './headers.t
 import { observability, nextRequestId } from './observability.ts'
 import * as pool from './pool.ts'
 import * as profileRegistry from './profiles/index.ts'
+import { startProgressiveResponse, type ProgressiveStream } from './response-stream.ts'
 import { statusTextFor } from './status-text.ts'
 import { summarizeConn } from './tls-summary.ts'
-import { buildResponse, createPushStream, isWebReadableStream, nodeToWebStream, webToNodeStream } from './web-response.ts'
+import { buildResponse, isWebReadableStream, webToNodeStream } from './web-response.ts'
 
 import type { Connection, PerPhaseTimeouts } from './connect.ts'
 import type { ErrorCode } from './errors.ts'
@@ -38,8 +38,7 @@ import type { H2Stream } from './h2/session.ts'
 import type { HeaderMap } from './headers.ts'
 import type { PoolConfig } from './pool.ts'
 import type { Profile } from './profiles/types.ts'
-import type { PushStream } from './web-response.ts'
-import type { Transform } from 'node:stream'
+import type { Readable } from 'node:stream'
 
 // RFC 6265-compliant cookie jar lives in lib/cookies.ts.
 
@@ -49,6 +48,11 @@ import type { Transform } from 'node:stream'
 //   { timeouts: { response: 0 } }         — no timer, request runs until conn closes
 // Any positive number overrides the default.
 const DEFAULT_RESPONSE_TIMEOUT_MS = 60_000
+
+// H3 does not implement QUIC receive flow control yet, so a consumer that stops reading
+// cannot make the peer pause. Bound the in-process buffer and fail the body instead of
+// growing without limit.
+const MAX_H3_BUFFERED_BODY = 16 * 1024 * 1024
 
 export type RequestBodyValue = BodyInit | Buffer | Readable | Record<string, unknown> | unknown[]
 
@@ -121,12 +125,6 @@ export interface RequestOptions {
 	keepAlive?: boolean
 	/** Keep-alive pool caps: process-wide sockets, sockets per origin, idle socket lifetime. */
 	pool?: Partial<PoolConfig>
-	/**
-	 * Resolve as soon as the response headers arrive and expose the body as a progressive
-	 * `ReadableStream` on `Response.body`. Works for H1, H2 and H3. When false (default) the
-	 * body is buffered first; `Response.body` is still a web stream over the buffered bytes.
-	 */
-	stream?: boolean
 	/** Profile name, or an inline profile object. */
 	profile?: string | Profile
 
@@ -146,6 +144,9 @@ export interface RequestOptions {
 	_reqId?: number
 	// Internal: set once a redirect has been followed, so `Response.redirected` is accurate.
 	_redirected?: boolean
+	// Internal: the request.js callback form needs the parsed legacy body, so its response is
+	// buffered even though responses stream by default.
+	_bufferBody?: boolean
 }
 
 /**
@@ -271,6 +272,17 @@ function abortReason(signal?: AbortSignal | null): unknown {
 	return reason !== undefined ? reason : new DOMException('The operation was aborted.', 'AbortError')
 }
 
+function errorCodeOf(error: unknown, fallback: ErrorCode | string): string {
+	const code = (error as { code?: unknown } | null)?.code
+	if (typeof code === 'string') return code
+	const name = (error as { name?: unknown } | null)?.name
+	return typeof name === 'string' && name ? name : fallback
+}
+
+function messageOf(error: unknown): string {
+	return error instanceof Error ? error.message : String(error)
+}
+
 function throwIfAborted(signal?: AbortSignal | null): void {
 	if (signal?.aborted) throw abortReason(signal)
 }
@@ -301,19 +313,6 @@ function decompressIfNeeded(buf: Buffer, encoding: string): Buffer {
 
 // Streaming counterpart: return a Transform that the response body can be piped through.
 // `null` means "no decoding needed — caller can read the body as-is."
-function decompressStreamForEncoding(encoding: string): Transform | null {
-	const e = (encoding || '').toLowerCase()
-	if (!e || e === 'identity') return null
-	if (e.includes('gzip')) return zlib.createGunzip()
-	if (e.includes('br'))   return zlib.createBrotliDecompress()
-	if (e.includes('deflate')) {
-		// Some servers send raw deflate; createInflate auto-detects, but to match the sync path
-		// we use createInflate and rely on Node's auto-fallback to raw.
-		return zlib.createInflate()
-	}
-	if (e.includes('zstd')) return zlib.createZstdDecompress()
-	return null  // unknown encoding — caller reads the body as-is
-}
 
 function buildUrl(opts: RequestOptions): URL {
 	const url = opts.url || opts.uri
@@ -509,82 +508,99 @@ async function performRequest(opts: RequestOptions): Promise<unknown> {
 	}
 }
 
-async function performH3(conn: Connection, { method, url, host, body, userHeaders, opts, profileObj }: RequestContext): Promise<unknown> {
+function performH3(conn: Connection, { method, url, host, body, userHeaders, opts, profileObj }: RequestContext): Promise<unknown> {
 	const headers = mergeProfileHeaders(userHeaders, profileObj)
 	const path = url.pathname + url.search
+	const reqId = opts._reqId
+	const reqT0 = Date.now()
 	const close = () => { try { conn.close('h3-response-complete') } catch { /* already closed */ } }
 
-	if (!opts.stream) {
-		let res
-		try {
-			res = await conn.h3Client!.request({ method, path, host, headers, body })
-		} catch (e) {
-			conn.close('h3-error')
-			throw e
-		}
-		close()
-		let raw: Buffer = res.body
-		try { raw = decompressIfNeeded(raw, res.headers['content-encoding']) }
-		catch (e) { throw new HellojsError((e as Error).message, 'EDECOMPRESS', e) }
-		if (opts.jar && res.headers['set-cookie']) opts.jar.setCookie(res.headers['set-cookie'], url.toString())
-		return new Promise((resolve, reject) => handleResponse({
-			status: res.status, statusText: statusTextFor(res.status), headers: res.headers, raw, opts, resolve, reject,
-		}))
-	}
-
-	// Progressive path: resolve at HEADERS, stream DATA frames as they arrive. Redirects and
-	// simple-mode errors are buffered so the normal handleResponse logic still applies to them.
+	// Resolve at HEADERS, stream DATA frames as they arrive. Redirects, simple-mode errors,
+	// `bodyOnly` and the callback form are buffered so the normal handleResponse logic
+	// still applies to them.
 	return new Promise((resolve, reject) => {
-		let pass: PassThrough | null = null
-		let userStream: Readable | null = null
+		let stream: ProgressiveStream | null = null
 		let buffering = false
-		let buffered: Buffer[] = []
+		const buffered: Buffer[] = []
 		let status = 0
 		let resHeaders: Record<string, string> = {}
 		let resolved = false
 
 		conn.h3Client!.requestStream({ method, path, host, headers, body }, {
 			onHeaders: (s, h) => {
+				// 1xx informational responses are not final; wait for the real HEADERS.
+				if (s >= 100 && s < 200) return
 				status = s
 				resHeaders = h
 				if (opts.jar && h['set-cookie']) opts.jar.setCookie(h['set-cookie'], url.toString())
 				const isRedirect = opts.redirect !== 'manual' && s >= 300 && s < 400 && !!h.location
-				if (isRedirect || (opts.simple === true && s >= 400)) {
+				if (isRedirect || (opts.simple === true && s >= 400) || opts.bodyOnly === true || opts._bufferBody === true) {
 					buffering = true
 					return
 				}
-				pass = new PassThrough()
-				const decoder = decompressStreamForEncoding(h['content-encoding'])
-				userStream = decoder ? pass.pipe(decoder) : pass
-				const web = nodeToWebStream(userStream, () => { try { conn.close('abort') } catch { /* closed */ } })
-				const res = buildResponse({
-					status: s, statusText: statusTextFor(s), headers: h, body: web, ...responseMeta(opts),
+				stream = startProgressiveResponse({
+					status: s,
+					headers: h,
+					...responseMeta(opts),
+					signal: opts.signal,
+					idleTimeoutMs: opts.timeouts?.bodyIdle ?? 0,
+					errorCode: 'EH3STREAM',
+					onCancel: () => { try { conn.close('h3-stream-cancel') } catch { /* already closed */ } },
+					onFirstByte: () => observability.safeEmit('request:firstByte', { id: reqId, durationMs: Date.now() - reqT0 }),
+					onEnd: (bytes) => {
+						observability.safeEmit('request:end', {
+							id: reqId, status: s, headers: h, totalBytes: bytes,
+							durationMs: Date.now() - reqT0, tls: summarizeConn(conn),
+						})
+						close()
+					},
+					onError: (error, bytes) => {
+						observability.safeEmit('request:error', {
+							id: reqId, code: errorCodeOf(error, 'EH3STREAM'),
+							message: messageOf(error), durationMs: Date.now() - reqT0,
+						})
+						void bytes
+						close()
+					},
 				})
 				resolved = true
-				resolve(opts.bodyOnly ? userStream : res)
+				resolve(stream.result)
 			},
 			onData: (chunk) => {
 				if (buffering) { buffered.push(chunk); return }
-				if (pass && !pass.destroyed && !pass.write(chunk)) {
-					// H3 flow control is owned by the QUIC layer; the stream controller queues
-					// the excess, so there is no source to pause here.
+				if (!stream) return
+				stream.write(chunk)
+				// QUIC receive flow control is not wired yet, so a consumer that stops
+				// reading would otherwise let the peer fill memory without bound.
+				if (stream.bufferedBytes() > MAX_H3_BUFFERED_BODY) {
+					stream.fail(new HellojsError(
+						`h3 response body exceeded ${MAX_H3_BUFFERED_BODY} buffered bytes`,
+						'EBODYBACKPRESSURE',
+					))
 				}
 			},
 			onEnd: () => {
-				close()
 				if (buffering) {
+					close()
 					let raw: Buffer = Buffer.concat(buffered)
 					try { raw = decompressIfNeeded(raw, resHeaders['content-encoding']) }
 					catch (e) { reject(new HellojsError((e as Error).message, 'EDECOMPRESS', e)); return }
+					observability.safeEmit('request:end', {
+						id: reqId, status, headers: resHeaders, totalBytes: raw.length,
+						durationMs: Date.now() - reqT0, responseBody: raw, tls: summarizeConn(conn),
+					})
 					handleResponse({ status, statusText: statusTextFor(status), headers: resHeaders, raw, opts, resolve, reject })
 					return
 				}
-				pass?.end()
+				stream?.end()
 			},
 			onError: (e) => {
+				if (stream) {
+					stream.fail(new HellojsError(e.message, 'EH3STREAM', e))
+					return
+				}
 				close()
-				if (pass) pass.destroy(e)
-				else if (!resolved) reject(new HellojsError(e.message, 'EH3STREAM', e))
+				if (!resolved) reject(new HellojsError(e.message, 'EH3STREAM', e))
 			},
 		})
 	})
@@ -616,129 +632,106 @@ function performH2(conn: Connection, { method, url, host, body, userHeaders, opt
 		// Streaming response path: resolve as soon as headers arrive and expose the rest as a
 		// web ReadableStream. Redirects and simple-mode errors need their (small) body to
 		// apply the normal policy, so those are buffered and handed to handleResponse.
-		if (opts.stream) {
-			let settled = false
-			let resolved = false
-			let buffering = false
-			const buffered: Buffer[] = []
-			let bufferedStatus = 0
-			let bufferedHeaders: H1Headers | undefined
-			let pass: PassThrough | null = null
-			let userStream: Readable | null = null
+		let settled = false
+		let buffering = false
+		const buffered: Buffer[] = []
+		let bufferedStatus = 0
+		let bufferedHeaders: H1Headers | undefined
+		let stream: ProgressiveStream | null = null
 
-			req.on('response', (h: H1Headers) => {
-				if (settled) return
-				settled = true
-				if (timer) clearTimeout(timer)
-				const status = parseInt(String(h[':status'] ?? 0), 10)
-				if (opts.jar && h['set-cookie']) opts.jar.setCookie(h['set-cookie'], url.toString())
-				const isRedirect = opts.redirect !== 'manual' && status >= 300 && status < 400 && !!h.location
-				if (isRedirect || (opts.simple === true && status >= 400)) {
-					buffering = true
-					bufferedStatus = status
-					bufferedHeaders = h
-					return
-				}
-				pass = new PassThrough()
-				const decoder = decompressStreamForEncoding(h['content-encoding'] as string)
-				userStream = decoder ? pass.pipe(decoder) : pass
-
-				req.on('data', (c: Buffer) => {
-					if (pass && !pass.destroyed && !pass.write(c)) {
-						// H2 flow control is per-stream; the web controller queues what the
-						// consumer has not read yet.
-					}
-				})
-				req.on('end', () => {
-					pass?.end()
-					if (!pool.release(conn)) conn.close('h2-stream-end')
-				})
-				req.on('error', (e: Error) => {
-					conn.close('h2-stream-error')
-					pass?.destroy(new HellojsError(e.message, 'EH2STREAM', e))
-				})
-
-				const web = nodeToWebStream(userStream, () => {
+		req.on('response', (h: H1Headers) => {
+			const status = parseInt(String(h[':status'] ?? 0), 10)
+			// 1xx informational responses (100 Continue, 103 Early Hints) are not final.
+			// Keep waiting for the real HEADERS instead of resolving a clamped 200.
+			if (status >= 100 && status < 200) return
+			if (settled) return
+			settled = true
+			if (timer) clearTimeout(timer)
+			if (opts.jar && h['set-cookie']) opts.jar.setCookie(h['set-cookie'], url.toString())
+			const isRedirect = opts.redirect !== 'manual' && status >= 300 && status < 400 && !!h.location
+			if (isRedirect || (opts.simple === true && status >= 400) || opts.bodyOnly === true || opts._bufferBody === true) {
+				buffering = true
+				bufferedStatus = status
+				bufferedHeaders = h
+				return
+			}
+			stream = startProgressiveResponse({
+				status,
+				headers: h,
+				...responseMeta(opts),
+				signal: opts.signal,
+				idleTimeoutMs: opts.timeouts?.bodyIdle ?? 0,
+				errorCode: 'EH2STREAM',
+				onCancel: () => {
 					try { req.close(0x8) } catch { /* already closed */ }
 					if (!pool.release(conn)) conn.close('h2-stream-cancel')
-				})
-				const res = buildResponse({
-					status, statusText: statusTextFor(status), headers: h, body: web, ...responseMeta(opts),
-				})
-				resolved = true
-				resolve(opts.bodyOnly ? userStream : res)
+				},
+				onBackpressure: (paused) => {
+					if (paused) req.pauseInbound()
+					else req.resumeInbound()
+				},
+				onFirstByte: () => {
+					firstByteEmitted = true
+					observability.safeEmit('request:firstByte', { id: reqId, durationMs: Date.now() - reqT0 })
+				},
+				onEnd: (bytes) => {
+					observability.safeEmit('request:end', {
+						id: reqId, status, headers: h, totalBytes: bytes,
+						durationMs: Date.now() - reqT0, tls: summarizeConn(conn),
+					})
+					if (!pool.release(conn)) conn.close('h2-stream-end')
+				},
+				onError: (error) => {
+					observability.safeEmit('request:error', {
+						id: reqId, code: errorCodeOf(error, 'EH2STREAM'),
+						message: messageOf(error), durationMs: Date.now() - reqT0,
+					})
+				},
 			})
-			req.on('data', (c: Buffer) => {
-				if (!buffering) return
+			resolve(stream.result)
+		})
+		req.on('data', (c: Buffer) => {
+			if (buffering) {
 				buffered.push(c)
 				if (!firstByteEmitted) {
 					firstByteEmitted = true
 					observability.safeEmit('request:firstByte', { id: reqId, durationMs: Date.now() - reqT0 })
 				}
-			})
-			req.on('end', () => {
-				if (!buffering) return
-				if (timer) clearTimeout(timer)
-				if (!pool.release(conn)) conn.close('h2-response-complete')
-				let raw: Buffer = Buffer.concat(buffered)
-				try { raw = decompressIfNeeded(raw, bufferedHeaders?.['content-encoding'] as string) }
-				catch (e) { return reject(new HellojsError((e as Error).message, 'EDECOMPRESS', e)) }
-				handleResponse({
-					status: bufferedStatus, statusText: statusTextFor(bufferedStatus),
-					headers: bufferedHeaders ?? {}, raw, opts, resolve, reject,
-				})
-			})
-			req.on('error', (e: Error) => {
-				if (settled) return
-				settled = true
-				if (timer) clearTimeout(timer)
-				conn.close('h2-stream-error')
-				reject(new HellojsError(e.message, 'EH2STREAM', e))
-			})
-			if (streamingBody) {
-				// req.write returns false when the peer's flow-control window is full and the chunk
-				// is queued; pause the source until the session drains it (emits 'drain').
-				streamingBody.on('data', (c: Buffer) => {
-					if (!req.write(Buffer.isBuffer(c) ? c : Buffer.from(c))) { streamingBody.pause(); req.once('drain', () => streamingBody.resume()) }
-				})
-				streamingBody.on('end', () => req.end())
-				streamingBody.on('error', (e: Error) => { try { req.close(0x8) } catch {}; conn.close('h2-body-error'); reject(new HellojsError(e.message, 'EBODYSTREAM', e)) })
-			} else if (bufferedBody) req.end(bufferedBody)
-			else req.end()
-			return
-		}
-
-		const chunks: Buffer[] = []
-		let resHeaders: H1Headers | undefined
-		let totalBytes = 0
-		req.on('response', (h: H1Headers) => { resHeaders = h })
-		req.on('data', (c: Buffer) => {
-			chunks.push(c); totalBytes += c.length
-			if (!firstByteEmitted) {
-				firstByteEmitted = true
-				observability.safeEmit('request:firstByte', { id: reqId, durationMs: Date.now() - reqT0 })
+				return
 			}
+			stream?.write(c)
 		})
 		req.on('end', () => {
+			if (!buffering) {
+				stream?.end()
+				return
+			}
 			if (timer) clearTimeout(timer)
 			if (!pool.release(conn)) conn.close('h2-response-complete')
-			let raw: Buffer = Buffer.concat(chunks)
-			try { raw = decompressIfNeeded(raw, resHeaders?.['content-encoding'] as string) }
+			let raw: Buffer = Buffer.concat(buffered)
+			try { raw = decompressIfNeeded(raw, bufferedHeaders?.['content-encoding'] as string) }
 			catch (e) { return reject(new HellojsError((e as Error).message, 'EDECOMPRESS', e)) }
-			const status = parseInt(String(resHeaders?.[':status'] ?? 0), 10)
-			// responseBody is the DECODED bytes (post-gzip/brotli/zstd) as a Buffer, for
-			// observability consumers. Consumers that need the raw wire bytes can sum from
-			// the request:firstByte + subsequent hooks. `tls` carries the negotiated
-			// protocol / cipher / cert / server-IP summary.
 			observability.safeEmit('request:end', {
-				id: reqId, status, headers: resHeaders, totalBytes,
-				durationMs: Date.now() - reqT0, responseBody: raw,
-				tls: summarizeConn(conn),
+				id: reqId, status: bufferedStatus, headers: bufferedHeaders ?? {}, totalBytes: raw.length,
+				durationMs: Date.now() - reqT0, responseBody: raw, tls: summarizeConn(conn),
 			})
-			if (opts.jar && resHeaders?.['set-cookie']) opts.jar.setCookie(resHeaders['set-cookie'], url.toString())
-			handleResponse({ status, statusText: statusTextFor(status), headers: resHeaders!, raw, opts, resolve, reject })
+			handleResponse({
+				status: bufferedStatus, statusText: statusTextFor(bufferedStatus),
+				headers: bufferedHeaders ?? {}, raw, opts, resolve, reject,
+			})
 		})
-		req.on('error', (e: Error) => { if (timer) clearTimeout(timer); conn.close('h2-error'); reject(new HellojsError(e.message, 'EH2STREAM', e)) })
+		req.on('error', (e: Error) => {
+			if (stream) {
+				conn.close('h2-stream-error')
+				stream.fail(new HellojsError(e.message, 'EH2STREAM', e))
+				return
+			}
+			if (settled && !buffering) return
+			settled = true
+			if (timer) clearTimeout(timer)
+			conn.close('h2-stream-error')
+			reject(new HellojsError(e.message, 'EH2STREAM', e))
+		})
 		if (streamingBody) {
 			// req.write returns false when the peer's flow-control window is full and the chunk
 			// is queued; pause the source until the session drains it (emits 'drain').
@@ -746,7 +739,7 @@ function performH2(conn: Connection, { method, url, host, body, userHeaders, opt
 				if (!req.write(Buffer.isBuffer(c) ? c : Buffer.from(c))) { streamingBody.pause(); req.once('drain', () => streamingBody.resume()) }
 			})
 			streamingBody.on('end', () => req.end())
-			streamingBody.on('error', (e: Error) => { try { req.close(0x8) } catch {}; reject(new HellojsError(e.message, 'EBODYSTREAM', e)) })
+			streamingBody.on('error', (e: Error) => { try { req.close(0x8) } catch {}; conn.close('h2-body-error'); reject(new HellojsError(e.message, 'EBODYSTREAM', e)) })
 		} else if (bufferedBody) req.end(bufferedBody)
 		else req.end()
 	})
@@ -784,15 +777,12 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 		let contentLength = 0
 		let bodyStart = 0
 		// Progressive-response state. `streamingStarted` means headers have been handed off to
-		// the web stream (or to the redirect/simple buffer), so later chunks bypass `buf`.
+		// the body parser (or to the redirect/simple buffer), so later chunks bypass `buf`.
 		let streamingStarted = false
-		let streaming = false
 		let buffering = false
 		let streamDone = false
 		const buffered: Buffer[] = []
-		let pass: PassThrough | null = null
-		let userStream: Readable | null = null
-		let bodyAbortCleanup = () => {}
+		let stream: ProgressiveStream | null = null
 		// Incremental framing state for the streaming chunked parser.
 		let frameBuf: Buffer = Buffer.alloc(0)
 		let chunkRemaining = 0
@@ -885,20 +875,17 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 			return 'ok'
 		}
 
-		// Write decoded entity bytes into the progressive Node stream, pausing the socket when
-		// the consumer has stopped reading. `pass` is piped through the decompressor when the
-		// response is encoded, so its writable side is the backpressure signal.
+		// Write decoded entity bytes into the progressive stream, or collect them while the
+		// response is being buffered (redirect / simple / bodyOnly / callback).
 		function writeOut(data: Buffer): void {
-			if (!pass || pass.destroyed || data.length === 0) return
+			if (data.length === 0) return
 			received += data.length
-			if (!pass.write(data)) {
-				try { transport.pause() } catch { /* not a Node stream */ }
-				pass.once('drain', () => { try { transport.resume() } catch { /* closed */ } })
-			}
+			if (buffering) { buffered.push(data); return }
+			if (!stream) return
+			stream.write(data)
 		}
 
-		// Incremental chunked decoder for the streaming path. The buffered path keeps its
-		// whole-buffer `dechunk` helper; this one never retains more than partial framing.
+		// Incremental chunked decoder: never retains more than partial framing.
 		function feedChunked(chunk: Buffer): void {
 			frameBuf = frameBuf.length ? Buffer.concat([frameBuf, chunk]) : chunk
 			for (;;) {
@@ -938,8 +925,6 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 
 		function feedStream(chunk: Buffer): void {
 			if (streamDone) return
-			if (buffering) { if (chunk.length) buffered.push(chunk); return }
-			if (!streaming) return
 			if (mode === 'none') return
 			if (mode === 'length') {
 				const take = Math.min(chunk.length, contentLength - received)
@@ -956,9 +941,10 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 			streamDone = true
 			settled = true
 			cleanup()
-			bodyAbortCleanup()
 			try { conn.close('h1-stream-error') } catch { /* closed */ }
-			pass?.destroy(new HellojsError(message, code))
+			// A buffered response has not resolved yet, so the failure belongs on the promise.
+			if (buffering) { reject(new HellojsError(message, code)); return }
+			stream?.fail(new HellojsError(message, code))
 		}
 
 		function completeStream(): void {
@@ -966,23 +952,22 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 			streamDone = true
 			settled = true
 			cleanup()
-			bodyAbortCleanup()
-			try { conn.close('h1-response-complete') } catch { /* closed */ }
 			if (buffering) {
+				try { conn.close('h1-response-complete') } catch { /* closed */ }
 				let raw: Buffer = Buffer.concat(buffered)
 				if (raw.length) {
 					try { raw = decompressIfNeeded(raw, coerce(headers['content-encoding']) || '') }
 					catch (e) { reject(new HellojsError((e as Error).message, 'EDECOMPRESS', e)); return }
 				}
 				if (opts.jar && headers['set-cookie']) opts.jar.setCookie(headers['set-cookie'], url.toString())
+				observability.safeEmit('request:end', {
+					id: opts._reqId, status, headers, totalBytes: raw.length,
+					durationMs: Date.now() - h1T0, responseBody: raw, tls: summarizeConn(conn),
+				})
 				handleResponse({ status, statusText, headers, raw, opts, resolve, reject })
 				return
 			}
-			observability.safeEmit('request:end', {
-				id: opts._reqId, status, headers, totalBytes: received,
-				durationMs: Date.now() - h1T0, tls: summarizeConn(conn),
-			})
-			pass?.end()
+			stream?.end()
 		}
 
 		// Hand the response off as soon as its headers are complete. Redirects and simple-mode
@@ -991,70 +976,44 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 		function startStreaming(): void {
 			streamingStarted = true
 			const isRedirect = opts.redirect !== 'manual' && status >= 300 && status < 400 && !!headers.location
-			if (isRedirect || (opts.simple === true && status >= 400)) { buffering = true; return }
-			streaming = true
-			pass = new PassThrough()
-			const decoder = decompressStreamForEncoding(coerce(headers['content-encoding']) || '')
-			userStream = decoder ? pass.pipe(decoder) : pass
-			const web = nodeToWebStream(userStream, () => { try { conn.close('h1-stream-cancel') } catch { /* closed */ } })
-			const res = buildResponse({ status, statusText, headers, body: web, ...responseMeta(opts) })
-			bodyAbortCleanup = onAbort(opts.signal, () => {
-				try { conn.close('abort') } catch { /* closed */ }
-				const reason = abortReason(opts.signal)
-				pass?.destroy(reason instanceof Error ? reason : new HellojsError(String(reason), 'EABORT'))
+			if (isRedirect || (opts.simple === true && status >= 400) || opts.bodyOnly === true || opts._bufferBody === true) { buffering = true; return }
+			stream = startProgressiveResponse({
+				status,
+				statusText,
+				headers,
+				...responseMeta(opts),
+				signal: opts.signal,
+				idleTimeoutMs: opts.timeouts?.bodyIdle ?? 0,
+				errorCode: 'EBADRESP',
+				onCancel: () => {
+					streamDone = true
+					settled = true
+					cleanup()
+					try { conn.close('h1-stream-cancel') } catch { /* closed */ }
+				},
+				onBackpressure: (paused) => {
+					try {
+						if (paused) transport.pause()
+						else transport.resume()
+					} catch { /* not a Node stream */ }
+				},
+				onFirstByte: () => observability.safeEmit('request:firstByte', { id: opts._reqId, durationMs: Date.now() - h1T0 }),
+				onEnd: (bytes) => {
+					observability.safeEmit('request:end', {
+						id: opts._reqId, status, headers, totalBytes: bytes,
+						durationMs: Date.now() - h1T0, tls: summarizeConn(conn),
+					})
+					try { conn.close('h1-response-complete') } catch { /* closed */ }
+				},
+				onError: (error) => {
+					observability.safeEmit('request:error', {
+						id: opts._reqId, code: errorCodeOf(error, 'EBADRESP'),
+						message: messageOf(error), durationMs: Date.now() - h1T0,
+					})
+				},
 			})
 			if (timer) { clearTimeout(timer); timer = null }
-			resolve(opts.bodyOnly ? userStream : res)
-		}
-
-		// Returns true if the request settled (resolved/failed), false if more bytes are needed.
-		function tryComplete(): boolean {
-			if (mode === 'none') { finish(bodyStart); return true }
-			if (mode === 'length') {
-				if (buf.length - bodyStart >= contentLength) { finish(bodyStart + contentLength); return true }
-				return false
-			}
-			if (mode === 'chunked') {
-				let off = bodyStart
-				for (;;) {
-					const nl = buf.indexOf(CRLF, off)
-					if (nl < 0) return false
-					const token = buf.subarray(off, nl).toString('ascii').split(';')[0].trim()  // strip chunk extensions
-					if (!/^[0-9a-fA-F]+$/.test(token)) { fail('bad chunk size', 'EBADRESP'); return true }
-					const sz = Number.parseInt(token, 16)
-					if (sz === 0) {
-						const end = findTrailerEnd(buf, nl + 2)
-						if (end < 0) return false  // trailer section not fully arrived
-						finish(end); return true
-					}
-					const dataEnd = nl + 2 + sz
-					if (buf.length < dataEnd + 2) return false  // chunk data + trailing CRLF not all here
-					off = dataEnd + 2
-				}
-			}
-			return false  // 'eof' -> wait for onEnd / socket close
-		}
-
-		function finish(bodyEndIdx: number) {
-			let entity: Buffer = buf.subarray(bodyStart, bodyEndIdx)
-			if (mode === 'chunked') entity = dechunk(entity)
-			done(() => {
-				try { conn.close('h1-response-complete') } catch {}
-				let raw: Buffer = entity
-				if (raw.length) {
-					try { raw = decompressIfNeeded(raw, coerce(headers['content-encoding']) || '') }
-					catch (e) { return reject(new HellojsError((e as Error).message, 'EDECOMPRESS', e)) }
-				}
-				if (opts.jar && headers['set-cookie']) opts.jar.setCookie(headers['set-cookie'], url.toString())
-				// Observability event so hooks / metrics can capture H1 traffic too. Payload
-				// mirrors the H2 request:end shape.
-				observability.safeEmit('request:end', {
-					id: opts._reqId, status, headers,
-					totalBytes: raw.length, durationMs: Date.now() - h1T0, responseBody: raw,
-					tls: summarizeConn(conn),
-				})
-				handleResponse({ status, statusText, headers, raw, opts, resolve, reject })
-			})
+			resolve(stream.result)
 		}
 
 		const onData = (c: Buffer) => {
@@ -1069,30 +1028,21 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 					if (r === 'need-more' || r === 'error') return
 					if (r === 'interim') continue  // 1xx consumed; parse the next head
 				}
-				if (opts.stream) {
-					startStreaming()
-					if (mode === 'none' || (mode === 'length' && contentLength === 0)) { completeStream(); return }
-					const leftover = buf.subarray(bodyStart)
-					buf = Buffer.alloc(0)
-					if (leftover.length) feedStream(leftover)
-					return
-				}
-				tryComplete()
+				startStreaming()
+				if (mode === 'none' || (mode === 'length' && contentLength === 0)) { completeStream(); return }
+				const leftover = buf.subarray(bodyStart)
+				buf = Buffer.alloc(0)
+				if (leftover.length) feedStream(leftover)
 				return
 			}
 		}
 		const onEnd = () => {
 			if (settled) return
 			if (!headersParsed) return fail('incomplete h1 response', 'EBADRESP')
-			if (streamingStarted) {
-				if (mode === 'eof') { completeStream(); return }
-				// Length/chunked framing completes on a full frame; a close before then is truncation.
-				if (buffering) { completeStream(); return }
-				failStream('connection closed before response complete', 'EBADRESP')
-				return
-			}
-			if (mode === 'eof') return finish(buf.length)  // close-delimited body: end == complete
-			fail('connection closed before response complete', 'EBADRESP')  // truncated CL/chunked body
+			// Close-delimited bodies complete on EOF. A length/chunked close before its frame
+			// (streaming or buffered) is truncation.
+			if (mode === 'eof') { completeStream(); return }
+			failStream('connection closed before response complete', 'EBADRESP')
 		}
 
 		transport.on('data', onData)
@@ -1111,26 +1061,6 @@ function findTrailerEnd(b: Buffer, start: number): number {
 		if (nl === off) return off + 2  // empty line terminates the trailers
 		off = nl + 2
 	}
-}
-
-// Decode a chunked body that is already delimited up to and including the terminal 0-chunk.
-// Tolerant of chunk extensions (`size;ext=val`) and bounded so a short final slice can't read past
-// the buffer.
-function dechunk(buf: Buffer): Buffer {
-	const out: Buffer[] = []
-	let off = 0
-	while (off < buf.length) {
-		const nl = buf.indexOf(CRLF, off)
-		if (nl < 0) break
-		const sz = Number.parseInt(buf.subarray(off, nl).toString('ascii').split(';')[0].trim(), 16)
-		if (Number.isNaN(sz)) break
-		const start = nl + 2, end = start + sz
-		if (end > buf.length) break
-		out.push(buf.subarray(start, end))
-		off = end + 2
-		if (sz === 0) break
-	}
-	return Buffer.concat(out)
 }
 
 // Return a copy of opts with the named request headers removed (case-insensitively). Used on
@@ -1298,6 +1228,9 @@ function requestImpl(input: RequestOptions | string | URL | Request, initOrCb?: 
 	if (typeof initOrCb === 'function') {
 		const cb = initOrCb
 		const opts = inputToOptions(input)
+		// The request.js callback contract includes the parsed legacy body, so this form
+		// buffers even though the promise API streams.
+		opts._bufferBody = true
 		const p = performWithRetry(opts)
 		p.then(
 			(r) => {

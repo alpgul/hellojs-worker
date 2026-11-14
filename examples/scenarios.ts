@@ -140,6 +140,8 @@ export const scenarios: Scenario[] = [
 			const rejected = await tour({ url: `${BIN}/status/418`, simple: true }).then(() => null, (e: HellojsError) => e)
 			if (!rejected || rejected.code !== 'EHTTP') throw new Error('simple:true did not reject on 418')
 			const res = await tour({ url: `${BIN}/status/418`, simple: false })
+			// Streaming is the default, so drain the body we only inspect for status.
+			await res.text()
 			return check(
 				'simple:true rejects, simple:false resolves',
 				res.status === 418 && rejected.response?.status === 418,
@@ -152,6 +154,8 @@ export const scenarios: Scenario[] = [
 		name: 'Auto-follow redirects',
 		run: async () => {
 			const r = await tour({ url: `${BIN}/redirect/3`, simple: false })
+			// Redirects are followed before resolution; drain the final body.
+			await r.text()
 			return check('redirect chain followed to 200', r.status === 200, `final status=${r.status}`)
 		},
 	},
@@ -170,7 +174,8 @@ export const scenarios: Scenario[] = [
 		name: 'Cookie jar persists',
 		run: async () => {
 			const jar = request.jar()
-			await tour({ url: `${BIN}/cookies/set?session=hellojs-rocks`, jar, simple: false })
+			// Drain the set-cookie response so its socket closes before the next request.
+			await (await tour({ url: `${BIN}/cookies/set?session=hellojs-rocks`, jar, simple: false })).text()
 			const body = await bodyOnly<EchoBody>(tour({ url: `${BIN}/cookies`, jar, json: true, bodyOnly: true }))
 			return check('cookie sent back on the next request', body.cookies?.session === 'hellojs-rocks', JSON.stringify(body.cookies))
 		},
@@ -210,6 +215,7 @@ export const scenarios: Scenario[] = [
 			// Bounded so a server that ignores UDP cannot hold the tour for a minute: the connect
 			// budget covers the QUIC handshake, then the request falls back to TCP + TLS.
 			const r = await tour({ url: `${BIN}/get`, h3: true, timeouts: { connect: 5000 }, simple: false })
+			await r.text()
 			return check(
 				'h3:true served',
 				r.status === 200,
@@ -222,6 +228,7 @@ export const scenarios: Scenario[] = [
 		name: 'HTTP/3 off by default',
 		run: async () => {
 			const r = await tour({ url: `${BIN}/get`, simple: false })
+			await r.text()
 			return check('no h3 attempt without the flag', r.status === 200, `status=${r.status}`)
 		},
 	},

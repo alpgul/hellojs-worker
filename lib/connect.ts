@@ -15,7 +15,16 @@ import type { TLSTransport, TLSOptions } from './tls/tls.ts'
 export interface PerPhaseTimeouts {
 	connect?: number
 	tlsHandshake?: number
+	/**
+	 * Deadline for the response headers. Responses always stream, so this no longer covers
+	 * the body; use `bodyIdle` for long-running progressive responses.
+	 */
 	response?: number
+	/**
+	 * Cancel a progressive response body when no bytes move for this many milliseconds.
+	 * `0` / unset disables the watchdog (fetch-like behavior).
+	 */
+	bodyIdle?: number
 }
 
 export interface ConnectOptions {

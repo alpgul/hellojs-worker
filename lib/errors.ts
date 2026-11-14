@@ -71,6 +71,8 @@ const CODES = Object.freeze({
 
 	// Body
 	EBODYSTREAM:     { category: CATEGORY.BODY,      msg: 'request body stream error' },
+	EBODYBACKPRESSURE: { category: CATEGORY.BODY,    msg: 'response body consumer fell too far behind' },
+	EBODYIDLE:       { category: CATEGORY.TIMEOUT,   msg: 'response body made no progress before its idle deadline' },
 
 	// Timeout
 	ETIMEDOUT:       { category: CATEGORY.TIMEOUT,   msg: 'phase deadline exceeded' },
