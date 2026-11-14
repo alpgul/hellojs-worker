@@ -200,7 +200,6 @@ async function waitFor(cond: () => boolean, ms = 3000): Promise<void> {
 }
 
 const full = (extra: Record<string, unknown>): RequestOptions => ({
-	simple: false,
 	verifyTLS: false,
 	timeout: 8000,
 	...extra,
@@ -340,7 +339,6 @@ it('an untrusted proxy certificate is rejected by default, as EPROXY', async () 
 	proxy = await startTlsProxy(key, cert)
 
 	const err = await request({
-		simple: false,
 		timeout: 8000,
 		url: `https://127.0.0.1:${originPort}/`,
 		proxy: `https://localhost:${proxy.port}`,

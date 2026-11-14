@@ -15,7 +15,6 @@ export { HellojsError } from './lib/errors.ts'
 export { TLS, observability, profiles, setTrustedRoots, clearSessionTickets, udp }
 export type { PerPhaseTimeouts } from './lib/connect.ts'
 export type {
-	Callback,
 	DefaultsFn,
 	FetchInit,
 	Invokable,

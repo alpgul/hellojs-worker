@@ -132,14 +132,14 @@ describe('status and redirect semantics (fetch parity)', () => {
 		} finally { server.close() }
 	})
 
-	it('simple: true rejects 4xx with EHTTP carrying the Response', async () => {
-		const { server, url } = await startH2((s) => { s.respond({ ':status': 500 }); s.end('err') })
+	it('removed simple/bodyOnly options are rejected with EBADOPTS', async () => {
+		const { server, url } = await startH2((s) => { s.respond({ ':status': 200 }); s.end('ok') })
 		try {
-			await req(url, { simple: true })
-			throw new Error('expected reject')
-		} catch (e) {
-			expect((e as { code?: string }).code).toBe('EHTTP')
-			expect((e as { response?: Response }).response?.status).toBe(500)
+			await expect(req(url, { simple: true })).rejects.toMatchObject({ code: 'EBADOPTS' })
+			await expect(req(url, { bodyOnly: true })).rejects.toMatchObject({ code: 'EBADOPTS' })
+			// Explicit false promises nothing legacy; it is tolerated.
+			const res = await req(url, { simple: false, bodyOnly: false })
+			expect(await res.text()).toBe('ok')
 		} finally { server.close() }
 	})
 

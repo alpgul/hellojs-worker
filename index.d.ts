@@ -117,7 +117,7 @@ export interface RequestOptions {
 	method?: HttpMethod
 	headers?: HeadersInit
 	body?: BodyInit | Buffer | NodeJS.ReadableStream | Record<string, unknown> | unknown[] | null
-	/** `true` parses the response as JSON; an RFC 8259 value is serialized and sent as the body. */
+	/** An RFC 8259 value is serialized as the request body; `true` does the same for an object `body`. */
 	json?: boolean | JsonValue
 	form?: QueryParams
 	qs?: QueryParams
@@ -151,17 +151,6 @@ export interface RequestOptions {
 	 * printable ASCII reject with `EBADOPTS`. Not supported with `socks5://`.
 	 */
 	proxyHeaders?: Record<string, string> | null
-	/**
-	 * Legacy request.js escape hatch: resolve the parsed body (string, Buffer, or the value
-	 * `json: true` produced) instead of the fetch-compatible `Response`. Deprecated.
-	 * Buffers the whole body to produce that value.
-	 */
-	bodyOnly?: boolean
-	/**
-	 * Opt in to request.js error semantics: reject with `EHTTP` when the status is >= 400.
-	 * Default is `false`, matching `fetch()` (inspect `res.ok` instead).
-	 */
-	simple?: boolean
 	retry?: RetryPolicy
 
 	/** TLS-only: turn on cert chain validation (default `true`). */
@@ -257,25 +246,12 @@ export class HellojsError extends Error {
 	code: HellojsErrorCode | (string & {})
 	category: HellojsErrorCategory
 	cause?: unknown
-	/** Set when `simple: true` rejected a >=400 status; this is the real fetch `Response`. */
-	response?: Response
 }
 
-export type Callback = (
-	err: HellojsError | null,
-	res: Response | undefined,
-	body: unknown | undefined,
-) => void
-
 // The root export and every `defaults()`-derived entry point share one call shape: fetch's
-// `(input, init)` plus the request.js object form. The result is always a real `Response`
-// unless the deprecated `bodyOnly: true` escape hatch is requested.
+// `(input, init)` plus the request.js object form. The result is always a real `Response`.
 interface Invokable {
 	(input: string | URL | Request, init?: FetchInit): Promise<Response>
-	(input: string | URL | Request, cb: Callback): Promise<Response>
-	(opts: RequestOptions & { bodyOnly: true }, cb: Callback): Promise<unknown>
-	(opts: RequestOptions, cb: Callback): Promise<Response>
-	(opts: RequestOptions & { bodyOnly: true }): Promise<unknown>
 	(opts: RequestOptions): Promise<Response>
 }
 

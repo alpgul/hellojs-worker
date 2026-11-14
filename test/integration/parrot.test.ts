@@ -33,23 +33,19 @@ beforeAll(async () => {
 	const retry = { limit: 2, baseDelayMs: 5_000 }
 
 	// 1. Capture a fresh peet.ws fingerprint using the DEFAULT profile.
-	const baseline = (await request({
+	const baseline = (await (await request({
 		url: `https://${PEET_HOST}/api/all`,
-		json: true,
-		bodyOnly: true,
 		retry,
-	})) as PeetJson
+	})).json()) as PeetJson
 	expected = hashes(baseline)
 
 	// 2. Build a parrot profile from the same JSON, and re-request with it.
 	profiles.registerFromPeet('peet-parrot', baseline)
-	const after = (await request({
+	const after = (await (await request({
 		url: `https://${PEET_HOST}/api/all`,
-		json: true,
-		bodyOnly: true,
 		profile: 'peet-parrot',
 		retry,
-	})) as PeetJson
+	})).json()) as PeetJson
 	got = hashes(after)
 })
 

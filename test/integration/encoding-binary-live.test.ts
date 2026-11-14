@@ -28,7 +28,7 @@ interface Echo {
 }
 
 const get = (url: string) =>
-	request({ simple: false, verifyTLS: false, timeout: 30_000, url })
+	request({ verifyTLS: false, timeout: 30_000, url })
 
 describe('response content-encoding — auto-decompress', () => {
 	it('gzip (httpbingo)', async () => {
@@ -67,7 +67,7 @@ describe('response content-encoding — auto-decompress', () => {
 describe('binary downloads — no content-encoding, raw bytes preserved', () => {
 	it('/bytes/1024 returns exactly 1024 raw bytes', async () => {
 		// No JSON parsing — the body must stay raw bytes, not be coerced to text.
-		const res = await request({ simple: false, verifyTLS: false, timeout: 30_000, url: `${GO}/bytes/1024` })
+		const res = await request({ verifyTLS: false, timeout: 30_000, url: `${GO}/bytes/1024` })
 		expect(res.status).toBe(200)
 		expect(res.headers.get('content-type')).toContain('application/octet-stream')
 		const raw = Buffer.from(await res.arrayBuffer())
@@ -75,7 +75,7 @@ describe('binary downloads — no content-encoding, raw bytes preserved', () => 
 	})
 
 	it('/image/jpeg returns a real JPEG (SOI magic FF D8 FF)', async () => {
-		const res = await request({ simple: false, verifyTLS: false, timeout: 30_000, url: `${GO}/image/jpeg` })
+		const res = await request({ verifyTLS: false, timeout: 30_000, url: `${GO}/image/jpeg` })
 		expect(res.status).toBe(200)
 		expect(res.headers.get('content-type')).toContain('image/jpeg')
 		const buf = Buffer.from(await res.arrayBuffer())

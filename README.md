@@ -2,8 +2,9 @@
 
 A Node.js HTTP client whose on-the-wire TLS handshake, HTTP/2 setup, and
 HTTP/3 (QUIC) flight produces **the same JA4 / Akamai / peetprint
-fingerprint as Chrome 147 on macOS**. Drop-in
-[`request`](https://github.com/request/request)-shape API.
+fingerprint as Chrome 147 on macOS**. Fetch-compatible API (always a real
+`Response`) with [`request`](https://github.com/request/request)-style request
+options and helpers.
 
 ```bash
 npm install @unreleased/hellojs
@@ -16,7 +17,7 @@ import request from '@unreleased/hellojs'
 const res = await request('https://www.cloudflare.com/')
 console.log(res.status, res.ok, await res.text())
 
-// request.js-style options and helpers are still supported.
+// request.js-style request options and helpers are still supported.
 const post = await request({
   url: 'https://api.example.com/v1/things',
   method: 'POST',
@@ -92,16 +93,13 @@ handshake — same as a real Chrome browser.
 ## Quick start
 
 ```js
-// `simple` is false by default (like fetch): 4xx/5xx resolve as a Response.
-// Opt in to request.js errors with `simple: true`.
-const r = await request({
-  url: 'https://httpbingo.org/status/418',
-  simple: true,
-}).catch((e) => e)
-console.log(r.code, r.response?.status) // EHTTP 418
+// Like fetch: 4xx/5xx resolve as a Response, so inspect res.ok/res.status.
+const r = await request('https://httpbingo.org/status/418')
+console.log(r.status, r.ok) // 418 false
+await r.text()              // drain the stream
 
-// Legacy escape hatch: resolve the parsed body instead of a Response.
-const body = await request({ url: 'https://httpbingo.org/get', json: true, bodyOnly: true })
+// Read the response body the fetch way.
+const body = await (await request('https://httpbingo.org/get')).json()
 console.log(body.url)
 
 // POST JSON (request.js form)
@@ -135,21 +133,19 @@ await request({
 | `method` | string | `'GET'` | |
 | `headers` | `HeadersInit` | `{}` | merged into the profile's header set; non-identity keys override in place, new keys append. Identity headers (`user-agent`, `sec-ch-ua*`) are fixed by the profile — a different value throws `EHEADERFIXED`. |
 | `body` | `BodyInit` \| Buffer \| object \| Readable | `null` | object → JSON when `json: true`. Accepts fetch `BodyInit` (including `Blob`, `FormData`, `URLSearchParams`, web `ReadableStream`) and Node `Readable`. |
-| `json` | bool \| object | `false` | parses response via `res.json()` semantics when used with `bodyOnly`/legacy flows; if object, used as the request body with `content-type: application/json` |
+| `json` | bool \| object | `false` | if object, used as the request body with `content-type: application/json`; `true` does the same for an object `body`. It does not affect response parsing — use `res.json()`. |
 | `form` | object | — | `application/x-www-form-urlencoded` body |
 | `qs` | object | — | querystring appended to url |
 | `jar` | `request.jar()` | — | cookie persistence across requests |
 | `gzip` | bool | — | accepted for request.js compatibility; **no-op**. Response bodies are auto-decompressed based on the response's `Content-Encoding` header. To receive raw compressed bytes, override `Accept-Encoding: identity` in `headers`. |
 | `redirect` | `'follow' \| 'manual' \| 'error'` | `'follow'` | fetch-style redirect handling. |
 | `maxRedirects` | number | `10` | |
-| `timeout` | ms | — | legacy single-phase timer. Responses always stream, so this is the **response-headers deadline**. Overrides the 60s response default. |
+| `timeout` | ms | — | single-phase timer. Responses always stream, so this is the **response-headers deadline**. Overrides the 60s response default. |
 | `timeouts` | object | — | per-phase timeouts: `{ connect, tlsHandshake, response, bodyIdle }`, all in ms. `response` is the header deadline; it defaults to **60_000ms** (60s) when neither `timeouts.response` nor `timeout` is set. `bodyIdle` (default `0`, disabled) cancels a streamed body that makes no progress for N ms. Pass `timeouts: { response: 0 }` to disable the header deadline. |
 | `proxy` | URL string | — | Proxy: `http://` (CONNECT), `https://` (CONNECT over TLS), `socks5://` — see [Proxies](#proxies) |
 | `proxyAuthorization` | string | — | Full `Proxy-Authorization` value for CONNECT (e.g. `Bearer <jwt>`); overrides URL-derived Basic auth, and `''` sends no header at all. Not supported with `socks5://` |
 | `proxyHeaders` | object | — | Extra headers sent on the CONNECT request to the proxy. Names the CONNECT builder owns (`host`, `connection`, `keep-alive`, …) and values outside printable ASCII reject with `EBADOPTS`. Not supported with `socks5://` |
-| `simple` | bool | `false` | `false` matches `fetch()` (4xx/5xx resolve; inspect `res.ok`). Set `true` to reject 4xx/5xx with `EHTTP`. |
-| `bodyOnly` | bool | `false` | **Deprecated.** Resolve the parsed body (string/Buffer/JSON value) instead of a `Response`, request.js-style. Buffers the whole body to produce that value. |
-| `retry` | object | none | `{ limit, methods, statusCodes, baseDelayMs }` |
+| `retry` | object | none | `{ limit, methods, statusCodes, baseDelayMs }`; status-based retries inspect `res.status` directly |
 | `profile` | string | `'chrome147-mac'` | which fingerprint profile to emit |
 | `h3` | bool | `false` | opt in to HTTP/3 for this request; QUIC is tried first and TCP+TLS is used when the QUIC handshake cannot complete |
 | `resume` | bool | `false` | offer a cached TLS 1.3 `NewSessionTicket` (`pre_shared_key`) on the next connection to the same host. Opt-in because the extra extension changes JA3/JA4 — see [TLS 1.3 session resumption](#tls-13-session-resumption). h3 is not resumed. |
@@ -159,10 +155,9 @@ await request({
 | `signal` | `AbortSignal` | — | Abort the request or an in-flight response body. Before headers the promise rejects; after headers `res.body` errors. |
 
 > Responses always stream, like `fetch()`: `request()` resolves once the headers arrive and
-> `Response.body` delivers the rest progressively. Redirects and `simple: true` errors are the
-> exception — their bodies are buffered first so the redirect/error policy can run. The
-> deprecated `bodyOnly` form and the request.js callback form also buffer, because their
-> contract includes the parsed body.
+> `Response.body` delivers the rest progressively. Redirects are the exception — their
+> (small) bodies are buffered first so the redirect policy can run. Read a body with
+> `res.text()`, `res.json()`, `res.arrayBuffer()`, or `res.body`.
 
 ### Headers and profiles
 
@@ -281,16 +276,16 @@ const bytes = new Uint8Array(await res.arrayBuffer())
 
 Fetch parity details:
 
-- Redirects are followed and `simple: true` 4xx/5xx errors are raised only after their
-  (small) bodies are buffered, so the redirect target and `e.response` are complete.
+- Redirects are followed after their (small) bodies are buffered, so the redirect
+  target is complete. 4xx/5xx responses resolve like `fetch()`; inspect `res.ok`.
 - Errors before headers reject the `request()` promise. Errors after headers reject
   `res.body` and emit `request:error`; they are not retried because the request already
   resolved.
 - An unconsumed body keeps the H1 socket / H2 stream alive until it is read, cancelled
   (`res.body.cancel()`) or the signal aborts. Set `timeouts.bodyIdle` if you need a
   watchdog.
-- The request.js callback form and `bodyOnly` keep their legacy buffered semantics: they
-  wait for the whole body and hand back the parsed value, not a progressive stream.
+- `simple`, `bodyOnly`, and the request.js callback form were removed. Passing
+  `simple: true` or `bodyOnly: true`, or a callback function, rejects with `EBADOPTS`.
 - H2 applies real inbound backpressure by deferring the per-stream `WINDOW_UPDATE` while
   the consumer is behind. H3 does not implement QUIC receive flow control yet, so it caps
   the in-process buffer at 16 MiB and fails the body with `EBODYBACKPRESSURE` instead of
@@ -729,11 +724,11 @@ with full streaming on H1/H2/H3 in Node and Cloudflare Workers.
 | `res.headers['x']` (plain object) | `res.headers.get('x')` (`Headers`) |
 | parsed `res.body` / returned body | `await res.text()` / `await res.json()` / `res.body` (`ReadableStream`) |
 | buffered response before resolving | resolves at headers and streams `res.body`; `await res.arrayBuffer()` if you need the whole body |
-| `simple: true` default (4xx/5xx throw) | `simple: false` default (inspect `res.ok`); pass `simple: true` for old behavior |
+| `simple: true` (4xx/5xx throw) | removed: 4xx/5xx always resolve; inspect `res.ok` and `res.status` |
+| `bodyOnly: true` / callback `(err, res, body)` | removed: every call resolves a `Response`; use `await res.text()` / `res.json()` / `res.arrayBuffer()` |
 | `stream: true` resolved a Node `Readable` body | no option needed: `request()` always resolves a `Response` whose `res.body` is a web `ReadableStream` |
 | Node stream consumption | `for await (const chunk of res.body)` or `Readable.fromWeb(res.body)` |
 | `request<T>({ ... })` typed body | `const data = await res.json() as T` |
-| request.js callback/parsed-body flow | `bodyOnly: true` (deprecated) returns the parsed body; callback and `bodyOnly` stay buffered by default |
 
 ---
 
@@ -757,8 +752,8 @@ try {
   if (e instanceof HellojsError && e.code === 'ETIMEDOUT') { /* retry */ }
 }
 
-// request.js-style escape hatch (deprecated):
-const body = await request({ url: 'https://api.example.com', json: true, bodyOnly: true })
+// Read the body explicitly — there is no parsed-body escape hatch:
+const body = await (await request('https://api.example.com')).json()
 ```
 
 The test suite is TypeScript too: `test/**/*.ts` and `vitest.config.ts` are inside the
@@ -1080,7 +1075,7 @@ try {
 | `transport` | `ECONNREFUSED`, `ECONNRESET`, `ENOTFOUND`, `EPROXY`, `EUDPUNAVAILABLE` | TCP / DNS / proxy issues, or no UDP provider for HTTP/3 |
 | `tls` | `ETLS_ALERT`, `ETLS_HANDSHAKE`, `ETLS_CERT_VERIFY`, `ETLS_VERSION`, `ECERTPARSE`, `ECERTVALIDATION`, `ECERTVERIFY`, `ETLSPSK`, `ETLS12`, `EHRR` | Handshake, record-layer or certificate problem |
 | `protocol` | `EH2STREAM`, `EH2GOAWAY`, `EH2COMPRESS`, `EH2KEEPALIVE`, `EH3STREAM`, `EH3CONN`, `EH3PARSE`, `EPROTO` | h2 / h3 / QUIC protocol-level failure |
-| `http` | `EHTTP`, `EBADRESP`, `EDECOMPRESS` | HTTP status >= 400 (with `simple:true`), parser failure, or content-encoding error |
+| `http` | `EHTTP`, `EBADRESP`, `EDECOMPRESS` | HTTP policy error (e.g. `redirect: 'error'`), parser failure, or content-encoding error |
 | `body` | `EBODYSTREAM`, `EBODYBACKPRESSURE` | Request body stream errored mid-upload, or the response consumer fell too far behind a transport that cannot pause inbound flow (H3) |
 | `timeout` | `ETIMEDOUT`, `EBODYIDLE` | A phase exceeded its budget, or a streamed response body made no progress before `timeouts.bodyIdle` — see the `timeouts` option |
 

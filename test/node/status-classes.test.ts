@@ -5,8 +5,8 @@
 // The behaviors pinned here:
 //   1xx  informational  — interim (100/103) is not surfaced; the client resolves the FINAL status.
 //   2xx  success         — resolves; 204 carries no body and must not break JSON parsing.
-//   4xx  client error    — simple:true rejects with EHTTP; simple:false resolves with the status.
-//   5xx  server error    — same reject/resolve split; a transient 5xx is retried when asked.
+//   4xx  client error    — resolves with the status, like fetch (inspect res.ok).
+//   5xx  server error    — resolves too; a transient 5xx is retried when asked.
 
 import { execSync } from 'node:child_process'
 import * as fs from 'node:fs'
@@ -73,8 +73,7 @@ beforeAll(async () => {
 			case '/e429': return send(429, 'rate limited')
 			case '/e500': return send(500, 'boom')
 			case '/e503': return send(503, 'unavailable')
-			case '/flaky': return n === 1 ? send(500, 'first attempt fails') : send(200, 'second attempt ok')
-			case '/flaky-nosimple': return n === 1 ? send(503, 'first attempt fails') : send(200, 'second attempt ok')
+			case '/flaky': return n === 1 ? send(503, 'first attempt fails') : send(200, 'second attempt ok')
 			default: return send(404, 'no route')
 		}
 	})
@@ -90,7 +89,6 @@ afterAll(async () => {
 })
 
 const full = (extra: Record<string, unknown>): RequestOptions => ({
-	simple: false,
 	verifyTLS: false,
 	timeout: 5000,
 	...extra,
@@ -122,8 +120,8 @@ describe('2xx success', () => {
 		expect(res.status).toBe(201)
 	})
 
-	it('204 No Content resolves with an empty body and survives json:true', async () => {
-		const res = await request(full({ url: `${base}/s204`, json: true }))
+	it('204 No Content resolves with an empty body', async () => {
+		const res = await request(full({ url: `${base}/s204` }))
 		expect(res.status).toBe(204)
 		expect(res.body).toBeNull()
 		expect(await res.text()).toBe('')
@@ -131,52 +129,41 @@ describe('2xx success', () => {
 })
 
 describe('4xx client error', () => {
-	it('simple:true rejects with EHTTP and the status on the error', async () => {
-		await expect(request({ simple: true, verifyTLS: false, timeout: 5000, url: `${base}/e404` })).rejects.toMatchObject({
-			code: 'EHTTP',
-			response: { status: 404 },
-		})
-	})
-
-	it('simple:false resolves the 4xx response instead of rejecting', async () => {
+	it('404 resolves the response instead of rejecting', async () => {
 		const res = await request(full({ url: `${base}/e404` }))
 		expect(res.status).toBe(404)
+		expect(res.ok).toBe(false)
 		expect(await res.text()).toBe('not found')
 	})
 
-	it('429 is treated as an error (rejects under simple:true)', async () => {
-		await expect(request({ simple: true, verifyTLS: false, timeout: 5000, url: `${base}/e429` })).rejects.toMatchObject({
-			code: 'EHTTP',
-			response: { status: 429 },
-		})
+	it('429 resolves like fetch', async () => {
+		const res = await request(full({ url: `${base}/e429` }))
+		expect(res.status).toBe(429)
+		expect(res.ok).toBe(false)
 	})
 
-	it('400 rejects under simple:true', async () => {
-		await expect(request({ simple: true, verifyTLS: false, timeout: 5000, url: `${base}/e400` })).rejects.toMatchObject({
-			code: 'EHTTP',
-			response: { status: 400 },
-		})
+	it('400 resolves like fetch', async () => {
+		const res = await request(full({ url: `${base}/e400` }))
+		expect(res.status).toBe(400)
+		expect(res.ok).toBe(false)
 	})
 })
 
 describe('5xx server error', () => {
-	it('simple:true rejects with EHTTP for 500', async () => {
-		await expect(request({ simple: true, verifyTLS: false, timeout: 5000, url: `${base}/e500` })).rejects.toMatchObject({
-			code: 'EHTTP',
-			response: { status: 500 },
-		})
+	it('500 resolves like fetch', async () => {
+		const res = await request(full({ url: `${base}/e500` }))
+		expect(res.status).toBe(500)
+		expect(res.ok).toBe(false)
 	})
 
-	it('simple:false resolves the 5xx response', async () => {
+	it('503 resolves the 5xx response', async () => {
 		const res = await request(full({ url: `${base}/e503` }))
 		expect(res.status).toBe(503)
 		expect(await res.text()).toBe('unavailable')
 	})
 
-	it('a transient 500 is retried on GET and the retry succeeds', async () => {
-		// simple:true rejects first, so this keeps the thrown-EHTTP retry path covered.
+	it('a transient 503 is retried on GET and the retry succeeds', async () => {
 		const res = await request({
-			simple: true,
 			verifyTLS: false,
 			timeout: 5000,
 			url: `${base}/flaky`,
@@ -186,18 +173,7 @@ describe('5xx server error', () => {
 		expect(await res.text()).toBe('second attempt ok')
 	})
 
-	it('retries a transient status without simple by inspecting the Response', async () => {
-		const res = await request({
-			verifyTLS: false,
-			timeout: 5000,
-			url: `${base}/flaky-nosimple`,
-			retry: { limit: 1, baseDelayMs: 10 },
-		})
-		expect(res.status).toBe(200)
-		expect(await res.text()).toBe('second attempt ok')
-	})
-
-	it('without a retry policy the 500 propagates (simple:false still resolves it)', async () => {
+	it('without a retry policy the 500 is returned as-is', async () => {
 		const res = await request(full({ url: `${base}/e500` }))
 		expect(res.status).toBe(500)
 	})

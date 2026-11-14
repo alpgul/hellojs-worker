@@ -200,17 +200,15 @@ async function runCurl(info: CurlInfo, url: string, h3: boolean): Promise<CurlSa
 
 async function runHello(url: string, h3: boolean, resume: boolean): Promise<Sample> {
 	const t0 = process.hrtime.bigint()
-	const res = (await request({
+	const res = await request({
 		url,
 		h3,
 		resume,
-		simple: false,
 		timeouts: h3 ? { connect: 3000, response: 15_000 } : { response: 15_000 }
-	})) as { status?: number; statusCode?: number; body?: unknown }
+	})
 	const ms = Number(process.hrtime.bigint() - t0) / 1e6
-	const status = res.status ?? res.statusCode ?? 0
-	if (status && (status < 200 || status >= 400)) throw new Error(`HTTP ${status}`)
-	const body = typeof res.body === 'string' ? res.body : Buffer.isBuffer(res.body) ? res.body.toString('utf8') : ''
+	if (!res.ok) throw new Error(`HTTP ${res.status}`)
+	const body = await res.text()
 	return { ms, protocol: traceProtocol(body) ?? 'unknown' }
 }
 

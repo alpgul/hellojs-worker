@@ -132,7 +132,7 @@ it('streams by default: resolves at HEADERS before the body finishes', async () 
 	}
 }, 10_000)
 
-it('bodyOnly buffers implicitly even though streaming is the default', async () => {
+it('json:true does not buffer the response; res.json() reads the stream', async () => {
 	const { key, cert } = genServerCert()
 	const server = http2.createSecureServer({ key, cert })
 	server.on('stream', (stream) => {
@@ -142,14 +142,16 @@ it('bodyOnly buffers implicitly even though streaming is the default', async () 
 	const port = await listenOnLoopback(server)
 
 	try {
-		const body = await request({ url: `https://127.0.0.1:${port}/`, json: true, bodyOnly: true, verifyTLS: false })
-		expect(body).toEqual({ ok: true })
+		const res = await request({ url: `https://127.0.0.1:${port}/`, json: true, verifyTLS: false })
+		expect(res).toBeInstanceOf(Response)
+		expect(res.body).toBeInstanceOf(ReadableStream)
+		expect(await res.json()).toEqual({ ok: true })
 	} finally {
 		server.close()
 	}
 }, 10_000)
 
-it('callback form buffers implicitly', async () => {
+it('callback form is rejected with EBADOPTS', async () => {
 	const { key, cert } = genServerCert()
 	const server = http2.createSecureServer({ key, cert })
 	server.on('stream', (stream) => {
@@ -159,13 +161,11 @@ it('callback form buffers implicitly', async () => {
 	const port = await listenOnLoopback(server)
 
 	try {
-		const res = await new Promise<Response>((resolve, reject) => {
-			request({ url: `https://127.0.0.1:${port}/`, verifyTLS: false }, (err, response) => {
-				if (err) reject(err)
-				else resolve(response as Response)
-			})
-		})
-		expect(await res.text()).toBe('legacy')
+		const cb = (() => {}) as unknown as (err: unknown, res: unknown) => void
+		await expect((request as unknown as (opts: object, fn: (err: unknown, res: unknown) => void) => Promise<unknown>)(
+			{ url: `https://127.0.0.1:${port}/`, verifyTLS: false },
+			cb,
+		)).rejects.toMatchObject({ code: 'EBADOPTS' })
 	} finally {
 		server.close()
 	}

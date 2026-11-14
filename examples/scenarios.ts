@@ -11,8 +11,6 @@
 
 import request from '../index.ts'
 
-import type { HellojsError } from '../index.ts'
-
 // httpbingo echoes the request back under a different key per endpoint.
 export interface EchoBody {
 	url?: string
@@ -47,8 +45,12 @@ const CHROME_H2 = '1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p'
 // as a failed feature.
 const tour = request.defaults({ retry: { limit: 2 } })
 
-// opts into the deprecated parsed-body result, keeping the scenario bodies typed.
-const bodyOnly = <T>(p: Promise<unknown>): Promise<T> => p as Promise<T>
+// Read the typed JSON body of a fetch-style response, draining it exactly once.
+async function jsonBody<T>(p: Promise<Response>): Promise<T> {
+	const res = await p
+	if (!res.ok) throw new Error(`HTTP ${res.status}`)
+	return (await res.json()) as T
+}
 
 // Echoed header names keep the casing we sent, but not the casing we asked with.
 function echoed(body: EchoBody, name: string): string | undefined {
@@ -73,11 +75,8 @@ export const scenarios: Scenario[] = [
 			// spelled out instead of inherited: 4s connect + 6s response, two tries. Worst case ~20s,
 			// which stays inside the Worker's 30s scenario ceiling rather than being cut off mid-retry
 			// and reported as a timeout the server never caused.
-			const r = await bodyOnly<PeetBody>(tour({
+			const r = await jsonBody<PeetBody>(tour({
 				url: 'https://tls.peet.ws/api/all',
-				json: true,
-				bodyOnly: true,
-				simple: false,
 				timeouts: { connect: 4000, response: 6000 },
 				retry: { limit: 1 },
 			}))
@@ -92,7 +91,7 @@ export const scenarios: Scenario[] = [
 		id: 2,
 		name: 'GET with json:true',
 		run: async () => {
-			const body = await bodyOnly<EchoBody>(tour({ url: `${BIN}/get`, json: true, bodyOnly: true }))
+			const body = await jsonBody<EchoBody>(tour({ url: `${BIN}/get` }))
 			return check('body parsed as JSON', !!body.url, `${body.url}`)
 		},
 	},
@@ -100,7 +99,7 @@ export const scenarios: Scenario[] = [
 		id: 3,
 		name: 'GET with qs',
 		run: async () => {
-			const body = await bodyOnly<EchoBody>(tour({ url: `${BIN}/get`, qs: { hello: 'world', n: 42 }, json: true, bodyOnly: true }))
+			const body = await jsonBody<EchoBody>(tour({ url: `${BIN}/get`, qs: { hello: 'world', n: 42 } }))
 			return check('query string serialized', body.args?.hello?.[0] === 'world' && body.args?.n?.[0] === '42', JSON.stringify(body.args))
 		},
 	},
@@ -108,7 +107,7 @@ export const scenarios: Scenario[] = [
 		id: 4,
 		name: 'POST json body',
 		run: async () => {
-			const body = await bodyOnly<EchoBody>(tour({ url: `${BIN}/post`, method: 'POST', json: { greeting: 'hi', count: 3 }, bodyOnly: true }))
+			const body = await jsonBody<EchoBody>(tour({ url: `${BIN}/post`, method: 'POST', json: { greeting: 'hi', count: 3 } }))
 			return check('JSON body round-tripped', body.json?.greeting === 'hi', JSON.stringify(body.json))
 		},
 	},
@@ -116,7 +115,7 @@ export const scenarios: Scenario[] = [
 		id: 5,
 		name: 'POST form body',
 		run: async () => {
-			const body = await bodyOnly<EchoBody>(tour({ url: `${BIN}/post`, method: 'POST', form: { user: 'alice', role: 'admin' }, json: true, bodyOnly: true }))
+			const body = await jsonBody<EchoBody>(tour({ url: `${BIN}/post`, method: 'POST', form: { user: 'alice', role: 'admin' } }))
 			return check('form encoded as x-www-form-urlencoded', body.form?.user?.[0] === 'alice', JSON.stringify(body.form))
 		},
 	},
@@ -124,7 +123,7 @@ export const scenarios: Scenario[] = [
 		id: 6,
 		name: 'Custom headers over the profile header set',
 		run: async () => {
-			const body = await bodyOnly<EchoBody>(tour({ url: `${BIN}/headers`, json: true, headers: { 'x-app': 'hellojs-demo' }, bodyOnly: true }))
+			const body = await jsonBody<EchoBody>(tour({ url: `${BIN}/headers`, headers: { 'x-app': 'hellojs-demo' } }))
 			const ua = echoed(body, 'user-agent') ?? ''
 			return check(
 				'x-app sent, Chrome UA kept',
@@ -137,23 +136,17 @@ export const scenarios: Scenario[] = [
 		id: 7,
 		name: 'Status code policy',
 		run: async () => {
-			const rejected = await tour({ url: `${BIN}/status/418`, simple: true }).then(() => null, (e: HellojsError) => e)
-			if (!rejected || rejected.code !== 'EHTTP') throw new Error('simple:true did not reject on 418')
-			const res = await tour({ url: `${BIN}/status/418`, simple: false })
+			const res = await tour({ url: `${BIN}/status/418` })
 			// Streaming is the default, so drain the body we only inspect for status.
 			await res.text()
-			return check(
-				'simple:true rejects, simple:false resolves',
-				res.status === 418 && rejected.response?.status === 418,
-				`${rejected.code} ${rejected.response?.status} rejected, ${res.status} resolved`,
-			)
+			return check('4xx resolves like fetch', res.status === 418 && !res.ok, `${res.status} resolved, ok=${res.ok}`)
 		},
 	},
 	{
 		id: 8,
 		name: 'Auto-follow redirects',
 		run: async () => {
-			const r = await tour({ url: `${BIN}/redirect/3`, simple: false })
+			const r = await tour({ url: `${BIN}/redirect/3` })
 			// Redirects are followed before resolution; drain the final body.
 			await r.text()
 			return check('redirect chain followed to 200', r.status === 200, `final status=${r.status}`)
@@ -163,9 +156,9 @@ export const scenarios: Scenario[] = [
 		id: 9,
 		name: 'Response body auto-decompressed',
 		run: async () => {
-			const r = await tour({ url: `${BIN}/get`, simple: false })
+			const r = await tour({ url: `${BIN}/get` })
 			const enc = String(r.headers.get('content-encoding') ?? 'identity')
-			const body = await bodyOnly<EchoBody>(r.json())
+			const body = (await r.json()) as EchoBody
 			return check(`${enc} decoded transparently`, r.status === 200 && !!body.url, `content-encoding=${enc}`)
 		},
 	},
@@ -175,8 +168,8 @@ export const scenarios: Scenario[] = [
 		run: async () => {
 			const jar = request.jar()
 			// Drain the set-cookie response so its socket closes before the next request.
-			await (await tour({ url: `${BIN}/cookies/set?session=hellojs-rocks`, jar, simple: false })).text()
-			const body = await bodyOnly<EchoBody>(tour({ url: `${BIN}/cookies`, jar, json: true, bodyOnly: true }))
+			await (await tour({ url: `${BIN}/cookies/set?session=hellojs-rocks`, jar })).text()
+			const body = await jsonBody<EchoBody>(tour({ url: `${BIN}/cookies`, jar }))
 			return check('cookie sent back on the next request', body.cookies?.session === 'hellojs-rocks', JSON.stringify(body.cookies))
 		},
 	},
@@ -184,9 +177,9 @@ export const scenarios: Scenario[] = [
 		id: 11,
 		name: 'defaults() instance',
 		run: async () => {
-			const api = tour.defaults({ headers: { 'x-app': 'hellojs-demo', 'x-env': 'example' }, json: true, simple: false })
+			const api = tour.defaults({ headers: { 'x-app': 'hellojs-demo', 'x-env': 'example' } })
 			const r = await api({ url: `${BIN}/headers` })
-			const body = await bodyOnly<EchoBody>(r.json())
+			const body = (await r.json()) as EchoBody
 			return check(
 				'defaults applied to a derived entry point',
 				r.status === 200 && echoed(body, 'x-app') === 'hellojs-demo' && echoed(body, 'x-env') === 'example',
@@ -198,7 +191,7 @@ export const scenarios: Scenario[] = [
 		id: 12,
 		name: 'Firefox 147 profile',
 		run: async () => {
-			const body = await bodyOnly<EchoBody>(tour({ url: `${BIN}/headers`, profile: 'firefox147', json: true, bodyOnly: true }))
+			const body = await jsonBody<EchoBody>(tour({ url: `${BIN}/headers`, profile: 'firefox147' }))
 			const ua = echoed(body, 'user-agent') ?? ''
 			return check(
 				'profile swaps the whole header set',
@@ -214,7 +207,7 @@ export const scenarios: Scenario[] = [
 			const t0 = Date.now()
 			// Bounded so a server that ignores UDP cannot hold the tour for a minute: the connect
 			// budget covers the QUIC handshake, then the request falls back to TCP + TLS.
-			const r = await tour({ url: `${BIN}/get`, h3: true, timeouts: { connect: 5000 }, simple: false })
+			const r = await tour({ url: `${BIN}/get`, h3: true, timeouts: { connect: 5000 } })
 			await r.text()
 			return check(
 				'h3:true served',
@@ -227,7 +220,7 @@ export const scenarios: Scenario[] = [
 		id: 14,
 		name: 'HTTP/3 off by default',
 		run: async () => {
-			const r = await tour({ url: `${BIN}/get`, simple: false })
+			const r = await tour({ url: `${BIN}/get` })
 			await r.text()
 			return check('no h3 attempt without the flag', r.status === 200, `status=${r.status}`)
 		},

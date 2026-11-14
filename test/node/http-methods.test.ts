@@ -93,16 +93,13 @@ function baseUrl(): string {
 }
 
 const opts = (extra: Record<string, unknown>) => ({
-	simple: false,
-	bodyOnly: true,
 	verifyTLS: false,
 	timeout: 5000,
 	...extra,
 })
 
-// The public API resolves a fetch Response; `bodyOnly` opts into the parsed body and this
-// cast restores the concrete echo shape the assertions read.
-const echoBody = async (p: Promise<unknown>): Promise<Echo> => (await p) as Echo
+// The public API resolves a fetch Response; read the echo JSON body explicitly.
+const echoBody = async (p: Promise<Response>): Promise<Echo> => (await p).json() as Promise<Echo>
 
 describe('HTTP methods via shortcut API', () => {
 	it('GET — server sees GET, empty body echoed back', async () => {
@@ -144,13 +141,11 @@ describe('HTTP methods via shortcut API', () => {
 	})
 
 	it('HEAD — status/headers returned, body empty', async () => {
-		const res = await request.head({ url: `${baseUrl()}/h`, simple: false, verifyTLS: false, timeout: 5000 })
+		const res = await request.head({ url: `${baseUrl()}/h`, verifyTLS: false, timeout: 5000 })
 		expect(res.status).toBe(200)
 		expect(res.headers.get('content-type')).toBe('application/json')
 		// A GET-style request to this endpoint advertises content-length, but a HEAD response
-		// must carry headers and never a body (RFC 9110 §9.3.4). The library keeps non-text /
-		// non-JSON bodies as the raw Buffer, so an empty body surfaces as a zero-length buffer
-		// (or '' ) — assert emptiness regardless of representation, not the concrete type.
+		// must carry headers and never a body (RFC 9110 §9.3.4).
 		expect(res.headers.get('content-length')).toBeTruthy()
 		expect(res.body).toBeNull()
 		expect(await res.text()).toBe('')

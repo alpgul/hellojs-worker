@@ -52,11 +52,9 @@ const fixture = JSON.parse(
 let live: ScrapflyReport = {}
 
 beforeAll(async () => {
-	live = (await request({
+	live = (await (await request({
 		url: `https://${FINGERPRINT_HOST}/api/fp/ja3?extended=1`,
-		json: true,
-		bodyOnly: true,
-	})) as ScrapflyReport
+	})).json()) as ScrapflyReport
 }, 30_000)
 
 // GREASE codepoints rotate per handshake and every reporter spells them differently

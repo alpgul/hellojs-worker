@@ -120,7 +120,6 @@ afterAll(async () => {
 })
 
 const call = (extra: Record<string, unknown>): RequestOptions => ({
-	simple: false,
 	verifyTLS: false,
 	timeout: 5000,
 	...extra,

@@ -1,5 +1,5 @@
 // Exercises the public API shape end-to-end against the shared HTTP echo host.
-// Verifies: callback form, promise form, defaults, jar, qs, gzip auto-decompress, h2 path.
+// Verifies: promise form, defaults, jar, qs, gzip auto-decompress, h2 path.
 // Fingerprint assertions live in test/fingerprint/chrome147.test.ts — same host contract,
 // no need to re-run them here.
 //
@@ -21,33 +21,32 @@ interface Report {
 }
 
 it('promise+json+full-response', async () => {
-	const res = await request({ url: URL, json: true })
+	const res = await request({ url: URL })
 	expect(res.status).toBe(200)
 	const data = (await res.json()) as Report
 	expect(data.url).toBe(URL)
 })
 
-it('callback form', async () => {
-	let err: unknown = null
-	const body = await new Promise<Report | undefined>((resolve) => {
-		request({ url: URL, json: true, bodyOnly: true }, (e, _res, b) => { err = e; resolve(b as Report | undefined) })
-	})
-	expect(err).toBeNull()
-	expect(body?.url).toBe(URL)
+it('callback form is rejected with EBADOPTS', async () => {
+	const cb = (() => {}) as unknown as (err: unknown, res: unknown) => void
+	await expect((request as unknown as (opts: object, fn: (err: unknown, res: unknown) => void) => Promise<unknown>)(
+		{ url: URL },
+		cb,
+	)).rejects.toMatchObject({ code: 'EBADOPTS' })
 })
 
 it('request.get shortcut', async () => {
-	const body = (await request.get({ url: URL, json: true, bodyOnly: true })) as Report
+	const body = (await (await request.get({ url: URL })).json()) as Report
 	expect(body.method).toBe('GET')
 })
 
 it('request.defaults', async () => {
-	const r = request.defaults({ json: true, headers: { 'x-custom': 'hellojs' } })
-	const body = (await r({ url: URL, bodyOnly: true })) as Report
+	const r = request.defaults({ headers: { 'x-custom': 'hellojs' } })
+	const body = (await (await r({ url: URL })).json()) as Report
 	expect(body.headers?.['X-Custom']).toStrictEqual(['hellojs'])
 })
 
 it('qs builder', async () => {
-	const body = (await request({ url: URL, qs: { foo: 'bar', baz: 1 }, json: true, bodyOnly: true })) as Report
+	const body = (await (await request({ url: URL, qs: { foo: 'bar', baz: 1 } })).json()) as Report
 	expect(body.args).toStrictEqual({ baz: ['1'], foo: ['bar'] })
 })

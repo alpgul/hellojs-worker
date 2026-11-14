@@ -70,26 +70,22 @@ async function smoke(): Promise<void> {
 		void code; void h
 	}
 
-	// Legacy escape hatch returns the parsed body instead of a Response.
-	const legacy: unknown = await request({ url: 'https://example.com', bodyOnly: true, json: true })
-	void legacy
+	// Removed request.js response options are rejected at the type level.
+	// @ts-expect-error bodyOnly was removed
+	await request({ url: 'https://example.com', bodyOnly: true })
+	// @ts-expect-error simple was removed
+	await request({ url: 'https://example.com', simple: true })
 
 	// HeaderInit spellings all work.
 	await request('https://example.com', { headers: [['x-a', '1']] })
 	await request('https://example.com', { headers: new Headers({ 'x-b': '2' }) })
 	await request('https://example.com', { headers: { 'x-c': '3' } })
 
-	// Request object input and callbacks.
+	// Request object input.
 	const req = new Request('https://example.com')
 	await request(req)
-	await request('https://example.com', (err, response, body) => {
-		if (err) {
-			const code: string = err.code
-			void code
-		}
-		void response?.status
-		void body
-	})
+	// @ts-expect-error callbacks were removed
+	await request('https://example.com', (err: unknown) => void err)
 
 	// Method shortcuts.
 	await request.get('https://example.com')
@@ -113,8 +109,7 @@ async function smoke(): Promise<void> {
 		if (e instanceof HellojsError) {
 			const code: HellojsErrorCode | string = e.code
 			const cat: HellojsErrorCategory = e.category
-			const failed: Response | undefined = e.response
-			void code; void cat; void failed
+			void code; void cat
 		}
 	}
 

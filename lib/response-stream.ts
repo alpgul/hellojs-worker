@@ -80,8 +80,8 @@ function decompressStreamForEncoding(encoding: string): Transform | null {
 
 /**
  * Start a progressive response for one request. The transport keeps feeding `write()`
- * and finishes with `end()`; redirects and `simple: true` errors are buffered by the
- * caller and never reach this helper.
+ * and finishes with `end()`; redirect responses are buffered by the caller and never
+ * reach this helper.
  */
 export function startProgressiveResponse(opts: ProgressiveStreamOptions): ProgressiveStream {
 	const pass = new PassThrough()
@@ -154,8 +154,8 @@ export function startProgressiveResponse(opts: ProgressiveStreamOptions): Progre
 		opts.onCancel?.(reason)
 	}
 
-	// The caller always gets a fetch `Response` over a web `ReadableStream`; `bodyOnly`
-	// and the callback form are buffered by the transport before reaching this helper.
+	// The caller always gets a fetch `Response` over a web `ReadableStream`; redirect
+	// responses are buffered by the transport before reaching this helper.
 	const web = nodeToWebStream(
 		source,
 		(reason) => cancel(reason),

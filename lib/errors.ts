@@ -65,7 +65,7 @@ const CODES = Object.freeze({
 	EPROTO:          { category: CATEGORY.PROTOCOL,  msg: 'protocol-level violation' },
 
 	// HTTP
-	EHTTP:           { category: CATEGORY.HTTP,      msg: 'HTTP status >= 400 (with simple:true)' },
+	EHTTP:           { category: CATEGORY.HTTP,      msg: 'HTTP policy error (e.g. redirect: \'error\')' },
 	EBADRESP:        { category: CATEGORY.HTTP,      msg: 'malformed HTTP response' },
 	EDECOMPRESS:     { category: CATEGORY.HTTP,      msg: 'response body decompression failed' },
 
@@ -80,25 +80,11 @@ const CODES = Object.freeze({
 
 export type ErrorCode = keyof typeof CODES
 
-// The response shape lib/client.ts attaches to an `EHTTP` error (simple mode). Kept
-// structural so errors stays free of any dependency on the request layer; the client
-// now attaches a real fetch `Response`, of which these are the relevant fields.
-export interface ErrorResponse {
-	status: number
-	statusText?: string
-	headers: unknown
-	url?: string
-	redirected?: boolean
-	body?: unknown
-}
-
 const CODE_TABLE: Record<string, { category: ErrorCategory; msg: string }> = CODES
 
 class HellojsError extends Error {
 	code: ErrorCode | string
 	category: ErrorCategory
-	// Set when the server answered but the status was rejected.
-	declare response?: ErrorResponse
 	constructor(message: string, code: ErrorCode | string, cause?: unknown) {
 		super(message)
 		this.name = 'HellojsError'

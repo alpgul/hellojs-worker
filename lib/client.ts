@@ -1,8 +1,8 @@
-// Public request.js-shape API.
+// Public fetch-compatible API with request.js-style request options.
 //
 //   import request from 'hellojs'
-//   request({ url, method, headers, body, json, qs, jar, gzip, redirect, timeout, proxy }, (err, res, body) => {})
-//   request({...}).then(res => {})            // promise form
+//   request({ url, method, headers, body, json, qs, jar, gzip, redirect, timeout, proxy })
+//   const res = await request({...})          // fetch Response, streamed body
 //   request.get/post/put/del/patch/head/options
 //   request.defaults(opts)
 //   request.jar()
@@ -71,6 +71,7 @@ export interface RequestOptions {
 	method?: string
 	headers?: HeadersInit | Record<string, string | string[]>
 	body?: RequestBodyValue | null
+	/** Object values are serialized as the JSON request body; `true` does the same for an object `body`. */
 	json?: boolean | unknown
 	form?: Record<string, string | number>
 	qs?: Record<string, string | number | (string | number)[]>
@@ -92,16 +93,6 @@ export interface RequestOptions {
 	 * outside printable ASCII reject with `EBADOPTS`; unused by `socks5://`.
 	 */
 	proxyHeaders?: Record<string, string> | null
-	/**
-	 * Legacy request.js escape hatch: resolve the parsed body (string, Buffer, or the value
-	 * `json: true` produced) instead of the fetch-compatible `Response`. Deprecated.
-	 */
-	bodyOnly?: boolean
-	/**
-	 * Opt in to request.js error semantics: reject with `EHTTP` when the status is >= 400.
-	 * Default is `false`, matching `fetch()` (inspect `res.ok` instead).
-	 */
-	simple?: boolean
 	retry?: RetryPolicy
 
 	/** TLS-only: turn on cert chain validation (default `true`). */
@@ -142,9 +133,6 @@ export interface RequestOptions {
 	_reqId?: number
 	// Internal: set once a redirect has been followed, so `Response.redirected` is accurate.
 	_redirected?: boolean
-	// Internal: the request.js callback form needs the parsed legacy body, so its response is
-	// buffered even though responses stream by default.
-	_bufferBody?: boolean
 }
 
 /**
@@ -156,24 +144,14 @@ export type Response = globalThis.Response
 /** Fetch-style init accepted as the second argument; request.js options may be mixed in. */
 export type FetchInit = Omit<RequestInit, 'body' | 'headers' | 'method' | 'redirect' | 'signal'> & RequestOptions
 
-export type Callback = (
-	err: HellojsError | null,
-	res: Response | undefined,
-	body: unknown | undefined,
-) => void
-
-type MethodFn = (input: string | URL | Request | RequestOptions, initOrCb?: FetchInit | Callback) => Promise<unknown>
+type MethodFn = (input: string | URL | Request | RequestOptions, init?: FetchInit) => Promise<Response>
 
 /**
- * The public call shape, mirrored by index.d.ts: the result is always a fetch `Response`
- * unless the deprecated `bodyOnly: true` escape hatch is requested.
+ * The public call shape, mirrored by index.d.ts: every call resolves the fetch-compatible
+ * `Response` (unless redirect: 'error' rejects).
  */
 export interface Invokable {
 	(input: string | URL | Request, init?: FetchInit): Promise<Response>
-	(input: string | URL | Request, cb: Callback): Promise<Response>
-	(opts: RequestOptions & { bodyOnly: true }, cb: Callback): Promise<unknown>
-	(opts: RequestOptions, cb: Callback): Promise<Response>
-	(opts: RequestOptions & { bodyOnly: true }): Promise<unknown>
 	(opts: RequestOptions): Promise<Response>
 }
 
@@ -364,7 +342,7 @@ function shouldDoJsonContentType(opts: RequestOptions, body: Buffer | Readable |
 	return false
 }
 
-async function performRequest(opts: RequestOptions): Promise<unknown> {
+async function performRequest(opts: RequestOptions): Promise<Response> {
 	throwIfAborted(opts.signal)
 	const url = buildUrl(opts)
 	const method = (opts.method || 'GET').toUpperCase()
@@ -506,16 +484,15 @@ async function performRequest(opts: RequestOptions): Promise<unknown> {
 	}
 }
 
-function performH3(conn: Connection, { method, url, host, body, userHeaders, opts, profileObj }: RequestContext): Promise<unknown> {
+function performH3(conn: Connection, { method, url, host, body, userHeaders, opts, profileObj }: RequestContext): Promise<Response> {
 	const headers = mergeProfileHeaders(userHeaders, profileObj)
 	const path = url.pathname + url.search
 	const reqId = opts._reqId
 	const reqT0 = Date.now()
 	const close = () => { try { conn.close('h3-response-complete') } catch { /* already closed */ } }
 
-	// Resolve at HEADERS, stream DATA frames as they arrive. Redirects, simple-mode errors,
-	// `bodyOnly` and the callback form are buffered so the normal handleResponse logic
-	// still applies to them.
+	// Resolve at HEADERS and stream DATA frames as they arrive. Redirects are buffered so the
+	// normal handleResponse policy still applies to them.
 	return new Promise((resolve, reject) => {
 		let stream: ProgressiveStream | null = null
 		let buffering = false
@@ -532,7 +509,7 @@ function performH3(conn: Connection, { method, url, host, body, userHeaders, opt
 				resHeaders = h
 				if (opts.jar && h['set-cookie']) opts.jar.setCookie(h['set-cookie'], url.toString())
 				const isRedirect = opts.redirect !== 'manual' && s >= 300 && s < 400 && !!h.location
-				if (isRedirect || (opts.simple === true && s >= 400) || opts.bodyOnly === true || opts._bufferBody === true) {
+				if (isRedirect) {
 					buffering = true
 					return
 				}
@@ -604,7 +581,7 @@ function performH3(conn: Connection, { method, url, host, body, userHeaders, opt
 	})
 }
 
-function performH2(conn: Connection, { method, url, host, body, userHeaders, opts, profileObj }: RequestContext): Promise<unknown> {
+function performH2(conn: Connection, { method, url, host, body, userHeaders, opts, profileObj }: RequestContext): Promise<Response> {
 	return new Promise((resolve, reject) => {
 		const headers = buildH2Headers({ method, host, path: url.pathname + url.search, userHeaders, profile: profileObj })
 		const streamingBody = isReadable(body) ? body : null
@@ -627,9 +604,9 @@ function performH2(conn: Connection, { method, url, host, body, userHeaders, opt
 		}, respMs) : null
 		let firstByteEmitted = false
 
-		// Streaming response path: resolve as soon as headers arrive and expose the rest as a
-		// web ReadableStream. Redirects and simple-mode errors need their (small) body to
-		// apply the normal policy, so those are buffered and handed to handleResponse.
+		// Resolve as soon as headers arrive and expose the rest as a web ReadableStream.
+		// Redirects need their (small) body to apply the normal policy, so those are buffered
+		// and handed to handleResponse.
 		let settled = false
 		let buffering = false
 		const buffered: Buffer[] = []
@@ -647,7 +624,7 @@ function performH2(conn: Connection, { method, url, host, body, userHeaders, opt
 			if (timer) clearTimeout(timer)
 			if (opts.jar && h['set-cookie']) opts.jar.setCookie(h['set-cookie'], url.toString())
 			const isRedirect = opts.redirect !== 'manual' && status >= 300 && status < 400 && !!h.location
-			if (isRedirect || (opts.simple === true && status >= 400) || opts.bodyOnly === true || opts._bufferBody === true) {
+			if (isRedirect) {
 				buffering = true
 				bufferedStatus = status
 				bufferedHeaders = h
@@ -755,7 +732,7 @@ const CRLFCRLF = Buffer.from('\r\n\r\n')
 // 'close' handler). HTTP/1.1 defaults to keep-alive (we send no Connection header), so the server
 // holds the socket open and 'end' never fired -> every keep-alive request hung until the timeout.
 // The only mode that legitimately waits for 'end' is a connection-close-delimited body.
-function performH1(conn: Connection, { method, url, host, body, userHeaders, opts, profileObj }: RequestContext): Promise<unknown> {
+function performH1(conn: Connection, { method, url, host, body, userHeaders, opts, profileObj }: RequestContext): Promise<Response> {
 	const transport = conn.h2Transport!  // misnomer: this is the raw TLS Duplex
 	const requestLine = `${method} ${url.pathname + url.search} HTTP/1.1\r\n`
 	const headerBlock = buildH1Headers({ host, userHeaders, profile: profileObj })
@@ -775,7 +752,7 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 		let contentLength = 0
 		let bodyStart = 0
 		// Progressive-response state. `streamingStarted` means headers have been handed off to
-		// the body parser (or to the redirect/simple buffer), so later chunks bypass `buf`.
+		// the body parser (or to the redirect buffer), so later chunks bypass `buf`.
 		let streamingStarted = false
 		let buffering = false
 		let streamDone = false
@@ -873,8 +850,8 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 			return 'ok'
 		}
 
-		// Write decoded entity bytes into the progressive stream, or collect them while the
-		// response is being buffered (redirect / simple / bodyOnly / callback).
+		// Write decoded entity bytes into the progressive stream, or collect them while a
+		// redirect response is being buffered.
 		function writeOut(data: Buffer): void {
 			if (data.length === 0) return
 			received += data.length
@@ -968,13 +945,13 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 			stream?.end()
 		}
 
-		// Hand the response off as soon as its headers are complete. Redirects and simple-mode
-		// errors are buffered because their (small) body decides what handleResponse must do;
-		// everything else becomes a progressive web stream.
+		// Hand the response off as soon as its headers are complete. Redirects are buffered
+		// because their (small) body decides what handleResponse must do; everything else
+		// becomes a progressive web stream.
 		function startStreaming(): void {
 			streamingStarted = true
 			const isRedirect = opts.redirect !== 'manual' && status >= 300 && status < 400 && !!headers.location
-			if (isRedirect || (opts.simple === true && status >= 400) || opts.bodyOnly === true || opts._bufferBody === true) { buffering = true; return }
+			if (isRedirect) { buffering = true; return }
 			stream = startProgressiveResponse({
 				status,
 				statusText,
@@ -1082,22 +1059,8 @@ interface HandleResponseInput {
 	/** Fully decoded response bytes. */
 	raw: Buffer
 	opts: RequestOptions
-	resolve: (value: unknown) => void
+	resolve: (value: Response) => void
 	reject: (reason: unknown) => void
-}
-
-// Request.js-shaped body for the deprecated `bodyOnly` escape hatch (and the callback form).
-// `json: true` still parses; text-ish content types become strings; everything else stays raw.
-function legacyBody(raw: Buffer, headers: H1Headers, opts: RequestOptions): unknown {
-	if (opts.json && raw.length) {
-		try { return JSON.parse(raw.toString('utf8')) } catch { return raw }
-	}
-	const ct = headers['content-type']
-	const value = Array.isArray(ct) ? ct[0] : ct
-	if (raw.length && value && /(utf-?8|text\/|application\/(json|xml|javascript))/i.test(value)) {
-		return raw.toString('utf8')
-	}
-	return raw
 }
 
 function responseMeta(opts: RequestOptions): { url: string; redirected: boolean; method: string } {
@@ -1108,23 +1071,9 @@ function responseMeta(opts: RequestOptions): { url: string; redirected: boolean;
 	}
 }
 
-function attachLegacyBody(res: Response, body: unknown): Response {
-	try {
-		Object.defineProperty(res, '__legacyBody', { value: body, enumerable: false, configurable: true })
-	} catch { /* non-extensible Response */ }
-	return res
-}
-
 function handleResponse({ status, statusText, headers, raw, opts, resolve, reject }: HandleResponseInput): void {
 	const res = buildResponse({ status, statusText, headers, body: raw, ...responseMeta(opts) })
-	const body = legacyBody(raw, headers, opts)
-	attachLegacyBody(res, body)
 
-	if (opts.simple === true && status >= 400) {
-		const err = new HellojsError(`HTTP ${status}`, 'EHTTP')
-		err.response = res
-		return reject(err)
-	}
 	if (opts.redirect === 'error' && status >= 300 && status < 400 && headers.location) {
 		return reject(new HellojsError(`redirect not allowed with redirect: 'error' (HTTP ${status})`, 'EHTTP'))
 	}
@@ -1152,9 +1101,9 @@ function handleResponse({ status, statusText, headers, raw, opts, resolve, rejec
 		if (target.origin !== currentUrl.origin) {
 			newOpts = withoutHeaders(newOpts, ['authorization', 'cookie', 'proxy-authorization'])
 		}
-		return resolve(performRequest(newOpts))
+		void performRequest(newOpts).then(resolve, reject)
+		return
 	}
-	if (opts.bodyOnly) return resolve(body)
 	resolve(res)
 }
 
@@ -1178,7 +1127,21 @@ function retryDelay(ms: number, signal?: AbortSignal | null): Promise<void> {
 	})
 }
 
-async function performWithRetry(opts: RequestOptions): Promise<unknown> {
+// The request.js response shims are gone. Fail loudly instead of silently ignoring them:
+// `simple: true` / `bodyOnly: true` would promise behavior the fetch-shaped API no longer
+// has. Explicit `false` is harmless and stays accepted.
+function assertNoLegacyResponseOptions(opts: RequestOptions): void {
+	const legacy = opts as RequestOptions & { simple?: unknown; bodyOnly?: unknown }
+	if (legacy.simple === true) {
+		throw new HellojsError('simple was removed; inspect res.ok instead', 'EBADOPTS')
+	}
+	if (legacy.bodyOnly === true) {
+		throw new HellojsError('bodyOnly was removed; await res.json()/text()/arrayBuffer() instead', 'EBADOPTS')
+	}
+}
+
+async function performWithRetry(opts: RequestOptions): Promise<Response> {
+	assertNoLegacyResponseOptions(opts)
 	const policy = opts.retry || {}
 	const limit = policy.limit ?? 0
 	const methods = policy.methods ?? ['GET', 'HEAD', 'OPTIONS']
@@ -1192,10 +1155,8 @@ async function performWithRetry(opts: RequestOptions): Promise<unknown> {
 			const res = await performRequest(opts)
 			// A retryable status is already visible at the header stage. Cancel the unread
 			// body to release the stream/socket before the next attempt.
-			const status = (res as { status?: unknown } | null | undefined)?.status
-			if (retriable && attempt < limit && typeof status === 'number' && statusCodes.includes(status)) {
-				const body = (res as { body?: { cancel?: () => Promise<void> } }).body
-				if (body?.cancel) { try { await body.cancel() } catch { /* already closed */ } }
+			if (retriable && attempt < limit && statusCodes.includes(res.status)) {
+				if (res.body) { try { await res.body.cancel() } catch { /* already closed */ } }
 				await retryDelay(baseDelay * Math.pow(2, attempt), opts.signal)
 				continue
 			}
@@ -1207,9 +1168,7 @@ async function performWithRetry(opts: RequestOptions): Promise<unknown> {
 			if (typeof DOMException !== 'undefined' && e instanceof DOMException && e.name === 'AbortError') throw e
 			// Normalize: every error leaving this function is a HellojsError with a stable .code.
 			lastErr = wrapError(e)
-			const status = lastErr.response?.status
-			const transient = (!!status && statusCodes.includes(status)) ||
-				['ETIMEDOUT', 'ECONNRESET', 'EH2STREAM', 'EH3STREAM'].includes(lastErr.code)
+			const transient = ['ETIMEDOUT', 'ECONNRESET', 'EH2STREAM', 'EH3STREAM'].includes(lastErr.code)
 			if (!retriable || !transient || attempt === limit) throw lastErr
 			await retryDelay(baseDelay * Math.pow(2, attempt), opts.signal)
 		}
@@ -1218,6 +1177,9 @@ async function performWithRetry(opts: RequestOptions): Promise<unknown> {
 }
 
 function inputToOptions(input: RequestOptions | string | URL | Request, init?: FetchInit): RequestOptions {
+	if (typeof init === 'function') {
+		throw new HellojsError('callbacks were removed; use await request(...) instead', 'EBADOPTS')
+	}
 	let opts: RequestOptions
 	if (typeof input === 'string' || input instanceof URL) {
 		opts = { ...(init ?? {}), url: input.toString() }
@@ -1249,36 +1211,15 @@ function inputToRequestOptions(input: Request): Partial<RequestOptions> {
 	}
 }
 
-function requestImpl(input: RequestOptions | string | URL | Request, initOrCb?: FetchInit | Callback): Promise<unknown> {
-	if (typeof initOrCb === 'function') {
-		const cb = initOrCb
-		const opts = inputToOptions(input)
-		// The request.js callback contract includes the parsed legacy body, so this form
-		// buffers even though the promise API streams.
-		opts._bufferBody = true
-		const p = performWithRetry(opts)
-		p.then(
-			(r) => {
-				const res = r as Response
-				cb(null, res, (res as unknown as { __legacyBody?: unknown }).__legacyBody)
-			},
-			(e: HellojsError) => {
-				const res = e?.response as unknown as Response | undefined
-				cb(e, res, (res as unknown as { __legacyBody?: unknown } | undefined)?.__legacyBody)
-			},
-		)
-		return p
-	}
-	return performWithRetry(inputToOptions(input, initOrCb))
+async function requestImpl(input: RequestOptions | string | URL | Request, init?: FetchInit): Promise<Response> {
+	return performWithRetry(inputToOptions(input, init))
 }
 
 function method(m: string, dispatch: MethodFn = requestImpl): MethodFn {
-	return (input, initOrCb) => {
-		const init = typeof initOrCb === 'function' ? undefined : initOrCb
-		const cb = typeof initOrCb === 'function' ? initOrCb : undefined
+	return async (input, init) => {
 		const opts = inputToOptions(input, init)
 		opts.method = m
-		return dispatch(opts, cb)
+		return dispatch(opts)
 	}
 }
 
@@ -1311,11 +1252,8 @@ function withShortcuts<T extends object>(fn: T, dispatch: MethodFn): T {
 const request = withShortcuts(
 	Object.assign(requestImpl, {
 		defaults: (defaults: Partial<RequestOptions> = {}) => {
-			const wrapped: MethodFn = (input, initOrCb) => {
-				const init = typeof initOrCb === 'function' ? undefined : initOrCb
-				const cb = typeof initOrCb === 'function' ? initOrCb : undefined
-				return requestImpl(mergeOpts(defaults, inputToOptions(input, init)), cb)
-			}
+			const wrapped: MethodFn = async (input, init) =>
+				requestImpl(mergeOpts(defaults, inputToOptions(input, init)))
 			return withShortcuts(
 				Object.assign(wrapped, {
 					defaults: (more?: Partial<RequestOptions>) => request.defaults(mergeOpts(defaults, more || {})),

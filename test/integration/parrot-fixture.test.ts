@@ -68,14 +68,12 @@ beforeAll(async () => {
 	// profile object and pass it as opts.headers so their HTTP layer matches Chrome too.
 	const profile = profiles.registerFromPeet('parrot-fixture', fixture)
 
-	live = (await request({
+	live = (await (await request({
 		url: `https://${PEET_HOST}/api/all`,
-		json: true,
-		bodyOnly: true,
 		profile: 'parrot-fixture',
 		headers: profile.headers ? { ...profile.headers } : undefined,
 		timeouts: { tlsHandshake: 15_000, response: 15_000 },
-	})) as PeetJson
+	})).json()) as PeetJson
 })
 
 describe.skipIf(!FIXTURE_PATH)('parrot fixture round-trip', () => {

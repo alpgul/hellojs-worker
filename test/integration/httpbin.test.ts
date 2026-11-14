@@ -27,78 +27,76 @@ interface HttpbinEcho {
 
 // httpbin reports every repeated parameter as an array; the fixtures here send one value each.
 const v = (x: string | string[] | undefined): string | undefined => (Array.isArray(x) ? x[0] : x)
+const jsonBody = async (p: Promise<Response>): Promise<HttpbinEcho> => (await p).json() as Promise<HttpbinEcho>
 
 it('GET /get returns JSON with url + headers', async () => {
-	const body = (await request({ simple: false, bodyOnly: true, url: `${BASE}/get`, json: true })) as HttpbinEcho
+	const body = await jsonBody(request({ url: `${BASE}/get` }))
 	expect(body?.url?.includes('/get')).toBe(true)
 	expect(body?.headers).toBeTruthy()
 })
 
 it('GET with qs builder', async () => {
-	const body = (await request({ simple: false, bodyOnly: true, url: `${BASE}/get`, qs: { foo: 'bar', n: 42 }, json: true })) as HttpbinEcho
+	const body = await jsonBody(request({ url: `${BASE}/get`, qs: { foo: 'bar', n: 42 } }))
 	expect(v(body?.args?.foo)).toBe('bar')
 	expect(String(v(body?.args?.n))).toBe('42')
 })
 
 it('custom header echoed', async () => {
-	const body = (await request({ simple: false, bodyOnly: true, url: `${BASE}/headers`, headers: { 'x-hellojs-test': '147' }, json: true })) as HttpbinEcho
+	const body = await jsonBody(request({ url: `${BASE}/headers`, headers: { 'x-hellojs-test': '147' } }))
 	// httpbin lowercases + multivalues, and which spelling depends on the deployment.
 	const echoed = body?.headers?.['X-Hellojs-Test'] ?? body?.headers?.['x-hellojs-test']
 	expect(v(echoed)).toBe('147')
 })
 
 it('POST with json body', async () => {
-	const body = (await request({ simple: false, bodyOnly: true, url: `${BASE}/post`, method: 'POST', json: { hello: 'world', n: 1 } })) as HttpbinEcho
+	const body = await jsonBody(request({ url: `${BASE}/post`, method: 'POST', json: { hello: 'world', n: 1 } }))
 	expect(body?.json?.hello).toBe('world')
 	expect(body?.json?.n).toBe(1)
 })
 
 it('POST with form body', async () => {
-	const body = (await request({ simple: false, bodyOnly: true, url: `${BASE}/post`, method: 'POST', form: { name: 'jack', age: '30' }, json: true })) as HttpbinEcho
+	const body = await jsonBody(request({ url: `${BASE}/post`, method: 'POST', form: { name: 'jack', age: '30' } }))
 	expect(v(body?.form?.name)).toBe('jack')
 	expect(v(body?.form?.age)).toBe('30')
 })
 
-it('simple:true rejects on 418', async () => {
-	await expect(request({ simple: true, url: `${BASE}/status/418` })).rejects.toMatchObject({
-		code: 'EHTTP',
-		response: { status: 418 },
-	})
-})
-
-it('simple:false resolves on 418', async () => {
-	const r = await request({ simple: false, url: `${BASE}/status/418` })
+it('418 resolves like fetch', async () => {
+	const r = await request({ url: `${BASE}/status/418` })
 	expect(r.status).toBe(418)
+	expect(r.ok).toBe(false)
+	await r.text()
 })
 
 it('follows redirects (3 hops)', async () => {
-	const r = await request({ simple: false, url: `${BASE}/redirect/2` })
+	const r = await request({ url: `${BASE}/redirect/2` })
 	expect(r.status).toBe(200)
+	await r.text()
 })
 
 it("redirect:'manual' stops at 302", async () => {
-	const r = await request({ simple: false, url: `${BASE}/redirect/1`, redirect: 'manual' })
+	const r = await request({ url: `${BASE}/redirect/1`, redirect: 'manual' })
 	expect(r.status).toBeGreaterThanOrEqual(300)
 	expect(r.status).toBeLessThan(400)
 	expect(r.headers.get('location')).toBeTruthy()
+	await r.text()
 })
 
 it('gzip auto-decompresses', async () => {
-	const body = (await request({ simple: false, bodyOnly: true, url: `${BASE}/gzip`, gzip: true, json: true })) as HttpbinEcho
+	const body = await jsonBody(request({ url: `${BASE}/gzip`, gzip: true }))
 	expect(body?.gzipped).toBe(true)
 })
 
 it('cookie jar persists', async () => {
 	const jar = request.jar()
 	// Set a cookie via /cookies/set redirect chain
-	await request({ simple: false, url: `${BASE}/cookies/set?testcookie=hellojs147`, jar })
-	const body = (await request({ simple: false, bodyOnly: true, url: `${BASE}/cookies`, jar, json: true })) as HttpbinEcho
+	await (await request({ url: `${BASE}/cookies/set?testcookie=hellojs147`, jar })).text()
+	const body = await jsonBody(request({ url: `${BASE}/cookies`, jar }))
 	// httpbin returns cookies as plain strings or arrays of strings depending on version.
 	expect(v(body?.cookies?.testcookie)).toBe('hellojs147')
 })
 
 it('default UA is Chrome 147', async () => {
-	const body = (await request({ simple: false, bodyOnly: true, url: `${BASE}/user-agent`, json: true })) as HttpbinEcho
+	const body = await jsonBody(request({ url: `${BASE}/user-agent` }))
 	const ua = body?.['user-agent'] ?? body?.user_agent
 	expect(typeof ua).toBe('string')
 	expect(ua).toContain('Chrome/147')

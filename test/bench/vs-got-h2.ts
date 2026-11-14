@@ -50,7 +50,7 @@ async function timeOne(fn: () => Promise<unknown>): Promise<number> {
 
 const { default: got } = await import('got')
 
-const helloRun = () => hello({ url: URL, simple: false })
+const helloRun = () => hello({ url: URL })
 
 const gotH2 = got.extend({ http2: true, throwHttpErrors: false })
 const gotH2Run = () => gotH2(URL)

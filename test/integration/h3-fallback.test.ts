@@ -35,7 +35,6 @@ it('request({ h3: true }) answers from an origin without a QUIC endpoint', async
 		profile: 'chrome147-mac',
 		h3: true,
 		timeout: 30_000,
-		simple: false,
 	})
 	const dt = Date.now() - t0
 	expect(res.status).toBe(200)
