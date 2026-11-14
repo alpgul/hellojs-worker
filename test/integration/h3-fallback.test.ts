@@ -36,7 +36,6 @@ it('request({ h3: true }) answers from an origin without a QUIC endpoint', async
 		h3: true,
 		timeout: 30_000,
 		simple: false,
-		resolveWithFullResponse: true,
 	})
 	const dt = Date.now() - t0
 	expect(res.status).toBe(200)

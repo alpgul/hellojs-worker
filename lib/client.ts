@@ -97,8 +97,6 @@ export interface RequestOptions {
 	 * `json: true` produced) instead of the fetch-compatible `Response`. Deprecated.
 	 */
 	bodyOnly?: boolean
-	/** Deprecated no-op: `request()` always resolves a full `Response` unless `bodyOnly` is set. */
-	resolveWithFullResponse?: boolean
 	/**
 	 * Opt in to request.js error semantics: reject with `EHTTP` when the status is >= 400.
 	 * Default is `false`, matching `fetch()` (inspect `res.ok` instead).

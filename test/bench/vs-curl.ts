@@ -204,7 +204,6 @@ async function runHello(url: string, h3: boolean, resume: boolean): Promise<Samp
 		url,
 		h3,
 		resume,
-		resolveWithFullResponse: true,
 		simple: false,
 		timeouts: h3 ? { connect: 3000, response: 15_000 } : { response: 15_000 }
 	})) as { status?: number; statusCode?: number; body?: unknown }

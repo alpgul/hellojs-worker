@@ -40,8 +40,8 @@ async function timeOne(fn: () => Promise<unknown>): Promise<number> {
 const { default: got } = await import('got')
 const gotH2 = got.extend({ http2: true, throwHttpErrors: false })
 
-const helloH2 = () => request({ url: URL, h3: false, resolveWithFullResponse: true, simple: false })
-const helloH3 = () => request({ url: URL, h3: true, resolveWithFullResponse: true, simple: false })
+const helloH2 = () => request({ url: URL, h3: false, simple: false })
+const helloH3 = () => request({ url: URL, h3: true, simple: false })
 const goth2 = () => gotH2(URL)
 
 console.log('Target:', URL, 'N =', N)

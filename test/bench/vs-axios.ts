@@ -53,7 +53,7 @@ async function timeOne(fn: () => Promise<unknown>): Promise<number> {
 }
 
 // hellojs runner
-const helloAgent = hello.defaults({ resolveWithFullResponse: true, simple: false })
+const helloAgent = hello.defaults({ simple: false })
 const helloFresh = () => helloAgent({ url: URL })
 
 // axios with a keep-alive https.Agent

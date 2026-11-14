@@ -149,7 +149,6 @@ await request({
 | `proxyHeaders` | object | — | Extra headers sent on the CONNECT request to the proxy. Names the CONNECT builder owns (`host`, `connection`, `keep-alive`, …) and values outside printable ASCII reject with `EBADOPTS`. Not supported with `socks5://` |
 | `simple` | bool | `false` | `false` matches `fetch()` (4xx/5xx resolve; inspect `res.ok`). Set `true` to reject 4xx/5xx with `EHTTP`. |
 | `bodyOnly` | bool | `false` | **Deprecated.** Resolve the parsed body (string/Buffer/JSON value) instead of a `Response`, request.js-style. Buffers the whole body to produce that value. |
-| `resolveWithFullResponse` | bool | — | **Deprecated no-op.** `request()` always resolves a `Response` unless `bodyOnly` is set. |
 | `retry` | object | none | `{ limit, methods, statusCodes, baseDelayMs }` |
 | `profile` | string | `'chrome147-mac'` | which fingerprint profile to emit |
 | `h3` | bool | `false` | opt in to HTTP/3 for this request; QUIC is tried first and TCP+TLS is used when the QUIC handshake cannot complete |
@@ -726,7 +725,6 @@ with full streaming on H1/H2/H3 in Node and Cloudflare Workers.
 
 | Old (request.js style) | New (fetch style) |
 |---|---|
-| `resolveWithFullResponse: true` | default; remove it |
 | `res.statusCode` | `res.status` |
 | `res.headers['x']` (plain object) | `res.headers.get('x')` (`Headers`) |
 | parsed `res.body` / returned body | `await res.text()` / `await res.json()` / `res.body` (`ReadableStream`) |
@@ -1142,7 +1140,7 @@ HELLOJS_KEYLOG=/tmp/hellojs.keys node my-script.js
 const request = require('@unreleased/hellojs')
 
 // Main API
-request(opts)                    // Promise<body | Response | Readable>
+request(opts)                    // Promise<Response>
 request.get(...)
 request.post(...)
 request.put(...)
