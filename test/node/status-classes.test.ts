@@ -74,6 +74,7 @@ beforeAll(async () => {
 			case '/e500': return send(500, 'boom')
 			case '/e503': return send(503, 'unavailable')
 			case '/flaky': return n === 1 ? send(500, 'first attempt fails') : send(200, 'second attempt ok')
+			case '/flaky-nosimple': return n === 1 ? send(503, 'first attempt fails') : send(200, 'second attempt ok')
 			default: return send(404, 'no route')
 		}
 	})
@@ -173,13 +174,23 @@ describe('5xx server error', () => {
 	})
 
 	it('a transient 500 is retried on GET and the retry succeeds', async () => {
-		// Retry only fires on a thrown (simple:true) transient status: the first 500 must reject
-		// for the policy to re-issue the GET. simple:false would resolve 500 immediately, no retry.
+		// simple:true rejects first, so this keeps the thrown-EHTTP retry path covered.
 		const res = await request({
 			simple: true,
 			verifyTLS: false,
 			timeout: 5000,
 			url: `${base}/flaky`,
+			retry: { limit: 1, baseDelayMs: 10 },
+		})
+		expect(res.status).toBe(200)
+		expect(await res.text()).toBe('second attempt ok')
+	})
+
+	it('retries a transient status without simple by inspecting the Response', async () => {
+		const res = await request({
+			verifyTLS: false,
+			timeout: 5000,
+			url: `${base}/flaky-nosimple`,
 			retry: { limit: 1, baseDelayMs: 10 },
 		})
 		expect(res.status).toBe(200)

@@ -1160,6 +1160,24 @@ function handleResponse({ status, statusText, headers, raw, opts, resolve, rejec
 
 // Public API ------------------------------------------------------------
 
+function retryDelay(ms: number, signal?: AbortSignal | null): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal?.aborted) { reject(abortReason(signal)); return }
+		let timer: ReturnType<typeof setTimeout> | null = null
+		const onAbort = () => {
+			if (timer) clearTimeout(timer)
+			signal?.removeEventListener('abort', onAbort)
+			reject(abortReason(signal))
+		}
+		timer = setTimeout(() => {
+			signal?.removeEventListener('abort', onAbort)
+			resolve()
+		}, ms)
+		timer.unref?.()
+		signal?.addEventListener('abort', onAbort, { once: true })
+	})
+}
+
 async function performWithRetry(opts: RequestOptions): Promise<unknown> {
 	const policy = opts.retry || {}
 	const limit = policy.limit ?? 0
@@ -1171,7 +1189,17 @@ async function performWithRetry(opts: RequestOptions): Promise<unknown> {
 	let lastErr: HellojsError | undefined
 	for (let attempt = 0; attempt <= limit; attempt++) {
 		try {
-			return await performRequest(opts)
+			const res = await performRequest(opts)
+			// A retryable status is already visible at the header stage. Cancel the unread
+			// body to release the stream/socket before the next attempt.
+			const status = (res as { status?: unknown } | null | undefined)?.status
+			if (retriable && attempt < limit && typeof status === 'number' && statusCodes.includes(status)) {
+				const body = (res as { body?: { cancel?: () => Promise<void> } }).body
+				if (body?.cancel) { try { await body.cancel() } catch { /* already closed */ } }
+				await retryDelay(baseDelay * Math.pow(2, attempt), opts.signal)
+				continue
+			}
+			return res
 		} catch (e) {
 			// Abort is not a retryable transport failure, and fetch rejects with the signal's
 			// reason (a DOMException by default), not a HellojsError.
@@ -1183,8 +1211,7 @@ async function performWithRetry(opts: RequestOptions): Promise<unknown> {
 			const transient = (!!status && statusCodes.includes(status)) ||
 				['ETIMEDOUT', 'ECONNRESET', 'EH2STREAM', 'EH3STREAM'].includes(lastErr.code)
 			if (!retriable || !transient || attempt === limit) throw lastErr
-			const delay = baseDelay * Math.pow(2, attempt)
-			await new Promise((r) => setTimeout(r, delay))
+			await retryDelay(baseDelay * Math.pow(2, attempt), opts.signal)
 		}
 	}
 	throw lastErr

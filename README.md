@@ -1086,8 +1086,10 @@ try {
 
 Retries (when `opts.retry.limit > 0` is set and the method is in
 `opts.retry.methods`) automatically retry these codes:
-`ETIMEDOUT`, `ECONNRESET`, `EH2STREAM`, `EH3STREAM`, plus any status code
-in `opts.retry.statusCodes`.
+`ETIMEDOUT`, `ECONNRESET`, `EH2STREAM`, `EH3STREAM`. A response whose status is
+in `opts.retry.statusCodes` is also retried: the client cancels the unread body
+at the header stage and re-issues the request, so no throw-on-status option is
+needed.
 
 ---
 
