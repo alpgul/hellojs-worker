@@ -56,6 +56,18 @@ export interface H3Response {
 	body: Buffer
 }
 
+export interface H3StreamHandlers {
+	onHeaders: (status: number, headers: Record<string, string>) => void
+	onData: (chunk: Buffer) => void
+	onEnd: () => void
+	onError: (error: Error) => void
+}
+
+// QUIC STREAM data is split into DATA frames no larger than this. 16 KiB matches the h2
+// default frame size and keeps a single frame comfortably inside the peer's flow-control
+// window without depending on the negotiated transport parameter.
+const H3_MAX_FRAME = 16 * 1024
+
 function encodeFrame(type: number, payload: Buffer): Buffer {
 	return Buffer.concat([varint.encode(type), varint.encode(payload.length), payload])
 }
@@ -148,7 +160,27 @@ class H3Client {
 		this.bootstrapped = true
 	}
 
-	request({ method, path, host, headers = {}, body }: H3RequestOptions): Promise<H3Response> {
+	request(options: H3RequestOptions): Promise<H3Response> {
+		let status = 0
+		let headers: Record<string, string> = {}
+		const chunks: Buffer[] = []
+		return new Promise<H3Response>((resolve, reject) => {
+			this.requestStream(options, {
+				onHeaders: (s, h) => { status = s; headers = h },
+				onData: (chunk) => chunks.push(chunk),
+				onEnd: () => resolve({ status, headers, body: Buffer.concat(chunks) }),
+				onError: reject,
+			})
+		})
+	}
+
+	// Streaming form: headers fire as soon as the response HEADERS frame decodes, DATA frames
+	// fire as they arrive. Request bodies may be a Buffer or a Node Readable; both are split
+	// into bounded DATA frames instead of the old single-frame cast.
+	requestStream(
+		{ method, path, host, headers = {}, body }: H3RequestOptions,
+		handlers: H3StreamHandlers,
+	): void {
 		if (!this.bootstrapped) this.bootstrap()
 		const stream = this.conn.openBidiStream()
 
@@ -162,10 +194,25 @@ class H3Client {
 		const fieldSection = qpack.encodeHeaders(ordered)
 		const headersFrame = encodeFrame(FRAME.HEADERS, fieldSection)
 
-		const respChunks: Buffer[] = []
 		const respHeaders: Record<string, string> = {}
 		let respFrameBuf: Buffer = Buffer.alloc(0)
 		let respFailed = false
+		let headersEmitted = false
+		let ended = false
+
+		const emitHeaders = () => {
+			if (headersEmitted) return
+			const status = parseInt(respHeaders[':status'] || '0', 10)
+			if (!status) return
+			headersEmitted = true
+			handlers.onHeaders(status, respHeaders)
+		}
+		const finish = (error?: Error) => {
+			if (ended) return
+			ended = true
+			if (error) handlers.onError(error)
+			else { emitHeaders(); handlers.onEnd() }
+		}
 
 		// Read a QUIC varint only when all its bytes are present (its length is encoded in the top 2
 		// bits of the first byte). Returns null = "need more": varint.decode would otherwise THROW on
@@ -198,8 +245,9 @@ class H3Client {
 							? qpack.decodeHeadersWithTable(payload, this.peerDynamicTable, maxEntries)
 							: qpack.decodeHeaders(payload)
 						for (const [n, v] of decoded) respHeaders[n] = v
+						emitHeaders()
 					} else if (t.value === FRAME.DATA) {
-						respChunks.push(Buffer.from(payload))
+						handlers.onData(Buffer.from(payload))
 					}
 				}
 			} catch (e) {
@@ -207,29 +255,37 @@ class H3Client {
 				respFailed = true
 				const err = new Error(`h3 response parse failed: ${(e as Error).message}`) as NodeJS.ErrnoException
 				err.code = 'EH3PARSE'
-				stream.emit('error', err)
+				finish(err)
 			}
 		})
 
-		return new Promise<H3Response>((resolve, reject) => {
-			stream.on('end', () => {
-				resolve({
-					status: parseInt(respHeaders[':status'] || '0', 10),
-					headers: respHeaders,
-					body: Buffer.concat(respChunks),
-				})
-			})
-			stream.on('error', reject)
-			if (body) {
-				// One DATA frame holds the whole body — a streaming body has no representation
-				// here and fails when the frame is sized.
-				const payload = body as Buffer
-				stream.send(headersFrame, false)
-				stream.send(encodeFrame(FRAME.DATA, payload), true)
-			} else {
-				stream.send(headersFrame, true)
+		stream.on('end', () => finish())
+		stream.on('error', (e: Error) => finish(e))
+
+		// Send HEADERS, then the body. A Buffer is split into bounded DATA frames; a Readable
+		// streams each chunk as DATA frames and finishes the stream at end-of-source.
+		if (!body) {
+			stream.send(headersFrame, true)
+			return
+		}
+		stream.send(headersFrame, false)
+		if (Buffer.isBuffer(body)) {
+			for (let off = 0; off < body.length; off += H3_MAX_FRAME) {
+				stream.send(encodeFrame(FRAME.DATA, body.subarray(off, off + H3_MAX_FRAME)), false)
+			}
+			stream.send(Buffer.alloc(0), true)
+			return
+		}
+		// Streaming request body (Node Readable / NodeJS.ReadableStream).
+		const source = body
+		source.on('data', (chunk: Buffer | string) => {
+			const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+			for (let off = 0; off < buf.length; off += H3_MAX_FRAME) {
+				stream.send(encodeFrame(FRAME.DATA, buf.subarray(off, off + H3_MAX_FRAME)), false)
 			}
 		})
+		source.on('end', () => stream.send(Buffer.alloc(0), true))
+		source.on('error', (e: Error) => finish(e))
 	}
 }
 
