@@ -5,7 +5,7 @@
 // package's own name resolves via package.json "exports" -> "types" -> index.d.ts, so this
 // program sees exactly what a consumer's `tsc` sees and never the .ts sources behind it.
 
-import request, { HellojsError, TLS } from '@unreleased/hellojs'
+import request, { HellojsError, TLS, setPoolConfig } from '@unreleased/hellojs'
 
 import type {
 	HellojsErrorCode,
@@ -108,11 +108,16 @@ async function smoke(): Promise<void> {
 		verifyTLS: false,
 		resume: true,
 		h3: true,
-		pool: { maxSockets: 2, maxPerOrigin: 1, idleMs: 1000 },
 		profile: 'default'
 	}
 	void allHellojsFields
 	await request({ url: 'https://example.com', proxy: null })
+
+	// Pool caps are process-wide: one static call, never a request option.
+	request.setPoolConfig({ maxSockets: 2, idleMs: 1000 })
+	setPoolConfig()
+	// @ts-expect-error pool caps are not a per-request option
+	await request({ url: 'https://example.com', pool: { maxSockets: 2 } })
 
 	// The proxy object is now the only place for CONNECT settings, and fetch's `keepalive` is
 	// the only spelling for the connection pool switch.

@@ -8,8 +8,8 @@
 // The pool is deliberately bounded and short-lived: runtimes like Cloudflare Workers cap the
 // sockets an isolate may hold open (single digits), so pooled sockets must never accumulate.
 // Defaults: one socket per origin, sixteen across the process, idle sockets closed after
-// fifteen seconds. Callers opt in per request (`keepalive: true`) and may lower the caps via
-// `pool: { maxSockets, maxPerOrigin, idleMs }`. A request that finds no capacity opens a
+// fifteen seconds. The caps are process-wide, set once with `setPoolConfig()`; individual
+// requests only opt in with `keepalive: true`. A request that finds no capacity opens a
 // one-shot connection exactly as before — the pool never blocks or queues.
 //
 // Only healthy, non-GOAWAYed h2 sessions are ever handed out. Any stream-level teardown path
@@ -17,6 +17,7 @@
 
 import { createHash } from 'node:crypto'
 
+import { HellojsError } from './errors.ts'
 import * as frame from './h2/frame.ts'
 
 import type { Connection } from './connect.ts'
@@ -31,13 +32,35 @@ export interface PoolConfig {
 interface Entry {
 	key: string
 	conn: Connection
-	config: PoolConfig
 	active: number
 	dead: boolean
 	idleTimer: ReturnType<typeof setTimeout> | null
 }
 
 const DEFAULT_CONFIG: PoolConfig = { maxSockets: 16, maxPerOrigin: 1, idleMs: 15_000 }
+
+// The pool owns sockets process-wide, so its caps live here rather than on any request.
+let config: PoolConfig = { ...DEFAULT_CONFIG }
+
+/** Set the process-wide pool caps. Each call starts from the defaults, then applies `partial`. */
+function setPoolConfig(partial: Partial<PoolConfig> = {}): void {
+	const next = { ...DEFAULT_CONFIG, ...partial }
+	if (!Number.isInteger(next.maxSockets) || next.maxSockets < 1) {
+		throw new HellojsError(`pool.maxSockets must be a positive integer`, 'EBADOPTS')
+	}
+	if (!Number.isInteger(next.maxPerOrigin) || next.maxPerOrigin < 1) {
+		throw new HellojsError(`pool.maxPerOrigin must be a positive integer`, 'EBADOPTS')
+	}
+	if (!Number.isInteger(next.idleMs) || next.idleMs < 0) {
+		throw new HellojsError(`pool.idleMs must be a non-negative integer`, 'EBADOPTS')
+	}
+	config = next
+}
+
+/** Internal: shared with the proxy-hop pool so both honor the same caps. */
+function getPoolConfig(): PoolConfig {
+	return config
+}
 
 const entries = new Map<string, Entry[]>()
 const byConn = new WeakMap<Connection, Entry>()
@@ -141,12 +164,12 @@ function pooledCount(): number {
  * request already holds a stream slot, so the entry starts at active=1. Returns whether the
  * connection joined the pool; unregistered connections keep the historic one-shot behavior.
  */
-function register(conn: Connection, key: string, config: PoolConfig): boolean {
+function register(conn: Connection, key: string): boolean {
 	if (conn.alpn !== 'h2' || !conn.h2Session) return false
 	const bucket = entries.get(key) ?? []
 	if (bucket.length >= config.maxPerOrigin || pooledCount() >= config.maxSockets) return false
 
-	const entry: Entry = { key, conn, config, active: 1, dead: false, idleTimer: null }
+	const entry: Entry = { key, conn, active: 1, dead: false, idleTimer: null }
 	bucket.push(entry)
 	entries.set(key, bucket)
 	byConn.set(conn, entry)
@@ -162,8 +185,8 @@ function register(conn: Connection, key: string, config: PoolConfig): boolean {
 
 /**
  * Return a connection's stream slot after a completed exchange. True means the socket stays
- * pooled (idle-closed after the entry's configured lifetime if nothing else takes it); false
- * means the caller must close the connection itself.
+ * pooled (idle-closed after the configured lifetime if nothing else takes it); false means
+ * the caller must close the connection itself.
  */
 function release(conn: Connection): boolean {
 	const entry = byConn.get(conn)
@@ -178,7 +201,7 @@ function release(conn: Connection): boolean {
 		entry.idleTimer = null
 		remove(entry)
 		conn.close('pool-idle-expired')
-	}, entry.config.idleMs)
+	}, config.idleMs)
 	entry.idleTimer.unref?.()
 	return true
 }
@@ -202,5 +225,5 @@ function clearPool(reason = 'pool-cleared'): void {
 	entries.clear()
 }
 
-export { DEFAULT_CONFIG, poolKey, take, register, release, poolEvict, clearPool, pooledCount }
+export { setPoolConfig, getPoolConfig, poolKey, take, register, release, poolEvict, clearPool, pooledCount }
 export type { Entry }

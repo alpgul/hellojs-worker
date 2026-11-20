@@ -37,6 +37,7 @@ const data = await post.json()
 - [Method shortcuts and defaults](#method-shortcuts-and-defaults)
 - [Cookie jar](#cookie-jar)
 - [Per-phase timeouts](#per-phase-timeouts)
+- [Connection pool](#connection-pool)
 - [Proxies](#proxies)
 - [Observability hooks](#observability-hooks)
 - [Parrot: clone any fingerprint](#parrot-clone-any-fingerprint-from-a-tlspeetws-response)
@@ -147,8 +148,7 @@ await request({
 | `profile` | string | `'chrome147-mac'` | which fingerprint profile to emit |
 | `h3` | bool | `false` | opt in to HTTP/3 for this request; QUIC is tried first and TCP+TLS is used when the QUIC handshake cannot complete |
 | `resume` | bool | `false` | offer a cached TLS 1.3 `NewSessionTicket` (`pre_shared_key`) on the next connection to the same host. Opt-in because the extra extension changes JA3/JA4 — see [TLS 1.3 session resumption](#tls-13-session-resumption). h3 is not resumed. |
-| `keepalive` | bool | `false` | fetch's spelling. Reuse live HTTP/2 connections across requests (multiplex streams onto one socket per origin, like Chrome). When the pool has no capacity the request opens a one-shot connection and closes it after the response, so enabling this can never hold more sockets than the `pool` caps allow. Not pooled: h1 and h3 connections. |
-| `pool` | object | `{maxSockets: 16, maxPerOrigin: 1, idleMs: 15_000}` | keep-alive pool caps. |
+| `keepalive` | bool | `false` | fetch's spelling. Reuse live HTTP/2 connections across requests (multiplex streams onto one socket per origin, like Chrome). When the pool has no capacity the request opens a one-shot connection and closes it after the response, so enabling this can never hold more sockets than the [pool caps](#connection-pool) allow. Not pooled: h1 and h3 connections. |
 | `verifyTLS` | bool | `true` | Validate the server certificate chain (RFC 5280) + hostname (RFC 6125 SubjectAltName). |
 | `signal` | `AbortSignal` | — | Abort the request or an in-flight response body. Before headers the promise rejects; after headers `res.body` errors. |
 
@@ -311,6 +311,30 @@ await request('https://upload.example.com/blob', {
 
 ---
 
+## Connection pool
+
+The keep-alive pool owns sockets process-wide, so its caps are configured once with a static
+call — they are not a request option. `keepalive: true` stays per request: it only decides
+whether that request may use a pooled h2 socket.
+
+```js
+import request from '@unreleased/hellojs'
+
+request.setPoolConfig({ maxSockets: 8, maxPerOrigin: 2, idleMs: 30_000 })
+await request({ url: 'https://example.com', keepalive: true })
+```
+
+Defaults are `{ maxSockets: 16, maxPerOrigin: 1, idleMs: 15_000 }`. `setPoolConfig()` takes a
+partial object but **starts from the defaults on every call**: `setPoolConfig({ idleMs: 5_000 })`
+resets the other two caps; `setPoolConfig()` restores all defaults. Invalid caps throw
+`EBADOPTS`.
+
+The same caps bound the proxy-hop pool ([`proxy.keepAlive`](#reusing-the-proxy-connection),
+counted separately). A change applies to sockets released after the call — an already-idle
+socket keeps its existing idle timer.
+
+---
+
 ## Proxies
 
 ### HTTP CONNECT
@@ -351,9 +375,9 @@ username/password and rejects supplied `authorization`/`headers` with `EBADOPTS`
 `proxy.keepAlive: true` keeps the connection to an `http://`/`ws://`/`https://`/`wss://`
 proxy open after the destination session closes, so the next request can issue a fresh
 CONNECT over the same socket. Separate from the request's `keepalive` (which pools the
-h2 session to the origin), this pool is bounded by the same `pool` caps and counts its
-sockets separately. One proxy hop is never shared by two live requests; if a reused hop
-is dead, it is discarded and the CONNECT retried once on a fresh socket. `socks5://`
+h2 session to the origin), this pool is bounded by the same [process-wide caps](#connection-pool)
+and counts its sockets separately. One proxy hop is never shared by two live requests; if a
+reused hop is dead, it is discarded and the CONNECT retried once on a fresh socket. `socks5://`
 and h3 never use the proxy-hop pool.
 
 ### HTTPS proxy (CONNECT over TLS)
@@ -1162,6 +1186,7 @@ request.head(...)
 request.options(...)
 request.defaults(defaultOpts)    // bound instance
 request.jar()                    // new RFC 6265 cookie jar
+request.setPoolConfig(opts?)     // set process-wide keep-alive pool caps
 request.clearSessionTickets()    // forget cached TLS 1.3 session tickets
 request.HellojsError             // error class
 request.observability            // EventEmitter — see Observability hooks

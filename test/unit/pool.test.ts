@@ -5,7 +5,17 @@ import { EventEmitter } from 'node:events'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { clearPool, DEFAULT_CONFIG, poolEvict, poolKey, pooledCount, register, release, take } from '../../lib/pool.ts'
+import {
+	clearPool,
+	getPoolConfig,
+	poolEvict,
+	poolKey,
+	pooledCount,
+	register,
+	release,
+	setPoolConfig,
+	take
+} from '../../lib/pool.ts'
 
 import type { Connection } from '../../lib/connect.ts'
 
@@ -40,15 +50,34 @@ function fakeConn(session?: Partial<FakeSession>): { conn: Connection; session: 
 }
 
 const KEY = poolKey('example.com', 443, 'chrome147-mac', null, true)
+const DEFAULTS = { maxSockets: 16, maxPerOrigin: 1, idleMs: 15_000 }
 
 describe('pool', () => {
 	beforeEach(() => {
+		setPoolConfig()
 		vi.useFakeTimers()
 	})
 	afterEach(() => {
 		clearPool('test-teardown')
+		setPoolConfig()
 		vi.clearAllTimers()
 		vi.useRealTimers()
+	})
+
+	it('setPoolConfig starts from the defaults on every call', () => {
+		setPoolConfig({ maxSockets: 4, idleMs: 1000 })
+		expect(getPoolConfig()).toEqual({ maxSockets: 4, maxPerOrigin: 1, idleMs: 1000 })
+		setPoolConfig({ maxPerOrigin: 3 })
+		expect(getPoolConfig()).toEqual({ maxSockets: 16, maxPerOrigin: 3, idleMs: 15_000 })
+		setPoolConfig()
+		expect(getPoolConfig()).toEqual(DEFAULTS)
+	})
+
+	it('setPoolConfig rejects invalid caps without changing the config', () => {
+		expect(() => setPoolConfig({ maxSockets: 0 })).toThrow(/maxSockets must be a positive integer/)
+		expect(() => setPoolConfig({ maxPerOrigin: 1.5 })).toThrow(/maxPerOrigin must be a positive integer/)
+		expect(() => setPoolConfig({ idleMs: -1 })).toThrow(/idleMs must be a non-negative integer/)
+		expect(getPoolConfig()).toEqual(DEFAULTS)
 	})
 
 	it('poolKey separates host, port, profile, proxy and verification', () => {
@@ -90,7 +119,7 @@ describe('pool', () => {
 
 	it('register hands a fresh connection to later takers', () => {
 		const { conn } = fakeConn()
-		expect(register(conn, KEY, DEFAULT_CONFIG)).toBe(true)
+		expect(register(conn, KEY)).toBe(true)
 		expect(pooledCount()).toBe(1)
 		expect(take(KEY)).toBe(conn)
 		expect(pooledCount()).toBe(1)
@@ -99,30 +128,30 @@ describe('pool', () => {
 	it('register ignores non-h2 connections and honours maxPerOrigin', () => {
 		const h1 = fakeConn()
 		;(h1.conn as { alpn: string }).alpn = 'http/1.1'
-		expect(register(h1.conn, KEY, DEFAULT_CONFIG)).toBe(false)
+		expect(register(h1.conn, KEY)).toBe(false)
 
-		const cfg = { ...DEFAULT_CONFIG, maxPerOrigin: 1 }
 		const a = fakeConn()
 		const b = fakeConn()
-		expect(register(a.conn, KEY, cfg)).toBe(true)
-		expect(register(b.conn, KEY, cfg)).toBe(false)
+		expect(register(a.conn, KEY)).toBe(true)
+		expect(register(b.conn, KEY)).toBe(false)
 		expect(pooledCount()).toBe(1)
 	})
 
 	it('global maxSockets bounds registrations across origins', () => {
-		const cfg = { ...DEFAULT_CONFIG, maxSockets: 2 }
+		setPoolConfig({ maxSockets: 2 })
 		const hosts = ['a.com', 'b.com', 'c.com']
 		const accepted: boolean[] = hosts.map((host) => {
 			const { conn } = fakeConn()
-			return register(conn, poolKey(host, 443, 'p', null, true), cfg)
+			return register(conn, poolKey(host, 443, 'p', null, true))
 		})
 		expect(accepted).toEqual([true, true, false])
 		expect(pooledCount()).toBe(2)
 	})
 
 	it('release parks an idle socket and the idle timer closes it', () => {
+		setPoolConfig({ idleMs: 1000 })
 		const { conn, closeReasons } = fakeConn()
-		register(conn, KEY, { ...DEFAULT_CONFIG, idleMs: 1000 })
+		register(conn, KEY)
 		// The creating stream holds a slot; releasing empties it.
 		expect(release(conn)).toBe(true)
 		vi.advanceTimersByTime(999)
@@ -134,8 +163,9 @@ describe('pool', () => {
 	})
 
 	it('a new stream cancels the pending idle close', () => {
+		setPoolConfig({ idleMs: 500 })
 		const { conn, closeReasons } = fakeConn()
-		register(conn, KEY, { ...DEFAULT_CONFIG, idleMs: 500 })
+		register(conn, KEY)
 		release(conn)
 		vi.advanceTimersByTime(100)
 		expect(take(KEY)).toBe(conn)
@@ -146,7 +176,7 @@ describe('pool', () => {
 
 	it('release balances concurrent streams', () => {
 		const { conn, closeReasons } = fakeConn()
-		register(conn, KEY, DEFAULT_CONFIG)
+		register(conn, KEY)
 		expect(take(KEY)).toBe(conn) // active 2 (creator + this)
 		expect(release(conn)).toBe(true) // still one in flight
 		expect(closeReasons).toEqual([])
@@ -155,7 +185,7 @@ describe('pool', () => {
 
 	it('GOAWAY stops reuse without breaking the slot accounting', () => {
 		const { conn } = fakeConn()
-		register(conn, KEY, DEFAULT_CONFIG)
+		register(conn, KEY)
 		conn.h2Session!.emit('goaway', 0, 0)
 		expect(take(KEY)).toBe(null)
 		expect(pooledCount()).toBe(0)
@@ -163,13 +193,13 @@ describe('pool', () => {
 
 	it('session close and connection close both evict', () => {
 		const a = fakeConn()
-		register(a.conn, KEY, DEFAULT_CONFIG)
+		register(a.conn, KEY)
 		a.session.closed = true
 		a.session.emit('close')
 		expect(take(KEY)).toBe(null)
 
 		const b = fakeConn()
-		register(b.conn, KEY, DEFAULT_CONFIG)
+		register(b.conn, KEY)
 		b.conn.close('h2-stream-error')
 		expect(take(KEY)).toBe(null)
 		expect(pooledCount()).toBe(0)
@@ -177,7 +207,7 @@ describe('pool', () => {
 
 	it('peer MAX_CONCURRENT_STREAMS caps hand-outs', () => {
 		const { conn } = fakeConn({ peerSettings: { 3: 1 } })
-		register(conn, KEY, DEFAULT_CONFIG)
+		register(conn, KEY)
 		release(conn) // creator slot back; one stream of headroom
 		expect(take(KEY)).toBe(conn) // fills the single slot
 		expect(take(KEY)).toBe(null) // no headroom left
@@ -185,7 +215,7 @@ describe('pool', () => {
 
 	it('poolEvict drops a poisoned socket', () => {
 		const { conn } = fakeConn()
-		register(conn, KEY, DEFAULT_CONFIG)
+		register(conn, KEY)
 		poolEvict(conn)
 		expect(take(KEY)).toBe(null)
 	})

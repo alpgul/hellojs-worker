@@ -36,7 +36,6 @@ import type { Connection, PerPhaseTimeouts } from './connect.ts'
 import type { ErrorCode } from './errors.ts'
 import type { H2Stream } from './h2/session.ts'
 import type { HeaderMap } from './headers.ts'
-import type { PoolConfig } from './pool.ts'
 import type { Profile } from './profiles/types.ts'
 import type { Readable } from 'node:stream'
 
@@ -115,8 +114,6 @@ export interface RequestOptions extends RequestInit {
 	resume?: boolean
 	/** Opt in to HTTP/3 (QUIC) for this request. Off unless explicitly `true`. */
 	h3?: boolean
-	/** Keep-alive pool caps: process-wide sockets, sockets per origin, idle socket lifetime. */
-	pool?: Partial<PoolConfig>
 	/** Profile name, or an inline profile object. */
 	profile?: string | Profile
 
@@ -382,13 +379,9 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 	// With fetch's `keepalive: true` a live pooled h2 socket for this origin+profile is taken
 	// first; otherwise (and whenever the pool has no capacity) the request handshakes a fresh
 	// one, which is registered for reuse when it lands on a healthy h2 session.
-	const poolConfig: PoolConfig | null = opts.keepalive === true && opts.h3 !== true
-		? { ...pool.DEFAULT_CONFIG, ...opts.pool }
-		: null
-	const poolKey = poolConfig
-		? pool.poolKey(host, port, opts.profile, opts.proxy, opts.verifyTLS !== false)
-		: null
-	let conn: Connection | null = poolConfig && poolKey ? pool.take(poolKey) : null
+	const usePool = opts.keepalive === true && opts.h3 !== true
+	const poolKey = usePool ? pool.poolKey(host, port, opts.profile, opts.proxy, opts.verifyTLS !== false) : null
+	let conn: Connection | null = poolKey ? pool.take(poolKey) : null
 	if (!conn) {
 		// h3 has no proxy path: it falls back to CONNECT over TCP, but that fallback must not
 		// silently start pooling the proxy hop.
@@ -402,7 +395,7 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 		conn = opts.h3 === true
 			? await connectPreferred(connectOpts)
 			: await connect({ ...connectOpts, transport: 'tcp' })
-		if (poolConfig && poolKey) pool.register(conn, poolKey, poolConfig)
+		if (poolKey) pool.register(conn, poolKey)
 	}
 
 	// Build headers

@@ -139,8 +139,8 @@ export interface ProxyOptions {
 	headers?: Record<string, string> | null
 	/**
 	 * Keep the connection to an `http(s)`/`ws(s)` proxy alive so later requests can open
-	 * another CONNECT tunnel over the same socket (default `false`). Bounded by `pool`.
-	 * No-op for `socks5://` and h3.
+	 * another CONNECT tunnel over the same socket (default `false`). Bounded by the
+	 * process-wide pool config (`request.setPoolConfig()`). No-op for `socks5://` and h3.
 	 */
 	keepAlive?: boolean
 }
@@ -175,8 +175,6 @@ export interface RequestOptions extends RequestInit {
 	resume?: boolean
 	/** Opt in to HTTP/3 (QUIC) for this request. Off unless explicitly `true`; QUIC is tried first with a bounded TCP fallback. */
 	h3?: boolean
-	/** Keep-alive pool caps: process-wide sockets (default 16), sockets per origin (default 1), idle socket lifetime in ms (default 15000). */
-	pool?: Partial<PoolConfig>
 	/** Profile name, or an inline profile object shaped like lib/profiles/types.ts `Profile`. */
 	profile?: ProfileName | Record<string, unknown>
 }
@@ -275,6 +273,9 @@ export interface RequestFn extends Invokable, Shortcuts {
 	/** Drop every cached TLS 1.3 session ticket (used only with `resume: true`). */
 	clearSessionTickets(): void
 
+	/** Set the process-wide keep-alive pool caps; each call starts from the defaults. */
+	setPoolConfig(config?: Partial<PoolConfig>): void
+
 	/** Request lifecycle events — see [Observability](README.md#observability). */
 	observability: Observability
 
@@ -316,6 +317,7 @@ export const profiles: ProfileRegistry
 export const udp: UdpTransport
 export function setTrustedRoots(pems: string[]): void
 export function clearSessionTickets(): void
+export function setPoolConfig(config?: Partial<PoolConfig>): void
 
 export interface TLSOptions {
 	verifyTLS?: boolean

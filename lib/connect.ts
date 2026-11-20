@@ -1,16 +1,15 @@
 // Per-request connection factory. Each request opens a fresh TLS (or QUIC) connection
-// and closes it once the response completes — there is no pooling or reuse.
+// and closes it once the response completes, unless the caller opts into the process-wide
+// keep-alive pool (lib/pool.ts).
 
 import { HellojsError } from './errors.ts'
 import { QuicConnection } from './h3/connection.ts'
 import { H3Client } from './h3/h3.ts'
-import { DEFAULT_CONFIG } from './pool.ts'
 import * as proxyPool from './proxy-pool.ts'
 import { TLS } from './tls/tls.ts'
 
 import type { ProxyOptions } from './client.ts'
 import type { H2Session } from './h2/session.ts'
-import type { PoolConfig } from './pool.ts'
 import type { Profile } from './profiles/types.ts'
 import type { ProxyHop, TLSOptions, TLSTransport } from './tls/tls.ts'
 
@@ -36,7 +35,6 @@ export interface ConnectOptions {
 	port?: number
 	profile?: Profile | string | null
 	proxy?: ProxyOptions | null
-	pool?: Partial<PoolConfig>
 	transport?: 'tcp' | 'quic'
 	verifyTLS?: boolean
 	resume?: boolean
@@ -60,7 +58,6 @@ class Connection {
 	// Proxy hop checked out for this connection. Released back to lib/proxy-pool.ts on close.
 	declare proxyHop: ProxyHop | null
 	declare proxyPoolKey: string | null
-	declare proxyPoolConfig: PoolConfig | null
 
 	constructor(tls: TLS | null) {
 		this.tls = tls
@@ -73,7 +70,6 @@ class Connection {
 		this.onClosed = null
 		this.proxyHop = null
 		this.proxyPoolKey = null
-		this.proxyPoolConfig = null
 	}
 
 	close(reason = 'closed'): void {
@@ -85,7 +81,7 @@ class Connection {
 		try {
 			this.h2Session?.close?.()
 		} catch {}
-		if (this.proxyHop && this.proxyPoolKey && this.proxyPoolConfig) {
+		if (this.proxyHop && this.proxyPoolKey) {
 			// Detach the destination session from the proxy transport and hand the still-live hop
 			// back. Destroying tls.socket here would defeat the point of pooling the proxy hop.
 			try {
@@ -98,7 +94,7 @@ class Connection {
 					this.tls.h2Transport.destroy()
 				} catch {}
 			}
-			proxyPool.release(this.proxyHop, this.proxyPoolKey, this.proxyPoolConfig)
+			proxyPool.release(this.proxyHop, this.proxyPoolKey)
 			this.proxyHop = null
 		} else {
 			try {
@@ -168,7 +164,6 @@ function createTLS(
 		timeouts?: PerPhaseTimeouts | null
 		proxyHop?: ProxyHop | null
 		proxyPoolKey?: string | null
-		proxyPoolConfig?: PoolConfig | null
 	} = {}
 ): Promise<Connection> {
 	return new Promise((resolve, reject) => {
@@ -210,10 +205,9 @@ function createTLS(
 			conn.alpn = alpn
 			conn.h2Session = tls.h2Session ?? null
 			conn.h2Transport = tls.h2Transport ?? null
-			if (opts.proxyPoolKey && opts.proxyPoolConfig && tls.proxyHop) {
+			if (opts.proxyPoolKey && tls.proxyHop) {
 				conn.proxyHop = tls.proxyHop
 				conn.proxyPoolKey = opts.proxyPoolKey
-				conn.proxyPoolConfig = opts.proxyPoolConfig
 			}
 			resolve(conn)
 		}
@@ -277,7 +271,6 @@ async function connect({
 	port = 443,
 	profile,
 	proxy,
-	pool: poolOpts,
 	transport = 'tcp',
 	verifyTLS = true,
 	resume = false,
@@ -294,11 +287,9 @@ async function connect({
 	}
 
 	let key: string | null = null
-	let config: PoolConfig | null = null
 	let hop: ProxyHop | null = null
 	if (poolableProxy(proxy)) {
 		key = proxyPool.key(proxy, verifyTLS)
-		config = { ...DEFAULT_CONFIG, ...poolOpts }
 		hop = proxyPool.take(key)
 	}
 	const opts = {
@@ -306,8 +297,7 @@ async function connect({
 		resume,
 		timeouts,
 		proxyHop: hop,
-		proxyPoolKey: key,
-		proxyPoolConfig: config
+		proxyPoolKey: key
 	}
 	try {
 		return await createTLS(host, port, profile, proxy, opts)

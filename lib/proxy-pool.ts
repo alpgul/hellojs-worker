@@ -9,9 +9,8 @@
 // session plus the plaintext Duplex its CONNECT exchange runs over. SOCKS5 has no CONNECT phase
 // here and is never pooled.
 
-import { DEFAULT_CONFIG, proxySegment } from './pool.ts'
+import { getPoolConfig, proxySegment } from './pool.ts'
 
-import type { PoolConfig } from './pool.ts'
 import type { ProxyHop } from './tls/tls.ts'
 
 interface ProxyLike {
@@ -23,7 +22,6 @@ interface ProxyLike {
 interface Entry {
 	key: string
 	hop: ProxyHop
-	config: PoolConfig
 	idleTimer: ReturnType<typeof setTimeout> | null
 	onClose: () => void
 }
@@ -79,10 +77,12 @@ function take(key: string): ProxyHop | null {
 
 /**
  * Hand a hop back after its connection closes. Returns it to the idle bucket when there is
- * capacity; otherwise closes it. An idle hop is closed after `config.idleMs` or on socket close.
+ * capacity; otherwise closes it. An idle hop is closed after the configured idleMs or on
+ * socket close. Caps come from the process-wide pool config.
  */
-function release(hop: ProxyHop, key: string, config: PoolConfig = DEFAULT_CONFIG): void {
+function release(hop: ProxyHop, key: string): void {
 	if (!hop) return
+	const config = getPoolConfig()
 	if (destroyed(hop) || byHop.has(hop)) {
 		close(hop)
 		return
@@ -93,7 +93,7 @@ function release(hop: ProxyHop, key: string, config: PoolConfig = DEFAULT_CONFIG
 		return
 	}
 
-	const entry: Entry = { key, hop, config, idleTimer: null, onClose: () => remove(entry) }
+	const entry: Entry = { key, hop, idleTimer: null, onClose: () => remove(entry) }
 	bucket.push(entry)
 	entries.set(key, bucket)
 	byHop.set(hop, entry)
