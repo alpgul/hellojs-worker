@@ -4,8 +4,8 @@
 //
 //   SOAK_REQUESTS=200000 SOAK_CONCURRENCY=200 npm run test:soak
 //
-// Each request opens its own connection (the client does not pool), so this exercises the
-// full handshake + teardown path. Heap growth is measured after an explicit GC, comparing
+// Each request opts out of the pool with `keepalive: false`, so this exercises the full
+// handshake + teardown path. Heap growth is measured after an explicit GC, comparing
 // the idle baseline with the post-load state; a leak shows up as growth that survives GC.
 
 import { execSync } from 'node:child_process'
@@ -80,7 +80,7 @@ it(
 	'sustained load does not leak heap or sockets',
 	async () => {
 		const url = `https://127.0.0.1:${port}/`
-		const send = () => request({ url, verifyTLS: false, json: true })
+		const send = () => request({ url, verifyTLS: false, json: true, keepalive: false })
 
 		// Warm up once so the baseline excludes first-request allocations.
 		await send()

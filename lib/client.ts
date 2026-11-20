@@ -8,9 +8,8 @@
 //   request.jar()
 //
 // Notes:
-// - Driven by lib/connect.ts and lib/tls/tls.ts for TLS+HTTP/2. Requests open a fresh
-//   connection and close it when the response completes, unless fetch's `keepalive: true` opts the
-//   caller into the bounded per-origin pool (lib/pool.ts).
+// - Driven by lib/connect.ts and lib/tls/tls.ts for TLS+HTTP/2. Requests reuse a bounded
+//   per-origin h2 pool (lib/pool.ts) unless `keepalive: false` opts out.
 // - HTTP/1.1 fallback is hand-rolled (chunked, content-length).
 // - Auto-decompresses gzip / br / deflate / zstd response bodies based on the response's
 //   Content-Encoding header — no opt-in needed. To receive raw compressed bytes, override
@@ -80,7 +79,8 @@ export interface ProxyOptions {
 	headers?: Record<string, string> | null
 	/**
 	 * Keep the connection to an `http(s)`/`ws(s)` proxy alive and reuse it for later CONNECTs
-	 * (default `false`). No-op for `socks5://` and h3. Shares the `pool` caps.
+	 * (default `true`; pass `false` for one-shot hops). No-op for `socks5://` and h3. Shares the
+	 * process-wide pool caps.
 	 */
 	keepAlive?: boolean
 }
@@ -108,12 +108,14 @@ export interface RequestOptions extends RequestInit {
 	verifyTLS?: boolean
 	/**
 	 * TLS-only: reuse a TLS 1.3 session ticket from an earlier request to the same host
-	 * (default `false`). Resumed handshakes skip the certificate flight and its validation,
-	 * but add `pre_shared_key` to the ClientHello, so JA3/JA4 differ from a fresh handshake.
+	 * (default `true`; pass `false` to keep a fresh-handshake fingerprint). Resumed handshakes
+	 * skip the certificate flight and its validation, but add `pre_shared_key` to the ClientHello.
 	 */
 	resume?: boolean
 	/** Opt in to HTTP/3 (QUIC) for this request. Off unless explicitly `true`. */
 	h3?: boolean
+	/** Reuse a pooled h2 socket (default `true`); pass `false` for a one-shot connection. */
+	keepalive?: boolean
 	/** Profile name, or an inline profile object. */
 	profile?: string | Profile
 
@@ -124,12 +126,10 @@ export interface RequestOptions extends RequestInit {
 }
 
 /**
- * Internal: what the transports actually receive. `headers` is always a lowercase map, and
- * `keepalive` is fetch's spelling (the Workers `RequestInit` does not declare it).
+ * Internal: what the transports actually receive. `headers` is always a lowercase map.
  */
 type NormalizedRequestOptions = Omit<RequestOptions, 'headers'> & {
 	headers: HeaderMap
-	keepalive?: boolean
 }
 
 // `HeaderMap` is intentionally richer than the cross-runtime `HeadersInit`. Only the internals
@@ -376,10 +376,10 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 	// TCP + TLS, regardless of any `alt-svc` response headers. An h3 request tries QUIC
 	// first and falls back to TCP when the handshake cannot complete, so an origin without
 	// a QUIC endpoint answers over TCP instead of sitting in QUIC Initial retransmits.
-	// With fetch's `keepalive: true` a live pooled h2 socket for this origin+profile is taken
-	// first; otherwise (and whenever the pool has no capacity) the request handshakes a fresh
-	// one, which is registered for reuse when it lands on a healthy h2 session.
-	const usePool = opts.keepalive === true && opts.h3 !== true
+	// `keepalive` is on by default: a live pooled h2 socket for this origin+profile is taken
+	// first; `keepalive: false` and h3 always handshake a fresh one. Whenever the pool has no
+	// capacity the fresh connection is registered for reuse on a healthy h2 session.
+	const usePool = opts.keepalive !== false && opts.h3 !== true
 	const poolKey = usePool ? pool.poolKey(host, port, opts.profile, opts.proxy, opts.verifyTLS !== false) : null
 	let conn: Connection | null = poolKey ? pool.take(poolKey) : null
 	if (!conn) {
@@ -389,7 +389,7 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 		const connectOpts = {
 			host, port, profile, proxy: connectProxy,
 			verifyTLS: opts.verifyTLS !== false,
-			resume: opts.resume === true,
+			resume: opts.resume !== false,
 			timeouts: opts.timeouts,
 		}
 		conn = opts.h3 === true

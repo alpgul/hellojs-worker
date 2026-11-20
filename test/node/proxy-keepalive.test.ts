@@ -151,10 +151,10 @@ afterEach(async () => {
 	origin = null
 })
 
-it('proxy.keepAlive reuses one proxy socket for sequential requests', async () => {
+it('proxy.keepAlive defaults to on and reuses one proxy socket', async () => {
 	origin = await startOrigin()
 	proxy = await startProxy()
-	const opts = { url: `http://127.0.0.1:${proxy.port}`, keepAlive: true }
+	const opts = { url: `http://127.0.0.1:${proxy.port}` }
 
 	for (const path of ['/a', '/b']) {
 		const res = await request(full({ url: `https://127.0.0.1:${origin.port}${path}`, proxy: opts }))
@@ -168,10 +168,10 @@ it('proxy.keepAlive reuses one proxy socket for sequential requests', async () =
 	expect(proxy.tunnels[0]).toMatch(/^CONNECT 127\.0\.0\.1:\d+ HTTP\/1\.1/)
 }, 20000)
 
-it('without proxy.keepAlive each request dials a fresh proxy socket', async () => {
+it('proxy.keepAlive: false dials a fresh proxy socket per request', async () => {
 	origin = await startOrigin()
 	proxy = await startProxy()
-	const opts = { url: `http://127.0.0.1:${proxy.port}` }
+	const opts = { url: `http://127.0.0.1:${proxy.port}`, keepAlive: false }
 
 	for (const p of ['/a', '/b']) {
 		const res = await request(full({ url: `https://127.0.0.1:${origin.port}${p}`, proxy: opts }))

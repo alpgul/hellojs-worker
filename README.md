@@ -147,8 +147,8 @@ await request({
 | `retry` | object | none | `{ limit, methods, statusCodes, baseDelayMs }`; status-based retries inspect `res.status` directly |
 | `profile` | string | `'chrome147-mac'` | which fingerprint profile to emit |
 | `h3` | bool | `false` | opt in to HTTP/3 for this request; QUIC is tried first and TCP+TLS is used when the QUIC handshake cannot complete |
-| `resume` | bool | `false` | offer a cached TLS 1.3 `NewSessionTicket` (`pre_shared_key`) on the next connection to the same host. Opt-in because the extra extension changes JA3/JA4 — see [TLS 1.3 session resumption](#tls-13-session-resumption). h3 is not resumed. |
-| `keepalive` | bool | `false` | fetch's spelling. Reuse live HTTP/2 connections across requests (multiplex streams onto one socket per origin, like Chrome). When the pool has no capacity the request opens a one-shot connection and closes it after the response, so enabling this can never hold more sockets than the [pool caps](#connection-pool) allow. Not pooled: h1 and h3 connections. |
+| `resume` | bool | `true` | offer a cached TLS 1.3 `NewSessionTicket` (`pre_shared_key`) on the next connection to the same host. The extra extension changes JA3/JA4, so pass `false` for a fresh-handshake fingerprint — see [TLS 1.3 session resumption](#tls-13-session-resumption). h3/QUIC is not resumed. |
+| `keepalive` | bool | `true` | fetch's spelling. Reuse live HTTP/2 connections across requests (multiplex streams onto one socket per origin, like Chrome). Pass `false` for one-shot connections. When the pool has no capacity the request opens a connection and closes it after the response, so this can never hold more sockets than the [pool caps](#connection-pool) allow. Not pooled: h1 and h3 connections. |
 | `verifyTLS` | bool | `true` | Validate the server certificate chain (RFC 5280) + hostname (RFC 6125 SubjectAltName). |
 | `signal` | `AbortSignal` | — | Abort the request or an in-flight response body. Before headers the promise rejects; after headers `res.body` errors. |
 
@@ -314,14 +314,15 @@ await request('https://upload.example.com/blob', {
 ## Connection pool
 
 The keep-alive pool owns sockets process-wide, so its caps are configured once with a static
-call — they are not a request option. `keepalive: true` stays per request: it only decides
-whether that request may use a pooled h2 socket.
+call — they are not a request option. `keepalive` stays per request (default `true`): pass
+`false` to opt that request out of the pooled h2 socket.
 
 ```js
 import request from '@unreleased/hellojs'
 
 request.setPoolConfig({ maxSockets: 8, maxPerOrigin: 2, idleMs: 30_000 })
-await request({ url: 'https://example.com', keepalive: true })
+await request({ url: 'https://example.com' })                    // pooled
+await request({ url: 'https://example.com', keepalive: false })    // one-shot
 ```
 
 Defaults are `{ maxSockets: 16, maxPerOrigin: 1, idleMs: 15_000 }`. `setPoolConfig()` takes a
@@ -372,10 +373,11 @@ username/password and rejects supplied `authorization`/`headers` with `EBADOPTS`
 
 ### Reusing the proxy connection
 
-`proxy.keepAlive: true` keeps the connection to an `http://`/`ws://`/`https://`/`wss://`
+`proxy.keepAlive` (default `true`) keeps the connection to an `http://`/`ws://`/`https://`/`wss://`
 proxy open after the destination session closes, so the next request can issue a fresh
-CONNECT over the same socket. Separate from the request's `keepalive` (which pools the
-h2 session to the origin), this pool is bounded by the same [process-wide caps](#connection-pool)
+CONNECT over the same socket; pass `false` for one-shot hops. Separate from the request's
+`keepalive` (which pools the h2 session to the origin), this pool is bounded by the same
+[process-wide caps](#connection-pool)
 and counts its sockets separately. One proxy hop is never shared by two live requests; if a
 reused hop is dead, it is discarded and the CONNECT retried once on a fresh socket. `socks5://`
 and h3 never use the proxy-hop pool.
@@ -725,8 +727,8 @@ certificate validation failed: OCSP responder reported the leaf as revoked
 
 ## TLS 1.3 session resumption
 
-`resume: true` opts a request into TLS 1.3 PSK resumption (RFC 8446 §4.6.1). The
-handshake stores each `NewSessionTicket` the server sends; later handshakes to the
+TLS 1.3 PSK resumption (RFC 8446 §4.6.1) is on by default. The handshake stores each
+`NewSessionTicket` the server sends; later handshakes to the
 same `host:port` offer the most recent ticket in `pre_shared_key` as the last
 ClientHello extension and reuse it when `ServerHello` selects it. The resumption
 master secret and per-ticket PSK are derived per RFC 8446 §7.1, and the ClientHello
@@ -738,15 +740,16 @@ test suite.
   seed a trusted connection.
 - The store is keyed by host, port and ALPN, capped at 64 entries (LRU) with a 7-day
   ceiling. `clearSessionTickets()` empties it.
-- Off by default: a resumed ClientHello carries `pre_shared_key` (0x0029), so resumed
-  and fresh connections have different JA3/JA4. Use it when speed matters more than
-  a stable fingerprint.
+- On by default: a resumed ClientHello carries `pre_shared_key` (0x0029), so resumed
+  and fresh connections have different JA3/JA4. Pass `resume: false` when a stable
+  fresh-handshake fingerprint matters more than the saved certificate flight.
 - Only plain 1-RTT resumption is implemented. 0-RTT (`early_data`) would save a round
   trip but replays requests, so it is deliberately not offered. h3/QUIC is not
   resumed yet.
 
 ```js
-await request({ url, resume: true })   // offers a cached ticket, if one exists
+await request({ url })                 // offers a cached ticket, if one exists
+await request({ url, resume: false })   // fresh handshake, stable JA3/JA4
 clearSessionTickets()                  // forget every stored ticket
 ```
 
@@ -806,10 +809,9 @@ that entry is the one that declares ML-KEM.
 
 ## Performance
 
-> The numbers below were captured with an earlier connection-pooled build. The current
-> tree opens a fresh connection per request unless the caller opts into the bounded
-> keep-alive pool (`keepalive: true` — see [Request options](#request-options)), so
-> warm-serial and concurrent timings differ.
+> The numbers below were captured with an earlier build. The current tree reuses the bounded
+> keep-alive pool by default (`keepalive: false` opts out — see [Request options](#request-options)),
+> so cold per-request timings differ.
 
 Benchmarked on macOS / Node 22.11 against a local HTTP/2 server (127.0.0.1, 1 KB
 fixed-size response). Each client runs as a fresh subprocess: 1 cold request
@@ -938,7 +940,7 @@ Measured: one resolver call across 3 sequential requests, both h2 and h3; with c
 unchanged at 145–149 ms, hellojs h2 went 151.8 → 117.6–121.8 ms p50 and now leads
 curl by ~18%.
 
-**Fix 4 — TLS 1.3 PSK resumption (opt-in).** `resume: true` stores the server's
+**Fix 4 — TLS 1.3 PSK resumption (on by default).** `resume` stores the server's
 `NewSessionTicket` and offers it as `pre_shared_key` on the next connection to the same
 host, so the server can skip the certificate flight and CertificateVerify. Measured with
 an interleaved connect-only A/B (30 rounds each, ticket seeded, 30/30 PSK accepted):
@@ -948,17 +950,17 @@ end-to-end A/B left the median flat (120.2 vs 120.7 ms) and moved the mean by �
 here is structural: full and resumed TLS 1.3 handshakes are both 1-RTT, so resumption
 removes only the ~4–6 KB certificate flight and its signature check — a few ms on this
 path, and less than DNS caching saved. It scales with chain size and path loss, and 0-RTT
-would remove a real round trip but replays requests, so it is not offered.
+would remove a real round trip but replays requests, so it is not offered. Pass `resume: false`
+to keep a fresh-handshake fingerprint.
 
 **What remains.** TCP connect + one TLS round trip. CertificateVerify is still checked on
 every full handshake (~1–2 ms), and run-to-run network drift moves both columns by
-several ms. PSK resumption is now available as the opt-in lever for repeated connections
-to the same host; 0-RTT is the only remaining handshake shortcut, and it trades replay
-safety for the round trip.
+several ms. PSK resumption is on by default for repeated connections to the same host;
+0-RTT is the only remaining handshake shortcut, and it trades replay safety for the round trip.
 
-**Pooling, now available opt-in.** Pooling removes DNS + TCP + TLS altogether, and the
+**Pooling, now on by default.** Pooling removes DNS + TCP + TLS altogether, and the
 fresh-connection-per-request prediction (~120 ms → ~35–40 ms) held once the bounded
-keep-alive pool shipped (`keepalive: true` — see [Request options](#request-options)).
+keep-alive pool shipped (see [Request options](#request-options)).
 Measured results, including through a proxy tunnel, are in the next section.
 
 Reproduce: `npm run bench:curl`. Knobs: `BENCH_URL`, `SAMPLES`, `CURL_BIN`,

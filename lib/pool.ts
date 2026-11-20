@@ -8,8 +8,8 @@
 // The pool is deliberately bounded and short-lived: runtimes like Cloudflare Workers cap the
 // sockets an isolate may hold open (single digits), so pooled sockets must never accumulate.
 // Defaults: one socket per origin, sixteen across the process, idle sockets closed after
-// fifteen seconds. The caps are process-wide, set once with `setPoolConfig()`; individual
-// requests only opt in with `keepalive: true`. A request that finds no capacity opens a
+// fifteen seconds. The caps are process-wide, set once with `setPoolConfig()`; requests use
+// the pool by default and opt out with `keepalive: false`. A request that finds no capacity opens a
 // one-shot connection exactly as before — the pool never blocks or queues.
 //
 // Only healthy, non-GOAWAYed h2 sessions are ever handed out. Any stream-level teardown path

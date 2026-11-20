@@ -257,7 +257,7 @@ function createTLS(
 // Only CONNECT-based proxies can have their transport reused. SOCKS5 handshakes are bound to a
 // destination and are deliberately left one-shot.
 function poolableProxy(proxy: ProxyOptions | null | undefined): proxy is ProxyOptions {
-	if (!proxy || proxy.keepAlive !== true) return false
+	if (!proxy || proxy.keepAlive === false) return false
 	try {
 		const scheme = new URL(proxy.url).protocol
 		return scheme === 'http:' || scheme === 'https:' || scheme === 'ws:' || scheme === 'wss:'
@@ -273,7 +273,7 @@ async function connect({
 	proxy,
 	transport = 'tcp',
 	verifyTLS = true,
-	resume = false,
+	resume = true,
 	timeouts = null
 }: ConnectOptions): Promise<Connection> {
 	if (transport === 'quic') {

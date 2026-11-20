@@ -139,8 +139,9 @@ export interface ProxyOptions {
 	headers?: Record<string, string> | null
 	/**
 	 * Keep the connection to an `http(s)`/`ws(s)` proxy alive so later requests can open
-	 * another CONNECT tunnel over the same socket (default `false`). Bounded by the
-	 * process-wide pool config (`request.setPoolConfig()`). No-op for `socks5://` and h3.
+	 * another CONNECT tunnel over the same socket (default `true`; pass `false` for one-shot
+	 * hops). Bounded by the process-wide pool config (`request.setPoolConfig()`). No-op for
+	 * `socks5://` and h3.
 	 */
 	keepAlive?: boolean
 }
@@ -148,7 +149,7 @@ export interface ProxyOptions {
 /**
  * Fetch's `RequestInit` supplies `method`, `headers`, `body`, `redirect`, `keepalive`, `signal`,
  * etc.; only hellojs-specific options are added here. Note that `keepalive` — the fetch spelling —
- * is the per-request h2 connection-pool switch (default `false`).
+ * is the per-request h2 connection-pool switch (default `true`; pass `false` to opt out).
  */
 export interface RequestOptions extends RequestInit {
 	url?: string
@@ -169,8 +170,8 @@ export interface RequestOptions extends RequestInit {
 	verifyTLS?: boolean
 	/**
 	 * TLS-only: reuse a TLS 1.3 session ticket from an earlier request to the same host
-	 * (default `false`). Resumed handshakes skip the certificate flight, but add
-	 * `pre_shared_key` to the ClientHello, so JA3/JA4 differ from a fresh handshake.
+	 * (default `true`; pass `false` for a fresh-handshake fingerprint). Resumed handshakes skip
+	 * the certificate flight, but add `pre_shared_key` to the ClientHello.
 	 */
 	resume?: boolean
 	/** Opt in to HTTP/3 (QUIC) for this request. Off unless explicitly `true`; QUIC is tried first with a bounded TCP fallback. */
@@ -270,7 +271,7 @@ export interface RequestFn extends Invokable, Shortcuts {
 	/** Install a Mozilla/NSS PEM bundle when the runtime has no built-in roots. */
 	setTrustedRoots(pems: string[]): void
 
-	/** Drop every cached TLS 1.3 session ticket (used only with `resume: true`). */
+	/** Drop every cached TLS 1.3 session ticket (used by default, disabled with `resume: false`). */
 	clearSessionTickets(): void
 
 	/** Set the process-wide keep-alive pool caps; each call starts from the defaults. */
