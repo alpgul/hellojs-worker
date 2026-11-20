@@ -9,7 +9,7 @@
 //
 // Notes:
 // - Driven by lib/connect.ts and lib/tls/tls.ts for TLS+HTTP/2. Requests open a fresh
-//   connection and close it when the response completes, unless `keepAlive: true` opts the
+//   connection and close it when the response completes, unless fetch's `keepalive: true` opts the
 //   caller into the bounded per-origin pool (lib/pool.ts).
 // - HTTP/1.1 fallback is hand-rolled (chunked, content-length).
 // - Auto-decompresses gzip / br / deflate / zstd response bodies based on the response's
@@ -23,7 +23,7 @@ import * as zlib from 'node:zlib'
 import { connect, connectPreferred } from './connect.ts'
 import { Jar } from './cookies.ts'
 import { HellojsError, wrap as wrapError } from './errors.ts'
-import { buildH2Headers, buildH1Headers, mergeProfileHeaders } from './headers.ts'
+import { assertProxyConnectHeaders, buildH2Headers, buildH1Headers, mergeProfileHeaders } from './headers.ts'
 import { observability, nextRequestId } from './observability.ts'
 import * as pool from './pool.ts'
 import * as profileRegistry from './profiles/index.ts'
@@ -65,34 +65,44 @@ export interface RetryPolicy {
 	baseDelayMs?: number
 }
 
-export interface RequestOptions {
+/** Per-request proxy configuration. Every CONNECT detail lives under `proxy`, not at the top level. */
+export interface ProxyOptions {
+	/** Proxy URL (`http://`, `https://`, `socks5://`, …). Required when `proxy` is present. */
+	url: string
+	/**
+	 * Full CONNECT `Proxy-Authorization` value (e.g. `Bearer <jwt>`). Overrides URL Basic auth;
+	 * `''` sends no header. Validated before any socket is opened; unused by `socks5://`.
+	 */
+	authorization?: string | null
+	/**
+	 * Extra headers sent on the CONNECT request to the proxy. CONNECT-owned names and values
+	 * outside printable ASCII reject with `EBADOPTS`; unused by `socks5://`.
+	 */
+	headers?: Record<string, string> | null
+	/**
+	 * Keep the connection to an `http(s)`/`ws(s)` proxy alive and reuse it for later CONNECTs
+	 * (default `false`). No-op for `socks5://` and h3. Shares the `pool` caps.
+	 */
+	keepAlive?: boolean
+}
+
+/**
+ * Fetch's `RequestInit` supplies `method`, `headers`, `body`, `redirect`, `keepalive`, `signal`,
+ * etc.; only hellojs-specific options are added here.
+ */
+export interface RequestOptions extends RequestInit {
 	url?: string
 	uri?: string
-	method?: string
-	headers?: HeadersInit | Record<string, string | string[]>
-	body?: RequestBodyValue | null
 	/** Object values are serialized as the JSON request body; `true` does the same for an object `body`. */
 	json?: boolean | unknown
 	form?: Record<string, string | number>
 	qs?: Record<string, string | number | (string | number)[]>
 	jar?: Jar | null
 	gzip?: boolean
-	/** Redirect handling: 'follow' (default) auto-follows 3xx; 'manual' stops and returns the 3xx response; 'error' rejects on any redirect. */
-	redirect?: RedirectMode
 	maxRedirects?: number
 	timeout?: number
 	timeouts?: PerPhaseTimeouts | null
-	proxy?: string | null
-	/**
-	 * Full CONNECT `Proxy-Authorization` value (e.g. `Bearer <jwt>`). Overrides URL Basic auth;
-	 * `''` sends no header. Validated at construction, and unused by `socks5://`.
-	 */
-	proxyAuthorization?: string | null
-	/**
-	 * Extra headers sent on the CONNECT request to the proxy. CONNECT-owned names and values
-	 * outside printable ASCII reject with `EBADOPTS`; unused by `socks5://`.
-	 */
-	proxyHeaders?: Record<string, string> | null
+	proxy?: ProxyOptions | null
 	retry?: RetryPolicy
 
 	/** TLS-only: turn on cert chain validation (default `true`). */
@@ -105,34 +115,31 @@ export interface RequestOptions {
 	resume?: boolean
 	/** Opt in to HTTP/3 (QUIC) for this request. Off unless explicitly `true`. */
 	h3?: boolean
-	/**
-	 * Reuse live HTTP/2 connections across requests (default `false`). Each pooled origin holds
-	 * at most one multiplexed socket; caps and idle lifetime come from `pool`. A request that
-	 * finds no pool capacity opens a one-shot connection and closes it after the response, so
-	 * enabling this can never hold more sockets than the caps allow.
-	 */
-	keepAlive?: boolean
 	/** Keep-alive pool caps: process-wide sockets, sockets per origin, idle socket lifetime. */
 	pool?: Partial<PoolConfig>
 	/** Profile name, or an inline profile object. */
 	profile?: string | Profile
 
-	/** Fetch `RequestInit` fields accepted for drop-in compatibility (ignored by this client). */
-	credentials?: 'omit' | 'same-origin' | 'include'
-	mode?: 'cors' | 'no-cors' | 'same-origin' | 'navigate'
-	cache?: string
-	integrity?: string
-	keepalive?: boolean
-	referrer?: string
-	referrerPolicy?: string
-	/** Present for fetch signature compatibility; a streaming request body is always half-duplex here. */
-	duplex?: 'half'
-	/** Abort the request (or an in-flight response body) when this signal fires. */
-	signal?: AbortSignal | null
 	// Carried across redirects so every attempt shares one observability id.
 	_reqId?: number
 	// Internal: set once a redirect has been followed, so `Response.redirected` is accurate.
 	_redirected?: boolean
+}
+
+/**
+ * Internal: what the transports actually receive. `headers` is always a lowercase map, and
+ * `keepalive` is fetch's spelling (the Workers `RequestInit` does not declare it).
+ */
+type NormalizedRequestOptions = Omit<RequestOptions, 'headers'> & {
+	headers: HeaderMap
+	keepalive?: boolean
+}
+
+// `HeaderMap` is intentionally richer than the cross-runtime `HeadersInit`. Only the internals
+// consume it; casting back at the public boundary keeps `RequestOptions` a plain `RequestInit`
+// extension in both the Workers and DOM type worlds.
+function toPublicOptions(opts: NormalizedRequestOptions): RequestOptions {
+	return opts as unknown as RequestOptions
 }
 
 /**
@@ -142,7 +149,7 @@ export interface RequestOptions {
 export type Response = globalThis.Response
 
 /** Fetch-style init accepted as the second argument; request.js options may be mixed in. */
-export type FetchInit = Omit<RequestInit, 'body' | 'headers' | 'method' | 'redirect' | 'signal'> & RequestOptions
+export type FetchInit = RequestOptions
 
 type MethodFn = (input: string | URL | Request | RequestOptions, init?: FetchInit) => Promise<Response>
 
@@ -183,7 +190,7 @@ interface RequestContext {
 	host: string
 	body: Buffer | Readable | null
 	userHeaders: HeaderMap
-	opts: RequestOptions
+	opts: NormalizedRequestOptions
 	profileObj: Profile | null
 }
 
@@ -290,7 +297,7 @@ function decompressIfNeeded(buf: Buffer, encoding: string): Buffer {
 // Streaming counterpart: return a Transform that the response body can be piped through.
 // `null` means "no decoding needed — caller can read the body as-is."
 
-function buildUrl(opts: RequestOptions): URL {
+function buildUrl(opts: NormalizedRequestOptions): URL {
 	const url = opts.url || opts.uri
 	if (!url) throw new HellojsError('missing url', 'EBADOPTS')
 	if (opts.qs) {
@@ -306,7 +313,7 @@ interface PreparedBody {
 	contentType: string | null
 }
 
-async function prepareBody(opts: RequestOptions): Promise<PreparedBody> {
+async function prepareBody(opts: NormalizedRequestOptions): Promise<PreparedBody> {
 	const raw = opts.body
 	if (raw !== undefined && raw !== null) {
 		// Streaming bodies: pass the Readable through; we'll send it as h2 DATA frames or h1 chunked.
@@ -336,13 +343,13 @@ async function prepareBody(opts: RequestOptions): Promise<PreparedBody> {
 	return { body: null, contentType: null }
 }
 
-function shouldDoJsonContentType(opts: RequestOptions, body: Buffer | Readable | null): boolean {
+function shouldDoJsonContentType(opts: NormalizedRequestOptions, body: Buffer | Readable | null): boolean {
 	if (!body) return false
 	if (opts.json && (typeof opts.json === 'object' || (opts.json === true && typeof opts.body === 'object'))) return true
 	return false
 }
 
-async function performRequest(opts: RequestOptions): Promise<Response> {
+async function performRequest(opts: NormalizedRequestOptions): Promise<Response> {
 	throwIfAborted(opts.signal)
 	const url = buildUrl(opts)
 	const method = (opts.method || 'GET').toUpperCase()
@@ -372,35 +379,29 @@ async function performRequest(opts: RequestOptions): Promise<Response> {
 	// TCP + TLS, regardless of any `alt-svc` response headers. An h3 request tries QUIC
 	// first and falls back to TCP when the handshake cannot complete, so an origin without
 	// a QUIC endpoint answers over TCP instead of sitting in QUIC Initial retransmits.
-	// With `keepAlive: true` a live pooled h2 socket for this origin+profile is taken first;
-	// otherwise (and whenever the pool has no capacity) the request handshakes a fresh one,
-	// which is registered for reuse when it lands on a healthy h2 session.
-	const poolConfig: PoolConfig | null = opts.keepAlive === true && opts.h3 !== true
+	// With fetch's `keepalive: true` a live pooled h2 socket for this origin+profile is taken
+	// first; otherwise (and whenever the pool has no capacity) the request handshakes a fresh
+	// one, which is registered for reuse when it lands on a healthy h2 session.
+	const poolConfig: PoolConfig | null = opts.keepalive === true && opts.h3 !== true
 		? { ...pool.DEFAULT_CONFIG, ...opts.pool }
 		: null
 	const poolKey = poolConfig
-		? pool.poolKey(host, port, opts.profile, opts.proxy, opts.verifyTLS !== false, opts.proxyAuthorization, opts.proxyHeaders)
+		? pool.poolKey(host, port, opts.profile, opts.proxy, opts.verifyTLS !== false)
 		: null
 	let conn: Connection | null = poolConfig && poolKey ? pool.take(poolKey) : null
 	if (!conn) {
+		// h3 has no proxy path: it falls back to CONNECT over TCP, but that fallback must not
+		// silently start pooling the proxy hop.
+		const connectProxy = opts.h3 === true && opts.proxy ? { ...opts.proxy, keepAlive: false } : opts.proxy
+		const connectOpts = {
+			host, port, profile, proxy: connectProxy,
+			verifyTLS: opts.verifyTLS !== false,
+			resume: opts.resume === true,
+			timeouts: opts.timeouts,
+		}
 		conn = opts.h3 === true
-			? await connectPreferred({
-				host, port, profile, proxy: opts.proxy,
-				proxyAuthorization: opts.proxyAuthorization,
-				proxyHeaders: opts.proxyHeaders,
-				verifyTLS: opts.verifyTLS !== false,
-				resume: opts.resume === true,
-				timeouts: opts.timeouts,
-			})
-			: await connect({
-				host, port, profile, proxy: opts.proxy,
-				proxyAuthorization: opts.proxyAuthorization,
-				proxyHeaders: opts.proxyHeaders,
-				transport: 'tcp',
-				verifyTLS: opts.verifyTLS !== false,
-				resume: opts.resume === true,
-				timeouts: opts.timeouts,
-			})
+			? await connectPreferred(connectOpts)
+			: await connect({ ...connectOpts, transport: 'tcp' })
 		if (poolConfig && poolKey) pool.register(conn, poolKey, poolConfig)
 	}
 
@@ -1041,12 +1042,12 @@ function findTrailerEnd(b: Buffer, start: number): number {
 // Return a copy of opts with the named request headers removed (case-insensitively). Used on
 // redirects to avoid leaking credentials across origins and to drop body-framing headers when a
 // POST is downgraded to GET. Creates a fresh headers object so the caller's opts is untouched.
-function withoutHeaders(opts: RequestOptions, names: string[]): RequestOptions {
+function withoutHeaders(opts: NormalizedRequestOptions, names: string[]): NormalizedRequestOptions {
 	if (!opts.headers) return opts
 	const drop = new Set(names.map((n) => n.toLowerCase()))
-	const next: Record<string, string | string[]> = {}
+	const next: HeaderMap = {}
 	for (const [k, v] of Object.entries(opts.headers)) {
-		if (!drop.has(k.toLowerCase())) next[k] = v
+		if (!drop.has(k.toLowerCase()) && v !== undefined) next[k] = v
 	}
 	opts.headers = next
 	return opts
@@ -1058,12 +1059,12 @@ interface HandleResponseInput {
 	headers: H1Headers
 	/** Fully decoded response bytes. */
 	raw: Buffer
-	opts: RequestOptions
+	opts: NormalizedRequestOptions
 	resolve: (value: Response) => void
 	reject: (reason: unknown) => void
 }
 
-function responseMeta(opts: RequestOptions): { url: string; redirected: boolean; method: string } {
+function responseMeta(opts: NormalizedRequestOptions): { url: string; redirected: boolean; method: string } {
 	return {
 		url: opts.url ?? opts.uri ?? '',
 		redirected: opts._redirected === true,
@@ -1082,7 +1083,7 @@ function handleResponse({ status, statusText, headers, raw, opts, resolve, rejec
 		const currentUrl = new URL(opts.url ?? opts.uri ?? '')
 		const target = new URL(location, currentUrl)
 		// `_redirected` survives the recursive call so the final Response reports it.
-		let newOpts: RequestOptions = { ...opts, url: target.toString(), maxRedirects: (opts.maxRedirects ?? 10) - 1, _redirected: true }
+		let newOpts: NormalizedRequestOptions = { ...opts, headers: opts.headers, url: target.toString(), maxRedirects: (opts.maxRedirects ?? 10) - 1, _redirected: true }
 		// The Location URL carries its own query string; don't re-append opts.qs to it.
 		delete newOpts.qs
 		const method = (opts.method || 'GET').toUpperCase()
@@ -1130,6 +1131,14 @@ function retryDelay(ms: number, signal?: AbortSignal | null): Promise<void> {
 // The request.js response shims are gone. Fail loudly instead of silently ignoring them:
 // `simple: true` / `bodyOnly: true` would promise behavior the fetch-shaped API no longer
 // has. Explicit `false` is harmless and stays accepted.
+function assertProxyOptions(proxy: ProxyOptions | null | undefined): void {
+	if (proxy == null) return
+	if (typeof proxy !== 'object' || typeof proxy.url !== 'string' || !proxy.url.trim()) {
+		throw new HellojsError('proxy.url must be a non-empty string', 'EBADOPTS')
+	}
+	assertProxyConnectHeaders(proxy.authorization, proxy.headers)
+}
+
 function assertNoLegacyResponseOptions(opts: RequestOptions): void {
 	const legacy = opts as RequestOptions & { simple?: unknown; bodyOnly?: unknown }
 	if (legacy.simple === true) {
@@ -1140,8 +1149,9 @@ function assertNoLegacyResponseOptions(opts: RequestOptions): void {
 	}
 }
 
-async function performWithRetry(opts: RequestOptions): Promise<Response> {
-	assertNoLegacyResponseOptions(opts)
+async function performWithRetry(opts: NormalizedRequestOptions): Promise<Response> {
+	assertNoLegacyResponseOptions(toPublicOptions(opts))
+	assertProxyOptions(opts.proxy)
 	const policy = opts.retry || {}
 	const limit = policy.limit ?? 0
 	const methods = policy.methods ?? ['GET', 'HEAD', 'OPTIONS']
@@ -1176,13 +1186,13 @@ async function performWithRetry(opts: RequestOptions): Promise<Response> {
 	throw lastErr
 }
 
-function inputToOptions(input: RequestOptions | string | URL | Request, init?: FetchInit): RequestOptions {
+function inputToOptions(input: RequestOptions | string | URL | Request, init?: FetchInit): NormalizedRequestOptions {
 	if (typeof init === 'function') {
 		throw new HellojsError('callbacks were removed; use await request(...) instead', 'EBADOPTS')
 	}
-	let opts: RequestOptions
+	let opts: NormalizedRequestOptions
 	if (typeof input === 'string' || input instanceof URL) {
-		opts = { ...(init ?? {}), url: input.toString() }
+		opts = { ...(init ?? {}), url: input.toString() } as unknown as NormalizedRequestOptions
 	} else if (typeof Request !== 'undefined' && input instanceof Request) {
 		const headers = headersToRecord(input.headers)
 		opts = {
@@ -1194,9 +1204,9 @@ function inputToOptions(input: RequestOptions | string | URL | Request, init?: F
 			body: init?.body !== undefined ? init.body : (input.body as ReadableStream<Uint8Array> | null),
 			redirect: (init?.redirect ?? input.redirect) as RedirectMode,
 			signal: init?.signal ?? input.signal,
-		}
+		} as unknown as NormalizedRequestOptions
 	} else {
-		opts = { ...(input as RequestOptions), ...(init ?? {}) }
+		opts = { ...(input as RequestOptions), ...(init ?? {}) } as unknown as NormalizedRequestOptions
 	}
 	opts.headers = headersToRecord(opts.headers)
 	return opts
@@ -1219,14 +1229,26 @@ function method(m: string, dispatch: MethodFn = requestImpl): MethodFn {
 	return async (input, init) => {
 		const opts = inputToOptions(input, init)
 		opts.method = m
-		return dispatch(opts)
+		return dispatch(toPublicOptions(opts))
 	}
 }
 
-// Deep-merge defaults + per-call opts, with `headers` lowercased and merged (later wins).
-function mergeOpts(base: Partial<RequestOptions>, over: RequestOptions): RequestOptions {
-	const out: RequestOptions = { ...base, ...over }
+// Deep-merge defaults + per-call opts: `headers` is lowercased and merged (later wins), and
+// `proxy` is merged field by field so a per-call override need not repeat authorization/headers.
+// An explicit `proxy: null` clears the default entirely.
+function mergeProxy(base: ProxyOptions | null | undefined, over: ProxyOptions | null | undefined): ProxyOptions | null | undefined {
+	if (over === null) return null
+	if (over === undefined) return base ?? undefined
+	if (base == null) return over
+	return { ...base, ...over }
+}
+
+function mergeOpts(base: Partial<RequestOptions>, over: RequestOptions): NormalizedRequestOptions {
+	const out = { ...base, ...over } as unknown as NormalizedRequestOptions
 	out.headers = { ...headersToRecord(base.headers), ...headersToRecord(over.headers) }
+	const proxy = mergeProxy(base.proxy, over.proxy)
+	if (proxy === undefined) delete out.proxy
+	else out.proxy = proxy
 	return out
 }
 
@@ -1253,10 +1275,10 @@ const request = withShortcuts(
 	Object.assign(requestImpl, {
 		defaults: (defaults: Partial<RequestOptions> = {}) => {
 			const wrapped: MethodFn = async (input, init) =>
-				requestImpl(mergeOpts(defaults, inputToOptions(input, init)))
+				requestImpl(toPublicOptions(mergeOpts(defaults, toPublicOptions(inputToOptions(input, init)))))
 			return withShortcuts(
 				Object.assign(wrapped, {
-					defaults: (more?: Partial<RequestOptions>) => request.defaults(mergeOpts(defaults, more || {})),
+					defaults: (more?: Partial<RequestOptions>) => request.defaults(toPublicOptions(mergeOpts(defaults, more || {}))),
 					jar: request.jar,
 				}),
 				wrapped

@@ -142,14 +142,12 @@ await request({
 | `maxRedirects` | number | `10` | |
 | `timeout` | ms | — | single-phase timer. Responses always stream, so this is the **response-headers deadline**. Overrides the 60s response default. |
 | `timeouts` | object | — | per-phase timeouts: `{ connect, tlsHandshake, response, bodyIdle }`, all in ms. `response` is the header deadline; it defaults to **60_000ms** (60s) when neither `timeouts.response` nor `timeout` is set. `bodyIdle` (default `0`, disabled) cancels a streamed body that makes no progress for N ms. Pass `timeouts: { response: 0 }` to disable the header deadline. |
-| `proxy` | URL string | — | Proxy: `http://` (CONNECT), `https://` (CONNECT over TLS), `socks5://` — see [Proxies](#proxies) |
-| `proxyAuthorization` | string | — | Full `Proxy-Authorization` value for CONNECT (e.g. `Bearer <jwt>`); overrides URL-derived Basic auth, and `''` sends no header at all. Not supported with `socks5://` |
-| `proxyHeaders` | object | — | Extra headers sent on the CONNECT request to the proxy. Names the CONNECT builder owns (`host`, `connection`, `keep-alive`, …) and values outside printable ASCII reject with `EBADOPTS`. Not supported with `socks5://` |
+| `proxy` | object | — | `{ url, authorization?, headers?, keepAlive? }` — all proxy settings live here; see [Proxies](#proxies). `proxy: null` clears a default. |
 | `retry` | object | none | `{ limit, methods, statusCodes, baseDelayMs }`; status-based retries inspect `res.status` directly |
 | `profile` | string | `'chrome147-mac'` | which fingerprint profile to emit |
 | `h3` | bool | `false` | opt in to HTTP/3 for this request; QUIC is tried first and TCP+TLS is used when the QUIC handshake cannot complete |
 | `resume` | bool | `false` | offer a cached TLS 1.3 `NewSessionTicket` (`pre_shared_key`) on the next connection to the same host. Opt-in because the extra extension changes JA3/JA4 — see [TLS 1.3 session resumption](#tls-13-session-resumption). h3 is not resumed. |
-| `keepAlive` | bool | `false` | reuse live HTTP/2 connections across requests (multiplex streams onto one socket per origin, like Chrome). When the pool has no capacity the request opens a one-shot connection and closes it after the response, so enabling this can never hold more sockets than the `pool` caps allow. Not pooled: h1 and h3 connections. |
+| `keepalive` | bool | `false` | fetch's spelling. Reuse live HTTP/2 connections across requests (multiplex streams onto one socket per origin, like Chrome). When the pool has no capacity the request opens a one-shot connection and closes it after the response, so enabling this can never hold more sockets than the `pool` caps allow. Not pooled: h1 and h3 connections. |
 | `pool` | object | `{maxSockets: 16, maxPerOrigin: 1, idleMs: 15_000}` | keep-alive pool caps. |
 | `verifyTLS` | bool | `true` | Validate the server certificate chain (RFC 5280) + hostname (RFC 6125 SubjectAltName). |
 | `signal` | `AbortSignal` | — | Abort the request or an in-flight response body. Before headers the promise rejects; after headers `res.body` errors. |
@@ -318,33 +316,50 @@ await request('https://upload.example.com/blob', {
 ### HTTP CONNECT
 
 ```js
-await request({ url: 'https://example.com', proxy: 'http://user:pass@proxy:8080' })
+await request({ url: 'https://example.com', proxy: { url: 'http://user:pass@proxy:8080' } })
 ```
 
-Basic auth credentials in the URL are auto-encoded into `Proxy-Authorization`. For
-proxies that require a different scheme (e.g. Guardian/Masque `Bearer`), pass the
-full header value explicitly — it overrides URL-derived Basic auth:
+`url` is required: `proxy: {}` (or a missing/blank URL) rejects with `EBADOPTS` before
+any socket is opened. Basic auth credentials in the URL are auto-encoded into
+`Proxy-Authorization`. For proxies that require a different scheme (e.g. Guardian/Masque
+`Bearer`), pass the full header value as `proxy.authorization` — it overrides URL-derived
+Basic auth:
 
 ```js
 await request({
   url: 'https://example.com',
-  proxy: 'https://proxy.example:8443',
-  proxyAuthorization: 'Bearer <jwt>',
+  proxy: {
+    url: 'https://proxy.example:8443',
+    authorization: 'Bearer <jwt>',
+    headers: { 'x-tenant': 'acme' },
+    keepAlive: true,
+  },
 })
 ```
 
-`proxyAuthorization` is the whole answer: a blank value (`''`) sends no `Proxy-Authorization` even
-when the proxy URL carries credentials. Extra CONNECT headers go in `proxyHeaders`, where a
-`proxy-authorization` entry fills the same slot when `proxyAuthorization` is unset — ahead of URL
-Basic, which is the last resort. Both are validated before the proxy is dialled: CR, LF, control or
-non-ASCII characters and CONNECT-owned names (`host`, `connection`, `keep-alive`, …) reject with
-`EBADOPTS` instead of being written into the CONNECT request. Neither option applies to
-`socks5://`, which authenticates from the URL's username/password and rejects them with `EBADOPTS`.
+`authorization` is the whole answer: a blank value (`''`) sends no `Proxy-Authorization`
+even when the proxy URL carries credentials. Extra CONNECT headers go in `proxy.headers`,
+where a `proxy-authorization` entry fills the same slot when `authorization` is unset —
+ahead of URL Basic, which is the last resort. Both are validated before the proxy is
+dialled: CR, LF, control or non-ASCII characters and CONNECT-owned names (`host`,
+`connection`, `keep-alive`, …) reject with `EBADOPTS` instead of being written into the
+CONNECT request. Neither option applies to `socks5://`, which authenticates from the URL's
+username/password and rejects supplied `authorization`/`headers` with `EBADOPTS`.
+
+### Reusing the proxy connection
+
+`proxy.keepAlive: true` keeps the connection to an `http://`/`ws://`/`https://`/`wss://`
+proxy open after the destination session closes, so the next request can issue a fresh
+CONNECT over the same socket. Separate from the request's `keepalive` (which pools the
+h2 session to the origin), this pool is bounded by the same `pool` caps and counts its
+sockets separately. One proxy hop is never shared by two live requests; if a reused hop
+is dead, it is discarded and the CONNECT retried once on a fresh socket. `socks5://`
+and h3 never use the proxy-hop pool.
 
 ### HTTPS proxy (CONNECT over TLS)
 
 ```js
-await request({ url: 'https://example.com', proxy: 'https://user:pass@proxy:443' })
+await request({ url: 'https://example.com', proxy: { url: 'https://user:pass@proxy:443' } })
 ```
 
 `https://` (alias `wss://`) dials the proxy with our own TLS stack first, then sends
@@ -368,8 +383,8 @@ keypairs — one per hop.
 ### SOCKS5 (RFC 1928 + RFC 1929)
 
 ```js
-await request({ url: 'https://example.com', proxy: 'socks5://user:pass@proxy:1080' })
-await request({ url: 'https://example.com', proxy: 'socks5://proxy:1080' })  // no-auth
+await request({ url: 'https://example.com', proxy: { url: 'socks5://user:pass@proxy:1080' } })
+await request({ url: 'https://example.com', proxy: { url: 'socks5://proxy:1080' } })  // no-auth
 ```
 
 `socks5h://` is accepted as an alias. We always do remote DNS resolution (the proxy
@@ -769,7 +784,7 @@ that entry is the one that declares ML-KEM.
 
 > The numbers below were captured with an earlier connection-pooled build. The current
 > tree opens a fresh connection per request unless the caller opts into the bounded
-> keep-alive pool (`keepAlive: true` — see [Request options](#request-options)), so
+> keep-alive pool (`keepalive: true` — see [Request options](#request-options)), so
 > warm-serial and concurrent timings differ.
 
 Benchmarked on macOS / Node 22.11 against a local HTTP/2 server (127.0.0.1, 1 KB
@@ -919,7 +934,7 @@ safety for the round trip.
 
 **Pooling, now available opt-in.** Pooling removes DNS + TCP + TLS altogether, and the
 fresh-connection-per-request prediction (~120 ms → ~35–40 ms) held once the bounded
-keep-alive pool shipped (`keepAlive: true` — see [Request options](#request-options)).
+keep-alive pool shipped (`keepalive: true` — see [Request options](#request-options)).
 Measured results, including through a proxy tunnel, are in the next section.
 
 Reproduce: `npm run bench:curl`. Knobs: `BENCH_URL`, `SAMPLES`, `CURL_BIN`,
@@ -943,7 +958,7 @@ Target `https://example.com/` (fast CDN edge), 15 samples, one proxy:
 |---|---:|---:|---:|
 | curl (fresh process per request) | 571.7 | 721.5 | 7526.3 |
 | hellojs, fresh connection | 74.1 | 94.7 | 123.1 |
-| hellojs, `keepAlive: true` | 26.7 | 33.7 | 99.1 |
+| hellojs, `keepalive: true` | 26.7 | 33.7 | 99.1 |
 
 hellojs beats curl by **−86.9% p50** even cold — per-sample curl carries process spawn,
 proxy-side TLS and CONNECT setup, and the proxy's own handshake variance (its p95 tail

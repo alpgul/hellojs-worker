@@ -138,7 +138,7 @@ interface HrrContext {
 // What a TLS session drives its record layer over. Normally a TCP socket; for an HTTPS proxy it is
 // the plaintext Duplex of an outer TLS session, so the inner ClientHello travels inside the proxy's
 // app-data records. `setNoDelay` and `connecting` are TCP-only affordances, hence optional.
-interface ByteTransport {
+export interface ByteTransport {
 	write(chunk: Uint8Array | string, cb?: (err?: Error | null) => void): boolean
 	destroy(error?: Error): unknown
 	setNoDelay?(noDelay?: boolean): unknown
@@ -148,6 +148,17 @@ interface ByteTransport {
 	on(event: string, listener: (...args: never[]) => void): unknown
 	once(event: string, listener: (...args: never[]) => void): unknown
 	removeListener(event: string, listener: (...args: never[]) => void): unknown
+}
+
+// An open connection to an HTTP(S) proxy, either freshly opened or checked out of the hop pool.
+// `transport` is the raw TCP socket for http/ws, or the outer TLS session's plaintext Duplex for
+// https/wss. `detach` removes the previous destination session's listeners before a new CONNECT;
+// `close` kills the hop when it is stale or the pool is over capacity.
+export interface ProxyHop {
+	transport: ByteTransport
+	tls: TLS | null
+	detach: () => void
+	close: () => void
 }
 
 interface TLSOptions {
@@ -171,9 +182,12 @@ interface TLSOptions {
 	// '' sends no Proxy-Authorization at all.
 	proxyAuthorization?: string | null
 	// Extra headers sent on the CONNECT request (hop-by-hop to the proxy). A `proxy-authorization`
-	// entry fills the auth slot when proxyAuthorization is unset — ahead of URL Basic auth, which
+	// entry fills the auth slot when proxy.authorization is unset — ahead of URL Basic auth, which
 	// is the last resort. Both options are validated in the constructor; see headers.ts.
 	proxyHeaders?: Record<string, string> | null
+	// An already-open proxy hop from lib/proxy-pool.ts. When set, CONNECT is issued over it instead
+	// of dialing a new TCP/TLS session to the proxy.
+	proxyHop?: ProxyHop | null
 }
 
 // A duplex that presents *plaintext HTTP/2 bytes* to Node's http2 session.
@@ -181,11 +195,15 @@ interface TLSOptions {
 class TLSTransport extends Duplex {
 	declare tls: TLS
 	declare _ended: boolean
+	// Set when the underlying connection is a pooled proxy hop: tearing down the destination
+	// session must not destroy the (still reusable) connection to the proxy.
+	declare keepUnderlyingAlive: boolean
 
 	constructor(tls: TLS) {
 		super()
 		this.tls = tls
 		this._ended = false
+		this.keepUnderlyingAlive = false
 	}
 
 	// Plaintext app bytes -> encrypt with the negotiated record-layer -> write to raw TCP.
@@ -250,7 +268,7 @@ class TLSTransport extends Duplex {
 	// Surface a destroy so http2 can tear us down
 	override _destroy(err: Error | null, cb: (error?: Error | null) => void): void {
 		try {
-			this.tls.socket?.destroy()
+			if (!this.keepUnderlyingAlive) this.tls.socket?.destroy()
 		} finally {
 			cb(err)
 		}
@@ -287,6 +305,10 @@ class TLS extends EventEmitter {
 	// CONNECT auth/headers, applied when this session opens an HTTP or HTTPS proxy tunnel.
 	declare proxyAuthorization: string | null
 	declare proxyHeaders: Record<string, string> | null
+	// The hop this session runs through (fresh or reused). lib/connect.ts releases it on close.
+	declare proxyHop: ProxyHop | null
+	// Listeners installed by _wireSocketListeners, retained so a pooled hop can be detached.
+	declare _socketListeners: Array<[string, (...args: never[]) => void]>
 	// Set once the byte transport is usable — TCP established, SOCKS5 established, or CONNECT
 	// tunnel open. Drives the `transport-ready` event so callers can stop their connect clock.
 	declare transportEstablished: boolean
@@ -371,6 +393,8 @@ class TLS extends EventEmitter {
 		this._proxyTls = null
 		this.proxyAuthorization = opts.proxyAuthorization ?? null
 		this.proxyHeaders = opts.proxyHeaders ?? null
+		this.proxyHop = opts.proxyHop ?? null
+		this._socketListeners = []
 		// Validated here instead of in sendConnectRequest: the constructor is the one choke point
 		// that also covers direct `new TLS()` users, and createTLS constructs inside its Promise
 		// executor, so an injected value rejects connect before a socket is opened.
@@ -477,7 +501,7 @@ class TLS extends EventEmitter {
 				// the same reason h3+proxy is: a credential the caller believes was sent. An empty
 				// header map is a no-op, so it does not count as "supplied".
 				if (this.proxyAuthorization !== null || (this.proxyHeaders && Object.keys(this.proxyHeaders).length > 0)) {
-					throw new HellojsError('proxyAuthorization/proxyHeaders are not supported with socks5:// proxies', 'EBADOPTS')
+					throw new HellojsError('proxy.authorization/proxy.headers are not supported with socks5:// proxies', 'EBADOPTS')
 				}
 				socks5Connect({
 					proxyHost: proxyUrl.hostname,
@@ -504,6 +528,15 @@ class TLS extends EventEmitter {
 			const proxyPort = Number(proxyUrl.port) || (secureHop ? 443 : 80)
 			if (secureHop) {
 				this._connectViaTlsProxy(proxyUrl, proxyPort)
+				return
+			}
+
+			if (this.proxyHop) {
+				// Pooled hop: the TCP connection is already up, so only CONNECT is new.
+				const hop = this.proxyHop
+				hop.detach()
+				this.socket = hop.transport
+				this._openTunnel(this.socket, proxyUrl, proxyPort, true)
 				return
 			}
 
@@ -554,16 +587,16 @@ class TLS extends EventEmitter {
 		// Nagle on, the second write waits for the peer's delayed ACK (~40ms on Linux before the
 		// request is even on the wire). Browsers, curl and Node's http2 client all disable it.
 		this.socket!.setNoDelay?.(true)
-		this.socket!.on('data', (data) => this.onData(data))
-		this.socket!.on('error', (err) => {
+		const onData = (data: Buffer) => this.onData(data)
+		const onError = (err: Error) => {
 			if (this.h2Transport) {
 				try {
 					this.h2Transport.destroy(err)
 				} catch {}
 			}
 			this.emit('error', err)
-		})
-		this.socket!.on('close', () => {
+		}
+		const onClose = () => {
 			if (this.h2Transport) {
 				// A proxy hop that dies must reach the session tunneled through it as a close, not a
 				// clean EOF: endReadable() only pushes null, and an inner handshake mid-flight would
@@ -581,7 +614,24 @@ class TLS extends EventEmitter {
 				err.code = 'ECONNRESET'
 				this.emit('error', err)
 			}
-		})
+		}
+		this.socket!.on('data', onData)
+		this.socket!.on('error', onError)
+		this.socket!.on('close', onClose)
+		this._socketListeners = [
+			['data', onData as (...args: never[]) => void],
+			['error', onError as (...args: never[]) => void],
+			['close', onClose as (...args: never[]) => void],
+		]
+	}
+
+	// Strip this session's listeners from a pooled proxy transport so the next CONNECT can start
+	// clean. The transport itself stays open — only the destination session is discarded.
+	detachSocketListeners(): void {
+		for (const [event, listener] of this._socketListeners) {
+			try { this.socket?.removeListener(event, listener) } catch {}
+		}
+		this._socketListeners = []
 	}
 
 	// Open an HTTP CONNECT tunnel for this session over `sock`. `connected` false means the
@@ -621,8 +671,8 @@ class TLS extends EventEmitter {
 
 			let connectHeaders = `CONNECT ${this.host}:${this.port} HTTP/1.1\r\nHost: ${this.host}:${this.port}\r\n`
 
-			// Precedence: explicit proxyAuthorization > proxyHeaders['proxy-authorization'] > URL
-			// Basic. A non-null proxyAuthorization is a complete answer, so '' — or a blank string —
+			// Precedence: explicit proxy.authorization > proxy.headers['proxy-authorization'] > URL
+			// Basic. A non-null proxy.authorization is a complete answer, so '' — or a blank string —
 			// sends no Proxy-Authorization even when the proxy URL carries credentials.
 			let proxyAuthorization: string | null = this.proxyAuthorization ?? null
 			// Null prototype: a header literally named `__proto__` must land as an own entry rather
@@ -678,6 +728,19 @@ class TLS extends EventEmitter {
 				// and on an HTTPS proxy `sock` is the shared transport of the proxy session.
 				sock.removeListener('close', onProxyClose)
 				this._wireSocketListeners()
+				if (!this.proxyHop) {
+					const transport = sock
+					const outer = this._proxyTls
+					this.proxyHop = {
+						transport,
+						tls: outer,
+						detach: () => this.detachSocketListeners(),
+						close: () => {
+							if (outer) { try { outer.socket?.destroy() } catch {} }
+							else { try { transport.destroy() } catch {} }
+						},
+					}
+				}
 				this._markTransportReady()
 				if (leftover.length) this.onData(leftover)
 				this.startClientHello()
@@ -725,6 +788,16 @@ class TLS extends EventEmitter {
 	// (RFC 9114) is not implemented. The destination's own handshake is untouched, so JA3/JA4 for
 	// a proxied request match the unproxied ones byte for byte.
 	_connectViaTlsProxy(proxyUrl: URL, proxyPort: number): void {
+		if (this.proxyHop) {
+			// The outer TLS session to the proxy is still live; reuse its plaintext Duplex.
+			const hop = this.proxyHop
+			hop.detach()
+			this._proxyTls = hop.tls
+			this.socket = hop.tls!.h2Transport
+			this._openTunnel(this.socket!, proxyUrl, proxyPort, true)
+			return
+		}
+
 		const outer = new TLS(proxyUrl.hostname, proxyPort, null, {
 			verifyTLS: this.verifyTLS,
 			profile: this.profile,

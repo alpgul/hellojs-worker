@@ -5,10 +5,7 @@
 // package's own name resolves via package.json "exports" -> "types" -> index.d.ts, so this
 // program sees exactly what a consumer's `tsc` sees and never the .ts sources behind it.
 
-import request, {
-	HellojsError,
-	TLS
-} from '@unreleased/hellojs'
+import request, { HellojsError, TLS } from '@unreleased/hellojs'
 
 import type {
 	HellojsErrorCode,
@@ -18,7 +15,7 @@ import type {
 	FetchInit,
 	RedirectMode,
 	DefaultsFn,
-	PerPhaseTimeouts,
+	PerPhaseTimeouts
 } from '@unreleased/hellojs'
 
 async function smoke(): Promise<void> {
@@ -33,8 +30,15 @@ async function smoke(): Promise<void> {
 	const clone: Response = res.clone()
 	const text: string = await res.text()
 	const json: unknown = await res.json()
-	void ok; void status; void statusText; void headers; void url; void redirected
-	void clone; void text; void json
+	void ok
+	void status
+	void statusText
+	void headers
+	void url
+	void redirected
+	void clone
+	void text
+	void json
 
 	// Fetch-style signature: (input, init). Request.js options may be mixed into init.
 	const init: FetchInit = {
@@ -44,7 +48,7 @@ async function smoke(): Promise<void> {
 		signal: new AbortController().signal,
 		redirect: 'follow',
 		timeout: 5000,
-		retry: { limit: 2 },
+		retry: { limit: 2 }
 	}
 	const posted: Response = await request('https://example.com/api', init)
 	void posted
@@ -59,16 +63,71 @@ async function smoke(): Promise<void> {
 		gzip: true,
 		timeout: 5000,
 		timeouts: { connect: 1000, tlsHandshake: 2000, response: 3000, bodyIdle: 30_000 },
-		proxy: 'https://user:pass@127.0.0.1:8443',
+		proxy: {
+			url: 'https://user:pass@127.0.0.1:8443',
+			authorization: 'Bearer token',
+			headers: { 'x-tenant': 'acme' },
+			keepAlive: true
+		},
 		retry: { limit: 2, methods: ['GET'], statusCodes: [503], baseDelayMs: 100 },
 		profile: 'chrome147-mac',
-		verifyTLS: true,
+		verifyTLS: true
 	})
 	{
 		const code: number = r.status
 		const h: Headers = r.headers
-		void code; void h
+		void code
+		void h
 	}
+
+	// Inherited RequestInit fields (shared by the DOM and Workers spellings) remain accepted.
+	await request({
+		url: 'https://example.com',
+		method: 'POST',
+		headers: { 'x-a': '1' },
+		body: 'hello',
+		redirect: 'follow',
+		cache: 'no-store',
+		integrity: 'sha256-abc',
+		signal: new AbortController().signal
+	})
+
+	// hellojs-only fields are additive to RequestInit.
+	const allHellojsFields: RequestOptions = {
+		url: 'https://example.com',
+		json: { a: 1 },
+		form: { a: '1' },
+		qs: { page: 2 },
+		jar: request.jar(),
+		gzip: true,
+		maxRedirects: 3,
+		timeout: 5000,
+		timeouts: { connect: 1000 },
+		proxy: { url: 'http://127.0.0.1:8080' },
+		retry: { limit: 1 },
+		verifyTLS: false,
+		resume: true,
+		h3: true,
+		pool: { maxSockets: 2, maxPerOrigin: 1, idleMs: 1000 },
+		profile: 'default'
+	}
+	void allHellojsFields
+	await request({ url: 'https://example.com', proxy: null })
+
+	// The proxy object is now the only place for CONNECT settings, and fetch's `keepalive` is
+	// the only spelling for the connection pool switch.
+	// @ts-expect-error proxy is an object, not a flat URL string
+	await request({ url: 'https://example.com', proxy: 'http://127.0.0.1:8080' })
+	// @ts-expect-error flat proxy options were removed
+	await request({ url: 'https://example.com', proxyAuthorization: 'Bearer x' })
+	// @ts-expect-error flat proxy options were removed
+	await request({ url: 'https://example.com', proxyHeaders: { 'x-a': '1' } })
+	// @ts-expect-error camelCase `keepAlive` was removed
+	await request({ url: 'https://example.com', keepAlive: true })
+	// @ts-expect-error proxy.url is required
+	await request({ url: 'https://example.com', proxy: {} })
+	// @ts-expect-error proxy.url must be a string
+	await request({ url: 'https://example.com', proxy: { url: 123 } })
 
 	// Removed request.js response options are rejected at the type level.
 	// @ts-expect-error bodyOnly was removed
@@ -109,7 +168,8 @@ async function smoke(): Promise<void> {
 		if (e instanceof HellojsError) {
 			const code: HellojsErrorCode | string = e.code
 			const cat: HellojsErrorCategory = e.category
-			void code; void cat
+			void code
+			void cat
 		}
 	}
 
@@ -136,8 +196,7 @@ async function smoke(): Promise<void> {
 	const streamingReq: RequestOptions = {
 		url: 'https://example.com',
 		method: 'POST',
-		body: new ReadableStream<Uint8Array>(),
-		duplex: 'half',
+		body: new ReadableStream<Uint8Array>()
 	}
 	void streamingReq
 
@@ -148,17 +207,17 @@ async function smoke(): Promise<void> {
 	// Values with a standard are validated, not left as free strings/numbers.
 	// Each @ts-expect-error below MUST fail to compile; if the .d.ts loosens again, tsc
 	// reports the directive as unused and this file breaks.
-	await request({ url: 'https://example.com', method: 'get' })                 // any case is fine
-	await request({ url: 'https://example.com', method: 'PURGE' })               // extension methods allowed
+	await request({ url: 'https://example.com', method: 'get' }) // any case is fine
+	await request({ url: 'https://example.com', method: 'PURGE' }) // extension methods allowed
 	await request({ url: 'https://example.com', redirect: 'manual' })
 	await request({ url: 'https://example.com', redirect: 'error' })
+	// @ts-expect-error redirect is a mode token, not a number
+	await request({ url: 'https://example.com', redirect: 123 })
 	await request({ url: 'https://example.com', qs: { tag: ['a', 'b'], page: 2 } })
 	await request({ url: 'https://example.com', headers: { authorization: 'Bearer x', 'x-trace': '1' } })
 	await request({ url: 'https://example.com', retry: { statusCodes: [408, 429, 503], methods: ['GET'] } })
 	const mode: RedirectMode = 'manual'
 	void mode
-	// @ts-expect-error redirect is the Fetch enum, not an arbitrary string
-	await request({ url: 'https://example.com', redirect: 'nope' })
 	// @ts-expect-error a method is a token, not a number
 	await request({ url: 'https://example.com', method: 123 })
 	// @ts-expect-error a timeout is milliseconds, not a numeric string
@@ -180,7 +239,11 @@ async function smoke(): Promise<void> {
 	const bodyIdle: HellojsErrorCode = 'EBODYIDLE'
 	const bodyBackpressure: HellojsErrorCode = 'EBODYBACKPRESSURE'
 	const cat: HellojsErrorCategory = 'protocol'
-	void statusNum; void code; void bodyIdle; void bodyBackpressure; void cat
+	void statusNum
+	void code
+	void bodyIdle
+	void bodyBackpressure
+	void cat
 	// @ts-expect-error codes outside the documented taxonomy do not narrow to HellojsErrorCode
 	const badCode: HellojsErrorCode = 'ENOPE'
 	void badCode

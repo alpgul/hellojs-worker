@@ -18,6 +18,7 @@ export type {
 	DefaultsFn,
 	FetchInit,
 	Invokable,
+	ProxyOptions,
 	RedirectMode,
 	RequestBodyValue,
 	RequestFn,

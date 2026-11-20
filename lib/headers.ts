@@ -52,7 +52,8 @@ function mergeProfileHeaders(userHeaders: HeaderMap | null | undefined, profile?
 			if (fixed.has(lk) && String(v) !== String(out[existing])) {
 				throw new HellojsError(
 					`header "${k}" is fixed by profile ${(profile && profile.name) || 'unknown'}: ${JSON.stringify(out[existing])}`,
-					'EHEADERFIXED')
+					'EHEADERFIXED'
+				)
 			}
 			out[existing] = v
 			continue
@@ -90,8 +91,14 @@ function buildH2Headers({ method, host, path, userHeaders, profile }: H2HeaderIn
 	// A caller-supplied Host header overrides :authority and is NEVER emitted as a regular h2
 	// header — Chrome carries the origin only in :authority, so a stray `host` header is a tell.
 	let hostOverride: HeaderValue
-	if (userHeaders) for (const k of Object.keys(userHeaders)) if (k.toLowerCase() === 'host') hostOverride = userHeaders[k]
-	const pseudoVals: Record<string, HeaderValue> = { ':method': method, ':authority': hostOverride ?? host, ':scheme': 'https', ':path': path }
+	if (userHeaders)
+		for (const k of Object.keys(userHeaders)) if (k.toLowerCase() === 'host') hostOverride = userHeaders[k]
+	const pseudoVals: Record<string, HeaderValue> = {
+		':method': method,
+		':authority': hostOverride ?? host,
+		':scheme': 'https',
+		':path': path
+	}
 	const h: HeaderMap = {}
 	for (const k of order) {
 		if (pseudoVals[k] != null) h[k] = pseudoVals[k]
@@ -120,9 +127,13 @@ export interface H1HeaderInput {
 
 function buildH1Headers({ host, userHeaders, profile }: H1HeaderInput): string {
 	let hostOverride: HeaderValue
-	if (userHeaders) for (const [k, v] of Object.entries<HeaderValue>(userHeaders)) {
-		if (k.toLowerCase() === 'host') { hostOverride = v; break }
-	}
+	if (userHeaders)
+		for (const [k, v] of Object.entries<HeaderValue>(userHeaders)) {
+			if (k.toLowerCase() === 'host') {
+				hostOverride = v
+				break
+			}
+		}
 	const hostValue = hostOverride ?? host
 	const lines = [`Host: ${hostValue}`]
 	for (const [k, v] of Object.entries(mergeProfileHeaders(userHeaders, profile))) {
@@ -132,7 +143,7 @@ function buildH1Headers({ host, userHeaders, profile }: H1HeaderInput): string {
 }
 
 // CONNECT request validation. The proxy-bound CONNECT block is framed by hand in
-// lib/tls/tls.ts's sendConnectRequest, so `proxyAuthorization` and `proxyHeaders` are the only
+// lib/tls/tls.ts's sendConnectRequest, so `proxy.authorization` and `proxy.headers` are the only
 // caller-controlled bytes that reach it — anything unchecked there can inject CONNECT lines or
 // end the request early and desynchronize the tunnel. Stricter than RFC 9110 on purpose: field
 // values are printable ASCII only, because the JWT/Basic/bearer grammars never need more and the
@@ -155,24 +166,33 @@ const RESERVED_CONNECT_NAMES = new Set([
 
 function assertFieldValue(value: string, what: string): void {
 	if (!PRINTABLE_ASCII.test(value)) {
-		throw new HellojsError(`${what} must be printable ASCII: no CR, LF, control or non-ASCII characters`, 'EBADOPTS')
+		throw new HellojsError(
+			`${what} must be printable ASCII: no CR, LF, control or non-ASCII characters`,
+			'EBADOPTS'
+		)
 	}
 }
 
-export function assertProxyConnectHeaders(proxyAuthorization?: string | null, proxyHeaders?: Record<string, string> | null): void {
-	if (proxyAuthorization != null) assertFieldValue(String(proxyAuthorization), 'proxyAuthorization')
+export function assertProxyConnectHeaders(
+	proxyAuthorization?: string | null,
+	proxyHeaders?: Record<string, string> | null
+): void {
+	if (proxyAuthorization != null) assertFieldValue(String(proxyAuthorization), 'proxy.authorization')
 	if (!proxyHeaders) return
 	for (const [name, value] of Object.entries(proxyHeaders)) {
 		if (value == null) continue
 		if (!FIELD_NAME.test(name)) {
-			throw new HellojsError(`proxyHeaders name ${JSON.stringify(name)} is not a valid HTTP field name`, 'EBADOPTS')
+			throw new HellojsError(
+				`proxy.headers name ${JSON.stringify(name)} is not a valid HTTP field name`,
+				'EBADOPTS'
+			)
 		}
 		const lower = name.toLowerCase()
 		// `proxy-authorization` is routed to the auth slot by the CONNECT builder, not reserved.
 		if (lower !== 'proxy-authorization' && RESERVED_CONNECT_NAMES.has(lower)) {
-			throw new HellojsError(`proxyHeaders name "${name}" is managed by the CONNECT request builder`, 'EBADOPTS')
+			throw new HellojsError(`proxy.headers name "${name}" is managed by the CONNECT request builder`, 'EBADOPTS')
 		}
-		assertFieldValue(String(value), `proxyHeaders[${JSON.stringify(name)}]`)
+		assertFieldValue(String(value), `proxy.headers[${JSON.stringify(name)}]`)
 	}
 }
 

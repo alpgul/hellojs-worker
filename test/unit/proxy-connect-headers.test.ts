@@ -1,4 +1,4 @@
-// CONNECT request validation for `proxyAuthorization` / `proxyHeaders`.
+// CONNECT request validation for `proxy.authorization` / `proxy.headers`.
 //
 // Both options are written straight into the hand-framed CONNECT request (lib/tls/tls.ts's
 // sendConnectRequest), so any byte that could end that request early or add a line to it has to
@@ -36,7 +36,7 @@ describe('assertProxyConnectHeaders', () => {
 		}
 	})
 
-	it('rejects proxyAuthorization bytes that could break out of the CONNECT request', () => {
+	it('rejects proxy.authorization bytes that could break out of the CONNECT request', () => {
 		for (const value of [
 			'Bearer x\r\nX-Injected: 1',
 			'Bearer x\nX-Injected: 1',
@@ -51,7 +51,7 @@ describe('assertProxyConnectHeaders', () => {
 		}
 	})
 
-	it('rejects proxyHeaders values exactly as strictly', () => {
+	it('rejects proxy.headers values exactly as strictly', () => {
 		expect(codeOf(() => assertProxyConnectHeaders(null, { 'x-a': 'ok' }))).toBeUndefined()
 		for (const value of ['v\r\n\r\nGET /evil', 'v\nY: 1', 'ünïcode', 'v\tx']) {
 			expect(codeOf(() => assertProxyConnectHeaders(null, { 'x-a': value })), JSON.stringify(value)).toBe('EBADOPTS')

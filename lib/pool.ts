@@ -8,7 +8,7 @@
 // The pool is deliberately bounded and short-lived: runtimes like Cloudflare Workers cap the
 // sockets an isolate may hold open (single digits), so pooled sockets must never accumulate.
 // Defaults: one socket per origin, sixteen across the process, idle sockets closed after
-// fifteen seconds. Callers opt in per request (`keepAlive: true`) and may lower the caps via
+// fifteen seconds. Callers opt in per request (`keepalive: true`) and may lower the caps via
 // `pool: { maxSockets, maxPerOrigin, idleMs }`. A request that finds no capacity opens a
 // one-shot connection exactly as before — the pool never blocks or queues.
 //
@@ -42,39 +42,43 @@ const DEFAULT_CONFIG: PoolConfig = { maxSockets: 16, maxPerOrigin: 1, idleMs: 15
 const entries = new Map<string, Entry[]>()
 const byConn = new WeakMap<Connection, Entry>()
 
+// Structural shape of the proxy option — kept local so this module does not depend on client.ts.
+interface ProxyLike {
+	url?: string | null
+	authorization?: string | null
+	headers?: Record<string, string> | null
+}
+
 // The proxy segment is a digest, never the raw material: a proxy URL can carry `user:pass` and
-// `proxyAuthorization` can be a bearer token, and this key lives in a process-wide Map for as long
+// `authorization` can be a bearer token, and this key lives in a process-wide Map for as long
 // as its socket stays pooled. Digesting also partitions by CONNECT shape — a tunnel opened with one
 // header set must not answer for a request configured with another, whose hop-by-hop headers would
-// then never be sent.
-function proxySegment(
-	proxy: string | null | undefined,
-	proxyAuth: string | null | undefined,
-	proxyHeaders: Record<string, string> | null | undefined
-): string {
+// then never be sent. Shared with lib/proxy-pool.ts so a proxy hop and the h2 session tunneled
+// through it agree on the same identity.
+export function proxySegment(proxy: ProxyLike | null | undefined): string {
 	// Lowercased and sorted, so an equivalent header map — different order, different casing —
 	// reaches the same bucket.
-	const headers = proxyHeaders
-		? Object.entries(proxyHeaders)
+	const headers = proxy?.headers
+		? Object.entries(proxy.headers)
 				.map(([name, value]) => `${name.toLowerCase()}\u0000${String(value)}`)
 				.sort()
 				.join('&')
 		: ''
-	if (!proxy && !proxyAuth && !headers) return ''
-	return createHash('sha256').update(`${proxy ?? ''}\u0000${proxyAuth ?? ''}\u0000${headers}`).digest('base64url')
+	const url = proxy?.url ?? ''
+	const auth = proxy?.authorization ?? ''
+	if (!url && !auth && !headers) return ''
+	return createHash('sha256').update(`${url}\u0000${auth}\u0000${headers}`).digest('base64url')
 }
 
 function poolKey(
 	host: string,
 	port: number,
 	profile: unknown,
-	proxy: string | null | undefined,
-	verifyTLS: boolean,
-	proxyAuth?: string | null,
-	proxyHeaders?: Record<string, string> | null
+	proxy: ProxyLike | null | undefined,
+	verifyTLS: boolean
 ): string {
 	const profileName = typeof profile === 'string' ? profile : profile ? 'inline' : 'default'
-	return `${host}:${port}|${profileName}|${verifyTLS ? 1 : 0}|${proxySegment(proxy, proxyAuth, proxyHeaders)}`
+	return `${host}:${port}|${profileName}|${verifyTLS ? 1 : 0}|${proxySegment(proxy)}`
 }
 
 function sessionOf(conn: Connection): H2Session | null {

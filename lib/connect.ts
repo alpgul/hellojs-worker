@@ -4,11 +4,15 @@
 import { HellojsError } from './errors.ts'
 import { QuicConnection } from './h3/connection.ts'
 import { H3Client } from './h3/h3.ts'
+import { DEFAULT_CONFIG } from './pool.ts'
+import * as proxyPool from './proxy-pool.ts'
 import { TLS } from './tls/tls.ts'
 
+import type { ProxyOptions } from './client.ts'
 import type { H2Session } from './h2/session.ts'
+import type { PoolConfig } from './pool.ts'
 import type { Profile } from './profiles/types.ts'
-import type { TLSTransport, TLSOptions } from './tls/tls.ts'
+import type { ProxyHop, TLSOptions, TLSTransport } from './tls/tls.ts'
 
 // Per-phase timeouts, all optional. `response` is applied by lib/client.ts; the connect and
 // handshake phases are armed here.
@@ -31,15 +35,12 @@ export interface ConnectOptions {
 	host: string
 	port?: number
 	profile?: Profile | string | null
-	proxy?: string | null
+	proxy?: ProxyOptions | null
+	pool?: Partial<PoolConfig>
 	transport?: 'tcp' | 'quic'
 	verifyTLS?: boolean
 	resume?: boolean
 	timeouts?: PerPhaseTimeouts | null
-	/** Full CONNECT Proxy-Authorization value (e.g. "Bearer <jwt>"); overrides URL Basic auth. */
-	proxyAuthorization?: string | null
-	/** Extra headers for the CONNECT request. */
-	proxyHeaders?: Record<string, string> | null
 }
 
 export type Alpn = 'h2' | 'http/1.1' | 'h3'
@@ -56,6 +57,10 @@ class Connection {
 	// Set by the keep-alive pool when the connection is registered: fired once per close so the
 	// pool can evict the entry no matter which request path tore the socket down.
 	declare onClosed: ((reason: string) => void) | null
+	// Proxy hop checked out for this connection. Released back to lib/proxy-pool.ts on close.
+	declare proxyHop: ProxyHop | null
+	declare proxyPoolKey: string | null
+	declare proxyPoolConfig: PoolConfig | null
 
 	constructor(tls: TLS | null) {
 		this.tls = tls
@@ -66,15 +71,43 @@ class Connection {
 		this.quicConn = null
 		this.closed = false
 		this.onClosed = null
+		this.proxyHop = null
+		this.proxyPoolKey = null
+		this.proxyPoolConfig = null
 	}
 
 	close(reason = 'closed'): void {
 		if (this.closed) return
 		this.closed = true
-		try { this.quicConn?.close() } catch {}
-		try { this.h2Session?.close?.() } catch {}
-		try { this.tls?.socket?.destroy() } catch {}
-		try { this.onClosed?.(reason) } catch {}
+		try {
+			this.quicConn?.close()
+		} catch {}
+		try {
+			this.h2Session?.close?.()
+		} catch {}
+		if (this.proxyHop && this.proxyPoolKey && this.proxyPoolConfig) {
+			// Detach the destination session from the proxy transport and hand the still-live hop
+			// back. Destroying tls.socket here would defeat the point of pooling the proxy hop.
+			try {
+				this.tls?.detachSocketListeners()
+			} catch {}
+			if (this.tls?.h2Transport) {
+				// The inner session is done, but the TCP/TLS connection to the proxy is not.
+				this.tls.h2Transport.keepUnderlyingAlive = true
+				try {
+					this.tls.h2Transport.destroy()
+				} catch {}
+			}
+			proxyPool.release(this.proxyHop, this.proxyPoolKey, this.proxyPoolConfig)
+			this.proxyHop = null
+		} else {
+			try {
+				this.tls?.socket?.destroy()
+			} catch {}
+		}
+		try {
+			this.onClosed?.(reason)
+		} catch {}
 	}
 }
 
@@ -86,7 +119,10 @@ function createH3(host: string, port: number, timeouts: PerPhaseTimeouts | null 
 		let settled = false
 		let handshakeTimer: ReturnType<typeof setTimeout> | null = null
 		const clearTimer = () => {
-			if (handshakeTimer) { clearTimeout(handshakeTimer); handshakeTimer = null }
+			if (handshakeTimer) {
+				clearTimeout(handshakeTimer)
+				handshakeTimer = null
+			}
 		}
 		const fail = (err: Error) => {
 			if (settled) return
@@ -125,13 +161,14 @@ function createTLS(
 	host: string,
 	port: number,
 	profile: Profile | string | null | undefined,
-	proxy: string | null | undefined,
+	proxy: ProxyOptions | null | undefined,
 	opts: {
 		verifyTLS?: boolean
 		resume?: boolean
 		timeouts?: PerPhaseTimeouts | null
-		proxyAuthorization?: string | null
-		proxyHeaders?: Record<string, string> | null
+		proxyHop?: ProxyHop | null
+		proxyPoolKey?: string | null
+		proxyPoolConfig?: PoolConfig | null
 	} = {}
 ): Promise<Connection> {
 	return new Promise((resolve, reject) => {
@@ -139,22 +176,31 @@ function createTLS(
 		tlsOpts.verifyTLS = opts.verifyTLS !== false
 		if (opts.resume) tlsOpts.resume = true
 		if (profile) tlsOpts.profile = profile
-		if (opts.proxyAuthorization != null) tlsOpts.proxyAuthorization = opts.proxyAuthorization
-		if (opts.proxyHeaders != null) tlsOpts.proxyHeaders = opts.proxyHeaders
-		const tls = new TLS(host, port, proxy ?? null, tlsOpts)
+		if (proxy?.authorization != null) tlsOpts.proxyAuthorization = proxy.authorization
+		if (proxy?.headers != null) tlsOpts.proxyHeaders = proxy.headers
+		if (opts.proxyHop) tlsOpts.proxyHop = opts.proxyHop
+		const tls = new TLS(host, port, proxy?.url ?? null, tlsOpts)
 		const conn = new Connection(tls)
 		let settled = false
 		let connectTimer: ReturnType<typeof setTimeout> | null = null
 		let handshakeTimer: ReturnType<typeof setTimeout> | null = null
 		const clearAllTimers = () => {
-			if (connectTimer) { clearTimeout(connectTimer); connectTimer = null }
-			if (handshakeTimer) { clearTimeout(handshakeTimer); handshakeTimer = null }
+			if (connectTimer) {
+				clearTimeout(connectTimer)
+				connectTimer = null
+			}
+			if (handshakeTimer) {
+				clearTimeout(handshakeTimer)
+				handshakeTimer = null
+			}
 		}
 		const fail = (err: Error) => {
 			if (settled) return
 			settled = true
 			clearAllTimers()
-			try { tls.socket?.destroy() } catch {}
+			try {
+				tls.socket?.destroy()
+			} catch {}
 			reject(err)
 		}
 		const onReady = (alpn: Alpn) => {
@@ -164,6 +210,11 @@ function createTLS(
 			conn.alpn = alpn
 			conn.h2Session = tls.h2Session ?? null
 			conn.h2Transport = tls.h2Transport ?? null
+			if (opts.proxyPoolKey && opts.proxyPoolConfig && tls.proxyHop) {
+				conn.proxyHop = tls.proxyHop
+				conn.proxyPoolKey = opts.proxyPoolKey
+				conn.proxyPoolConfig = opts.proxyPoolConfig
+			}
 			resolve(conn)
 		}
 		tls.on('ready', () => onReady('h2'))
@@ -186,7 +237,12 @@ function createTLS(
 			}, timeouts.connect)
 			connectTimer.unref?.()
 			// Once the transport is established, cancel the connect timer.
-			const onTransportReady = () => { if (connectTimer) { clearTimeout(connectTimer); connectTimer = null } }
+			const onTransportReady = () => {
+				if (connectTimer) {
+					clearTimeout(connectTimer)
+					connectTimer = null
+				}
+			}
 			tls.once('transport-ready', onTransportReady)
 		}
 		if (timeouts.tlsHandshake) {
@@ -204,28 +260,64 @@ function createTLS(
 	})
 }
 
-function connect({
+// Only CONNECT-based proxies can have their transport reused. SOCKS5 handshakes are bound to a
+// destination and are deliberately left one-shot.
+function poolableProxy(proxy: ProxyOptions | null | undefined): proxy is ProxyOptions {
+	if (!proxy || proxy.keepAlive !== true) return false
+	try {
+		const scheme = new URL(proxy.url).protocol
+		return scheme === 'http:' || scheme === 'https:' || scheme === 'ws:' || scheme === 'wss:'
+	} catch {
+		return false
+	}
+}
+
+async function connect({
 	host,
 	port = 443,
 	profile,
 	proxy,
+	pool: poolOpts,
 	transport = 'tcp',
 	verifyTLS = true,
 	resume = false,
-	timeouts = null,
-	proxyAuthorization = null,
-	proxyHeaders = null,
+	timeouts = null
 }: ConnectOptions): Promise<Connection> {
 	if (transport === 'quic') {
 		// QUIC/HTTP/3 has no proxy path. Rejecting instead of silently dropping `proxy` is what
 		// makes connectPreferred fall through to TCP, so an `h3: true` request through a proxy
 		// still goes through the proxy rather than straight to the origin.
 		if (proxy) {
-			return Promise.reject(new HellojsError('HTTP/3 is not supported through a proxy', 'EBADOPTS'))
+			throw new HellojsError('HTTP/3 is not supported through a proxy', 'EBADOPTS')
 		}
 		return createH3(host, port, timeouts)
 	}
-	return createTLS(host, port, profile, proxy, { verifyTLS, resume, timeouts, proxyAuthorization, proxyHeaders })
+
+	let key: string | null = null
+	let config: PoolConfig | null = null
+	let hop: ProxyHop | null = null
+	if (poolableProxy(proxy)) {
+		key = proxyPool.key(proxy, verifyTLS)
+		config = { ...DEFAULT_CONFIG, ...poolOpts }
+		hop = proxyPool.take(key)
+	}
+	const opts = {
+		verifyTLS,
+		resume,
+		timeouts,
+		proxyHop: hop,
+		proxyPoolKey: key,
+		proxyPoolConfig: config
+	}
+	try {
+		return await createTLS(host, port, profile, proxy, opts)
+	} catch (err) {
+		if (!hop) throw err
+		// A pooled hop can go stale between release and reuse. Discard it and retry once with a
+		// freshly dialed proxy connection rather than surfacing a spurious EPROXY to the caller.
+		proxyPool.evict(hop)
+		return createTLS(host, port, profile, proxy, { ...opts, proxyHop: null })
+	}
 }
 
 // h3 is opt-in per request and takes priority: start QUIC, and only fall back to TCP + TLS
@@ -237,7 +329,7 @@ const DEFAULT_H3_HANDSHAKE_BUDGET_MS = 2_000
 async function connectPreferred(opts: ConnectOptions): Promise<Connection> {
 	const quicTimeouts: PerPhaseTimeouts = {
 		...opts.timeouts,
-		connect: opts.timeouts?.connect ?? DEFAULT_H3_HANDSHAKE_BUDGET_MS,
+		connect: opts.timeouts?.connect ?? DEFAULT_H3_HANDSHAKE_BUDGET_MS
 	}
 	try {
 		return await connect({ ...opts, transport: 'quic', timeouts: quicTimeouts })

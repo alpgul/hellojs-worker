@@ -126,13 +126,12 @@ it('SOCKS5 user/pass: correct creds succeed, wrong creds fail', async () => {
 // rejected instead of silently dropped, because a caller that believes it supplied a credential is
 // worse off than one that gets an error. Port 1 is never dialled — EBADOPTS arriving rather than
 // ECONNREFUSED is the proof the check runs before the handshake.
-it('socks5:// rejects proxyAuthorization/proxyHeaders as EBADOPTS', async () => {
-	for (const extra of [{ proxyAuthorization: 'Bearer x' }, { proxyHeaders: { 'x-a': 'v' } }]) {
+it('socks5:// rejects proxy.authorization/proxy.headers as EBADOPTS', async () => {
+	for (const extra of [{ authorization: 'Bearer x' }, { headers: { 'x-a': 'v' } }]) {
 		const err = (await request({
 			url: 'https://example.invalid/',
-			proxy: 'socks5://127.0.0.1:1',
+			proxy: { url: 'socks5://127.0.0.1:1', ...extra },
 			timeout: 5000,
-			...extra,
 		}).catch((e: Error) => e)) as Error & { code?: string; category?: string }
 		expect(err).toBeInstanceOf(Error)
 		expect(err.code, JSON.stringify(extra)).toBe('EBADOPTS')
@@ -142,9 +141,8 @@ it('socks5:// rejects proxyAuthorization/proxyHeaders as EBADOPTS', async () => 
 	// An empty map adds nothing, so it is not a usage error: the request goes on to dial the proxy.
 	const err = (await request({
 		url: 'https://example.invalid/',
-		proxy: 'socks5://127.0.0.1:1',
+		proxy: { url: 'socks5://127.0.0.1:1', headers: {} },
 		timeout: 5000,
-		proxyHeaders: {},
 	}).catch((e: Error) => e)) as Error & { code?: string }
 	expect(err).toBeInstanceOf(Error)
 	expect(err.code).not.toBe('EBADOPTS')

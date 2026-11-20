@@ -33,31 +33,31 @@ describe('live redirect codes', () => {
 	})
 
 	it('301: POST downgrades to a bodyless GET', async () => {
-		const body = await jsonBody(request({ verifyTLS: false, timeout: 20_000, url: TO(301), method: 'POST', body: { drop: 'me' } }))
+		const body = await jsonBody(request({ verifyTLS: false, timeout: 20_000, url: TO(301), method: 'POST', json: { drop: 'me' } }))
 		expect(body?.method).toBe('GET')
 		// httpbin echoes an absent JSON body as `null`; assert the body was dropped.
 		expect(body?.json).toBeFalsy()
 	})
 
 	it('302: POST downgrades to a bodyless GET', async () => {
-		const body = await jsonBody(request({ verifyTLS: false, timeout: 20_000, url: TO(302), method: 'POST', body: { drop: 'me' } }))
+		const body = await jsonBody(request({ verifyTLS: false, timeout: 20_000, url: TO(302), method: 'POST', json: { drop: 'me' } }))
 		expect(body?.method).toBe('GET')
 	})
 
 	it('303: POST becomes a bodyless GET (RFC 9110 §15.4.4)', async () => {
-		const body = await jsonBody(request({ verifyTLS: false, timeout: 20_000, url: TO(303), method: 'POST', body: { drop: 'me' } }))
+		const body = await jsonBody(request({ verifyTLS: false, timeout: 20_000, url: TO(303), method: 'POST', json: { drop: 'me' } }))
 		expect(body?.method).toBe('GET')
 		expect(body?.json).toBeFalsy()
 	})
 
 	it('307: POST method AND body preserved (RFC 9110 §15.4.7)', async () => {
-		const body = await jsonBody(request({ verifyTLS: false, timeout: 20_000, url: TO(307), method: 'POST', body: { keep: 'me' } }))
+		const body = await jsonBody(request({ verifyTLS: false, timeout: 20_000, url: TO(307), method: 'POST', json: { keep: 'me' } }))
 		expect(body?.method).toBe('POST')
 		expect(body?.json?.keep).toBe('me')
 	})
 
 	it('308: POST method AND body preserved (RFC 9110 §15.4.8)', async () => {
-		const body = await jsonBody(request({ verifyTLS: false, timeout: 20_000, url: TO(308), method: 'POST', body: { keep: 'too' } }))
+		const body = await jsonBody(request({ verifyTLS: false, timeout: 20_000, url: TO(308), method: 'POST', json: { keep: 'too' } }))
 		expect(body?.method).toBe('POST')
 		expect(body?.json?.keep).toBe('too')
 	})

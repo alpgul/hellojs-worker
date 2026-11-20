@@ -111,46 +111,58 @@ export interface PerPhaseTimeouts {
 	bodyIdle?: number
 }
 
-export interface RequestOptions {
-	url?: string
-	uri?: string
-	method?: HttpMethod
-	headers?: HeadersInit
-	body?: BodyInit | Buffer | NodeJS.ReadableStream | Record<string, unknown> | unknown[] | null
-	/** An RFC 8259 value is serialized as the request body; `true` does the same for an object `body`. */
-	json?: boolean | JsonValue
-	form?: QueryParams
-	qs?: QueryParams
-	jar?: CookieJar | null
-	gzip?: boolean
-	redirect?: RedirectMode
-	maxRedirects?: number
-	timeout?: number
-	timeouts?: PerPhaseTimeouts | null
+/** Per-request proxy configuration. Every CONNECT detail lives under `proxy`. */
+export interface ProxyOptions {
 	/**
 	 * Proxy URL. `http://`/`ws://` sends CONNECT over plaintext TCP (default port 80),
 	 * `https://`/`wss://` first opens a TLS session to the proxy and sends CONNECT inside
 	 * it (default port 443), `socks5://`/`socks5h://` does the SOCKS5 handshake (default
 	 * port 1080) and authenticates with the URL's username/password only. Credentials in
-	 * the URL become `Proxy-Authorization: Basic` unless `proxyAuthorization` is set; a
-	 * failed CONNECT or an untrusted proxy certificate rejects with `EPROXY`.
+	 * the URL become `Proxy-Authorization: Basic` unless `authorization` is set; a failed
+	 * CONNECT or an untrusted proxy certificate rejects with `EPROXY`. Required.
 	 */
-	proxy?: string | null
+	url: string
 	/**
 	 * Full CONNECT `Proxy-Authorization` value (e.g. `Bearer <jwt>`). Overrides URL Basic
 	 * auth: any value, including `''`, suppresses the URL-derived header, so `''` sends no
 	 * `Proxy-Authorization` at all. Not supported with `socks5://`. Rejects CR, LF, control
 	 * and non-ASCII characters with `EBADOPTS` before the proxy is dialled.
 	 */
-	proxyAuthorization?: string | null
+	authorization?: string | null
 	/**
 	 * Extra headers sent on the CONNECT request to the proxy. `proxy-authorization` fills
-	 * the auth slot when `proxyAuthorization` is unset, ahead of URL Basic auth. Names
-	 * managed by the CONNECT builder (`host`, `connection`, `proxy-connection`, `te`,
-	 * `trailer`, `transfer-encoding`, `upgrade`, `keep-alive`) and any value outside
-	 * printable ASCII reject with `EBADOPTS`. Not supported with `socks5://`.
+	 * the auth slot when `authorization` is unset, ahead of URL Basic auth. Names managed
+	 * by the CONNECT builder (`host`, `connection`, `proxy-connection`, `te`, `trailer`,
+	 * `transfer-encoding`, `upgrade`, `keep-alive`) and any value outside printable ASCII
+	 * reject with `EBADOPTS`. Not supported with `socks5://`.
 	 */
-	proxyHeaders?: Record<string, string> | null
+	headers?: Record<string, string> | null
+	/**
+	 * Keep the connection to an `http(s)`/`ws(s)` proxy alive so later requests can open
+	 * another CONNECT tunnel over the same socket (default `false`). Bounded by `pool`.
+	 * No-op for `socks5://` and h3.
+	 */
+	keepAlive?: boolean
+}
+
+/**
+ * Fetch's `RequestInit` supplies `method`, `headers`, `body`, `redirect`, `keepalive`, `signal`,
+ * etc.; only hellojs-specific options are added here. Note that `keepalive` — the fetch spelling —
+ * is the per-request h2 connection-pool switch (default `false`).
+ */
+export interface RequestOptions extends RequestInit {
+	url?: string
+	uri?: string
+	/** An RFC 8259 value is serialized as the request body; `true` does the same for an object `body`. */
+	json?: boolean | JsonValue
+	form?: QueryParams
+	qs?: QueryParams
+	jar?: CookieJar | null
+	gzip?: boolean
+	maxRedirects?: number
+	timeout?: number
+	timeouts?: PerPhaseTimeouts | null
+	proxy?: ProxyOptions | null
 	retry?: RetryPolicy
 
 	/** TLS-only: turn on cert chain validation (default `true`). */
@@ -163,37 +175,14 @@ export interface RequestOptions {
 	resume?: boolean
 	/** Opt in to HTTP/3 (QUIC) for this request. Off unless explicitly `true`; QUIC is tried first with a bounded TCP fallback. */
 	h3?: boolean
-	/**
-	 * Reuse live HTTP/2 connections across requests (default `false`). Each pooled origin holds
-	 * at most one multiplexed socket; caps and idle lifetime come from `pool`. A request that
-	 * finds no pool capacity opens a one-shot connection and closes it after the response, so
-	 * enabling this can never hold more sockets than the caps allow.
-	 */
-	keepAlive?: boolean
 	/** Keep-alive pool caps: process-wide sockets (default 16), sockets per origin (default 1), idle socket lifetime in ms (default 15000). */
 	pool?: Partial<PoolConfig>
 	/** Profile name, or an inline profile object shaped like lib/profiles/types.ts `Profile`. */
 	profile?: ProfileName | Record<string, unknown>
-
-	/* Fetch `RequestInit` fields accepted for drop-in compatibility. */
-	credentials?: 'omit' | 'same-origin' | 'include'
-	mode?: 'cors' | 'no-cors' | 'same-origin' | 'navigate'
-	cache?: string
-	integrity?: string
-	keepalive?: boolean
-	referrer?: string
-	referrerPolicy?: string
-	/** Present for fetch signature compatibility; a streaming request body is always half-duplex here. */
-	duplex?: 'half'
-	/**
-	 * Abort the request (or an in-flight response body) when this signal fires. Before
-	 * headers the promise rejects; after headers `Response.body` errors.
-	 */
-	signal?: AbortSignal | null
 }
 
 /** Fetch-style init accepted as the second argument; request.js options may be mixed in. */
-export type FetchInit = Omit<RequestInit, 'body' | 'headers' | 'method' | 'redirect' | 'signal'> & RequestOptions
+export type FetchInit = RequestOptions
 
 export interface PoolConfig {
 	maxSockets: number
