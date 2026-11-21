@@ -18,6 +18,17 @@ const TCP_RACE_DELAY_MS = 300
 
 export type TransportHint = 'h3' | 'h2' | 'h1' | null
 
+export interface TransportResult {
+	conn: Connection
+	/** True when the request was actually sent to an Alt-Svc alternative (`Alt-Used`). */
+	usedAlternative: boolean
+}
+
+/** Rebuild the connect options for a TCP fallback to the ORIGIN after a bad h3 hint. */
+export function fallbackToOrigin(opts: ConnectOptions, origin: { host: string; port: number }): ConnectOptions {
+	return { ...opts, host: origin.host, port: origin.port, sniHost: origin.host, transport: 'tcp' }
+}
+
 /** QUIC needs a datagram socket and cannot tunnel through an HTTP/SOCKS proxy. */
 export function canUseQuic(proxy: ConnectOptions['proxy']): boolean {
 	return !proxy && udpAvailable()
@@ -41,20 +52,29 @@ function linkAbort(source: AbortSignal | null | undefined, target: AbortControll
 export function connectWithTransport(
 	opts: ConnectOptions,
 	hint: TransportHint = null,
-	origin?: string
-): Promise<Connection> {
+	origin?: string,
+	originEndpoint?: { host: string; port: number }
+): Promise<TransportResult> {
 	const quic = canUseQuic(opts.proxy)
-	if (!quic || hint === 'h2' || hint === 'h1') return connect({ ...opts, transport: 'tcp' })
-
-	// Alt-Svc advertised h3: go straight to QUIC, but fall back to TCP immediately on failure.
-	if (hint === 'h3') {
-		return connect({ ...opts, transport: 'quic' }).catch(() => {
-			if (origin && !opts.signal?.aborted) markAltSvcBroken(origin, 'h3')
-			return connect({ ...opts, transport: 'tcp' })
-		})
+	if (!quic || hint === 'h2' || hint === 'h1') {
+		return connect({ ...opts, transport: 'tcp' }).then((conn) => ({
+			conn,
+			usedAlternative: hint !== null
+		}))
 	}
 
-	return new Promise<Connection>((resolve, reject) => {
+	// Alt-Svc advertised h3: go straight to QUIC, but fall back to the ORIGIN over TCP on failure.
+	if (hint === 'h3') {
+		return connect({ ...opts, transport: 'quic' })
+			.then((conn) => ({ conn, usedAlternative: true }))
+			.catch(() => {
+				if (origin && !opts.signal?.aborted) markAltSvcBroken(origin, 'h3')
+				const fallback = fallbackToOrigin(opts, originEndpoint ?? { host: opts.host, port: opts.port ?? 443 })
+				return connect(fallback).then((conn) => ({ conn, usedAlternative: false }))
+			})
+	}
+
+	return new Promise<TransportResult>((resolve, reject) => {
 		let settled = false
 		let tcpStarted = false
 		let tcpTimer: ReturnType<typeof setTimeout> | null = null
@@ -91,7 +111,7 @@ export function connectWithTransport(
 			const loser = kind === 'quic' ? 'tcp' : 'quic'
 			controllers[loser].abort(new Error('transport race lost'))
 			conns[loser]?.close(`${loser}-race-lost`)
-			resolve(conn)
+			resolve({ conn, usedAlternative: false })
 		}
 
 		const onFailure = (kind: 'quic' | 'tcp', err: unknown) => {

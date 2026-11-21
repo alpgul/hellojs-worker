@@ -18,7 +18,14 @@
 import { URL } from 'node:url'
 import * as zlib from 'node:zlib'
 
-import { forgetAltSvc, markAltSvcBroken, originKey, rememberAltSvc, selectAltSvc } from './alt-svc.ts'
+import {
+	authorizedAltsvcOrigin,
+	forgetAltSvc,
+	markAltSvcBroken,
+	originKey,
+	rememberAltSvc,
+	selectAltSvc
+} from './alt-svc.ts'
 import { Jar } from './cookies.ts'
 import { HellojsError, wrap as wrapError } from './errors.ts'
 import { udpAvailable } from './h3/udp.ts'
@@ -396,8 +403,9 @@ function wireAltSvcFrame(conn: Connection, origin: string): void {
 	const session = conn.h2Session
 	if (!session || altsvcWired.has(session)) return
 	altsvcWired.add(session)
-	session.on?.('altsvc', (frameOrigin: string, value: string) => {
-		rememberAltSvc(value, frameOrigin || origin)
+	session.on?.('altsvc', (frameOrigin: string | null, value: string, streamId: number) => {
+		const authorized = authorizedAltsvcOrigin(frameOrigin, origin, streamId)
+		if (authorized) rememberAltSvc(value, authorized)
 	})
 }
 
@@ -445,15 +453,17 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 	if (alt?.hint === 'h3' && !udpAvailable()) alt = null
 	const dialHost = alt?.host ?? host
 	const dialPort = alt?.port ?? port
-	const identity: PoolIdentity = {
+	const identityFor = (targetHost: string, targetPort: number): PoolIdentity => ({
 		originHost: host,
 		originPort: port,
-		dialHost,
-		dialPort,
+		dialHost: targetHost,
+		dialPort: targetPort,
 		profile: opts.profile,
 		proxy: opts.proxy,
 		verifyTLS: opts.verifyTLS !== false
-	}
+	})
+	let identity = identityFor(dialHost, dialPort)
+	let usedAlternative = alt !== null
 	let conn: Connection | null = null
 	let h1PoolKey: string | null = null
 	if (opts.keepalive !== false) {
@@ -464,7 +474,7 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 	}
 	if (!conn) {
 		try {
-			conn = await connectWithTransport(
+			const result = await connectWithTransport(
 				{
 					host: dialHost,
 					port: dialPort,
@@ -475,8 +485,14 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 					signal: opts.signal
 				},
 				alt?.hint ?? null,
-				origin
+				origin,
+				{ host, port }
 			)
+			conn = result.conn
+			usedAlternative = result.usedAlternative
+			// A failed h3 hint falls back to the origin, so the socket must be pooled under
+			// the origin dial target rather than the dead alternative's key.
+			if (!usedAlternative) identity = identityFor(host, port)
 		} catch (e) {
 			// A cached alternative may have gone away: mark it broken and let the retry use TCP.
 			// An explicit abort says nothing about the endpoint's health.
@@ -499,8 +515,9 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 
 	// Build headers
 	const userHeaders: HeaderMap = headersToRecord(opts.headers)
-	// RFC 7838 §5: any request actually sent to an alternative service names the authority.
-	if (alt?.altUsed && !Object.keys(userHeaders).some((k) => k.toLowerCase() === 'alt-used')) {
+	// RFC 7838 §5: only a request actually sent to an alternative names that authority. An
+	// h3 handshake that failed and fell back to the origin must NOT claim `Alt-Used`.
+	if (usedAlternative && alt?.altUsed && !Object.keys(userHeaders).some((k) => k.toLowerCase() === 'alt-used')) {
 		userHeaders['Alt-Used'] = alt.altUsed
 	}
 	// Case-insensitive header presence check. Callers may Title-Case headers (e.g.

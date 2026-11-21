@@ -150,9 +150,12 @@ function parseGoaway(payload: Buffer): GoawayFrame {
 
 // RFC 7838 §4: Origin-Len (16-bit) + Origin + Alt-Svc field value. Connection-level frames
 // (stream 0) carry the origin; stream-level frames leave it empty and refer to that stream's
-// origin, which the caller knows from the request that opened the stream.
-function parseAltsvc(payload: Buffer): { origin: string; value: string } {
-	const len = payload.length >= 2 ? payload.readUInt16BE(0) : 0
+// origin, which the caller knows from the request that opened the stream. `origin: null` marks
+// a truncated frame so the caller can drop it instead of treating it as a stream-level frame.
+function parseAltsvc(payload: Buffer): { origin: string | null; value: string } {
+	if (payload.length < 2) return { origin: null, value: '' }
+	const len = payload.readUInt16BE(0)
+	if (len > payload.length - 2) return { origin: null, value: '' }
 	const origin = len ? payload.subarray(2, 2 + len).toString('utf8') : ''
 	return { origin, value: payload.subarray(2 + len).toString('utf8') }
 }

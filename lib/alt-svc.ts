@@ -30,6 +30,34 @@ export function originKey(input: string | URL): string {
 	return `${url.protocol}//${url.hostname.toLowerCase()}:${port}`
 }
 
+/**
+ * Resolve the origin an ALTSVC frame is allowed to affect (RFC 7838 §4).
+ * Stream 0 must name the connection's own origin; stream-level frames must leave Origin empty
+ * and inherit the origin of the request that opened the stream. `null` means invalid.
+ */
+export function authorizedAltsvcOrigin(
+	frameOrigin: string | null,
+	connectionOrigin: string | URL,
+	streamId: number
+): string | null {
+	if (frameOrigin === null) return null
+	const normalize = (input: string | URL): string | null => {
+		try {
+			return originKey(input)
+		} catch {
+			return null
+		}
+	}
+	const own = normalize(connectionOrigin)
+	if (!own) return null
+	if (streamId === 0) {
+		if (!frameOrigin) return null
+		const claimed = normalize(frameOrigin)
+		return claimed === own ? own : null
+	}
+	return frameOrigin ? null : own
+}
+
 /** Split on a delimiter while respecting RFC 7838 quoted-strings. */
 function splitOutsideQuotes(input: string, delimiter: string): string[] {
 	const out: string[] = []
@@ -117,32 +145,34 @@ function parseAltSvc(value: string, origin: URL): AltEntry[] {
 	return entries
 }
 
-/** Learn an Alt-Svc field value for `origin`. `clear` drops every entry for that origin. */
+/**
+ * Learn an Alt-Svc field value for `origin`. RFC 7838 §3/§4 replace ALL alternatives for the
+ * origin with the freshly received set; `clear` (or an all-malformed value) empties it.
+ */
 export function rememberAltSvc(value: string | string[] | undefined, origin: string | URL): void {
 	if (value == null) return
 	const key = originKey(origin)
+	let originUrl: URL
+	try {
+		originUrl = new URL(key)
+	} catch {
+		return
+	}
 	const values = Array.isArray(value) ? value : [value]
+	const fresh: AltEntry[] = []
+	let cleared = false
 	for (const raw of values) {
 		if (raw.trim().toLowerCase() === 'clear') {
-			cache.delete(key)
+			cleared = true
 			continue
 		}
-		let originUrl: URL
-		try {
-			originUrl = new URL(key)
-		} catch {
-			continue
-		}
-		const parsed = parseAltSvc(raw, originUrl)
-		if (!parsed.length) continue
-		const existing = cache.get(key) ?? []
-		for (const entry of parsed) {
-			const at = existing.findIndex((e) => e.protocol === entry.protocol)
-			if (at === -1) existing.push(entry)
-			else existing[at] = entry
-		}
-		cache.set(key, existing)
+		fresh.push(...parseAltSvc(raw, originUrl))
 	}
+	if (cleared || fresh.length === 0) {
+		cache.delete(key)
+		return
+	}
+	cache.set(key, fresh)
 }
 
 /** A cached alternative service on 421 is stale — RFC 7838 §5 requires dropping it. */

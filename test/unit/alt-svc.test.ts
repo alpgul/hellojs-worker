@@ -4,6 +4,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 
 import {
+	authorizedAltsvcOrigin,
 	clearAltSvcCache,
 	forgetAltSvc,
 	markAltSvcBroken,
@@ -78,5 +79,27 @@ describe('alt-svc cache', () => {
 	it('ignores malformed fields without poisoning the cache', () => {
 		rememberAltSvc('h3="not-an-authority"; ma=60, nonsense, h3=":443"; ma=60', ORIGIN)
 		expect(selectAltSvc(ORIGIN, 'example.com', 443)).toMatchObject({ hint: 'h3', port: 443 })
+	})
+
+	it('replaces all prior alternatives instead of merging them', () => {
+		rememberAltSvc('h3=":443"; ma=3600, h2=":443"', ORIGIN)
+		rememberAltSvc('h2=":443"; ma=3600', ORIGIN)
+		expect(selectAltSvc(ORIGIN, 'example.com', 443)).toMatchObject({ hint: 'h2' })
+	})
+
+	it('lets clear win over values in the same response', () => {
+		rememberAltSvc('h3=":443"; ma=3600', ORIGIN)
+		rememberAltSvc(['clear', 'h3=":443"; ma=3600'], ORIGIN)
+		expect(selectAltSvc(ORIGIN, 'example.com', 443).hint).toBeNull()
+	})
+
+	it('accepts only authoritative ALTSVC origins', () => {
+		expect(authorizedAltsvcOrigin('https://example.com', ORIGIN, 0)).toBe('https://example.com:443')
+		expect(authorizedAltsvcOrigin('', ORIGIN, 0)).toBeNull()
+		expect(authorizedAltsvcOrigin('https://evil.example', ORIGIN, 0)).toBeNull()
+		expect(authorizedAltsvcOrigin('not a url', ORIGIN, 0)).toBeNull()
+		expect(authorizedAltsvcOrigin('', ORIGIN, 5)).toBe('https://example.com:443')
+		expect(authorizedAltsvcOrigin('https://example.com', ORIGIN, 5)).toBeNull()
+		expect(authorizedAltsvcOrigin(null, ORIGIN, 5)).toBeNull()
 	})
 })

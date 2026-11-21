@@ -29,6 +29,12 @@ it('parse returns null when payload is incomplete', () => {
 	expect(frame.parse(incomplete)).toBeNull()
 })
 
+it('parseAltsvc rejects a truncated Origin-Len', () => {
+	const payload = Buffer.alloc(4)
+	payload.writeUInt16BE(10, 0)
+	expect(frame.parseAltsvc(payload)).toEqual({ origin: null, value: '' })
+})
+
 it('SETTINGS round-trip preserves id/value pairs', () => {
 	const pairs: frame.SettingsPair[] = [
 		[frame.SETTING.HEADER_TABLE_SIZE, 65536],
