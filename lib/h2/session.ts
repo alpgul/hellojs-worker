@@ -32,9 +32,9 @@ const CHROME_147_SETTINGS: frame.SettingsPair[] = [
 	[frame.SETTING.HEADER_TABLE_SIZE, 65536],
 	[frame.SETTING.ENABLE_PUSH, 0],
 	[frame.SETTING.INITIAL_WINDOW_SIZE, 6291456],
-	[frame.SETTING.MAX_HEADER_LIST_SIZE, 262144],
+	[frame.SETTING.MAX_HEADER_LIST_SIZE, 262144]
 ]
-const CHROME_WINDOW_UPDATE = 15663105   // adds to the initial 65535
+const CHROME_WINDOW_UPDATE = 15663105 // adds to the initial 65535
 
 // Cap on an accumulated HEADERS + CONTINUATION block, mirroring the MAX_HEADER_LIST_SIZE
 // we advertise.
@@ -44,13 +44,13 @@ const MAX_HEADER_BLOCK = 262144
 // IDs. Properties not in this map are silently ignored so a profile can carry extra info
 // without breaking the codec.
 const SETTING_NAME_TO_ID: Record<string, number> = {
-	headerTableSize:       frame.SETTING.HEADER_TABLE_SIZE,
-	enablePush:            frame.SETTING.ENABLE_PUSH,
-	maxConcurrentStreams:  frame.SETTING.MAX_CONCURRENT_STREAMS,
-	initialWindowSize:     frame.SETTING.INITIAL_WINDOW_SIZE,
-	maxFrameSize:          frame.SETTING.MAX_FRAME_SIZE,
-	maxHeaderListSize:     frame.SETTING.MAX_HEADER_LIST_SIZE,
-	noRfc7540Priorities:   frame.SETTING.NO_RFC7540_PRIORITIES,
+	headerTableSize: frame.SETTING.HEADER_TABLE_SIZE,
+	enablePush: frame.SETTING.ENABLE_PUSH,
+	maxConcurrentStreams: frame.SETTING.MAX_CONCURRENT_STREAMS,
+	initialWindowSize: frame.SETTING.INITIAL_WINDOW_SIZE,
+	maxFrameSize: frame.SETTING.MAX_FRAME_SIZE,
+	maxHeaderListSize: frame.SETTING.MAX_HEADER_LIST_SIZE,
+	noRfc7540Priorities: frame.SETTING.NO_RFC7540_PRIORITIES
 }
 
 // The plaintext byte stream the session reads from and writes to — TLSTransport in
@@ -161,7 +161,7 @@ class H2Stream extends EventEmitter {
 			p = p.subarray(1, p.length - padLen)
 		}
 		if (flags & frame.FLAG.PRIORITY) {
-			p = p.subarray(5)   // skip 5 bytes of priority info
+			p = p.subarray(5) // skip 5 bytes of priority info
 		}
 		this._headerFragments = [Buffer.from(p)]
 		this._headerBytes = p.length
@@ -281,7 +281,10 @@ class H2Stream extends EventEmitter {
 		if (this.closed || this._endSent) return
 		if (body && body.length) {
 			const b = Buffer.isBuffer(body) ? body : Buffer.from(body)
-			if (b.length) { this._pendingSend.push(b); this._pendingLen += b.length }
+			if (b.length) {
+				this._pendingSend.push(b)
+				this._pendingLen += b.length
+			}
 		}
 		this._pendingEnd = true
 		this._pump()
@@ -313,7 +316,8 @@ class H2Stream extends EventEmitter {
 		// All bytes are out (or there never were any) and end() is pending: close the stream, but
 		// only if the opening HEADERS did not already carry END_STREAM.
 		if (this._pendingEnd && this._pendingLen === 0 && !this._endSent) {
-			if (!this._headersEndStream) this.session._sendFrame(frame.TYPE.DATA, frame.FLAG.END_STREAM, this.id, Buffer.alloc(0))
+			if (!this._headersEndStream)
+				this.session._sendFrame(frame.TYPE.DATA, frame.FLAG.END_STREAM, this.id, Buffer.alloc(0))
 			this._endSent = true
 		}
 		if (flushed && this._pendingLen === 0) this.emit('drain')
@@ -373,7 +377,7 @@ class H2Session extends EventEmitter {
 			[frame.SETTING.HEADER_TABLE_SIZE]: 4096,
 			[frame.SETTING.MAX_CONCURRENT_STREAMS]: Infinity,
 			[frame.SETTING.INITIAL_WINDOW_SIZE]: 65535,
-			[frame.SETTING.MAX_FRAME_SIZE]: 16384,
+			[frame.SETTING.MAX_FRAME_SIZE]: 16384
 		}
 		this._connSendWindow = 65535
 		this._connRecvUsed = 0
@@ -400,7 +404,7 @@ class H2Session extends EventEmitter {
 	_sendKeepalivePing(): void {
 		if (this.closed || this.destroyed || this._pingOutstanding) return
 		const payload = Buffer.alloc(8)
-		payload.writeUInt32BE(0x68656c6c, 0)  // "hell" — magic tag identifying our probes
+		payload.writeUInt32BE(0x68656c6c, 0) // "hell" — magic tag identifying our probes
 		payload.writeUInt32BE((Date.now() & 0xffffffff) >>> 0, 4)
 		const timer = setTimeout(() => {
 			// No ACK — peer is dead. Tear down; _fatalError fails in-flight streams and evicts.
@@ -420,13 +424,24 @@ class H2Session extends EventEmitter {
 	}
 
 	_clearKeepalive(): void {
-		if (this._keepaliveTimer) { clearInterval(this._keepaliveTimer); this._keepaliveTimer = null }
-		if (this._pingOutstanding) { clearTimeout(this._pingOutstanding.timer); this._pingOutstanding = null }
+		if (this._keepaliveTimer) {
+			clearInterval(this._keepaliveTimer)
+			this._keepaliveTimer = null
+		}
+		if (this._pingOutstanding) {
+			clearTimeout(this._pingOutstanding.timer)
+			this._pingOutstanding = null
+		}
 	}
 
 	_sendPreface(): void {
 		const settings = frame.build(frame.TYPE.SETTINGS, 0, 0, frame.buildSettings(this._localSettings))
-		const winUpdate = frame.build(frame.TYPE.WINDOW_UPDATE, 0, 0, frame.buildWindowUpdate(this._windowUpdateIncrement))
+		const winUpdate = frame.build(
+			frame.TYPE.WINDOW_UPDATE,
+			0,
+			0,
+			frame.buildWindowUpdate(this._windowUpdateIncrement)
+		)
 		// Single write so the preface + SETTINGS + WINDOW_UPDATE land in one application_data
 		// record, matching the browser fingerprint.
 		this.transport.write(Buffer.concat([H2_PREFACE, settings, winUpdate]))
@@ -464,11 +479,19 @@ class H2Session extends EventEmitter {
 		e.code = err.code || 'EH2PROTOCOL'
 		for (const s of [...this.streams.values()]) {
 			s.closed = true
-			try { s.emit('error', e) } catch { /* stream without an error listener */ }
+			try {
+				s.emit('error', e)
+			} catch {
+				/* stream without an error listener */
+			}
 		}
 		this.streams.clear()
-		try { this._sendFrame(frame.TYPE.GOAWAY, 0, 0, frame.buildGoaway(0, frame.ERROR.PROTOCOL_ERROR)) } catch {}
-		try { this.transport.destroy?.() } catch {}
+		try {
+			this._sendFrame(frame.TYPE.GOAWAY, 0, 0, frame.buildGoaway(0, frame.ERROR.PROTOCOL_ERROR))
+		} catch {}
+		try {
+			this.transport.destroy?.()
+		} catch {}
 		this.emit('close')
 	}
 
@@ -506,7 +529,10 @@ class H2Session extends EventEmitter {
 					for (const s of this.streams.values()) if (s._pendingLen > 0) s._pump()
 				} else {
 					const s = this.streams.get(f.streamId)
-					if (s) { s.sendWindow += inc; if (s._pendingLen > 0) s._pump() }
+					if (s) {
+						s.sendWindow += inc
+						if (s._pendingLen > 0) s._pump()
+					}
 				}
 				break
 			}
@@ -528,7 +554,7 @@ class H2Session extends EventEmitter {
 				}
 				const s = this.streams.get(f.streamId)
 				if (s) s._onData(p, f.flags)
-				else this._creditFlow(p.length)   // unknown stream — still credit the conn window
+				else this._creditFlow(p.length) // unknown stream — still credit the conn window
 				break
 			}
 			case frame.TYPE.RST_STREAM: {
@@ -553,6 +579,13 @@ class H2Session extends EventEmitter {
 				const g = frame.parseGoaway(f.payload)
 				this.emit('goaway', g.errorCode, g.lastStreamId)
 				this.closed = true
+				break
+			}
+			case frame.TYPE.ALTSVC: {
+				// RFC 7838 §4 — feed the Alt-Svc cache; stream 0 carries an origin, other streams
+				// leave it empty and are resolved by the caller from the originating request.
+				const { origin, value } = frame.parseAltsvc(f.payload)
+				this.emit('altsvc', origin, value, f.streamId)
 				break
 			}
 			case frame.TYPE.PUSH_PROMISE: {
@@ -604,11 +637,12 @@ class H2Session extends EventEmitter {
 				const vals = Array.isArray(v) ? v : [v]
 				for (const vv of vals) {
 					if (typeof vv === 'string') {
-						for (const c of vv.split(/;\s*/)) { if (c) list.push([k, c]) }
+						for (const c of vv.split(/;\s*/)) {
+							if (c) list.push([k, c])
+						}
 					} else list.push([k, vv])
 				}
-			}
-			else if (Array.isArray(v)) for (const vv of v) list.push([k, vv])
+			} else if (Array.isArray(v)) for (const vv of v) list.push([k, vv])
 			else list.push([k, v])
 		}
 		const block = hpack.encode(list, this.localHpackTable)
@@ -619,7 +653,11 @@ class H2Session extends EventEmitter {
 		// Safari clears the flag (it advertises NO_RFC7540_PRIORITIES). When the profile says
 		// sendPriorityFrame is false we omit the flag and the 5-byte payload entirely.
 		const profPri = this.profile?.http2 || {}
-		const sendPri = opts.weight != null || opts.exclusive != null || opts.parent != null || (profPri.sendPriorityFrame !== false && profPri.priority != null)
+		const sendPri =
+			opts.weight != null ||
+			opts.exclusive != null ||
+			opts.parent != null ||
+			(profPri.sendPriorityFrame !== false && profPri.priority != null)
 		let payload = block
 		let flags = frame.FLAG.END_HEADERS | (endStream ? frame.FLAG.END_STREAM : 0)
 		if (sendPri) {

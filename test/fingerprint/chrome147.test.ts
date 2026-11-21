@@ -46,15 +46,13 @@ interface FixtureReport {
 }
 
 const fixture = JSON.parse(
-	fs.readFileSync(path.join(import.meta.dirname, '../fixtures/chrome147-peet.json'), 'utf8'),
+	fs.readFileSync(path.join(import.meta.dirname, '../fixtures/chrome147-peet.json'), 'utf8')
 ) as FixtureReport
 
 let live: ScrapflyReport = {}
 
 beforeAll(async () => {
-	live = (await (await request({
-		url: `https://${FINGERPRINT_HOST}/api/fp/ja3?extended=1`,
-	})).json()) as ScrapflyReport
+	live = (await (await request(`https://${FINGERPRINT_HOST}/api/fp/ja3?extended=1`)).json()) as ScrapflyReport
 }, 30_000)
 
 // GREASE codepoints rotate per handshake and every reporter spells them differently
@@ -66,17 +64,21 @@ function codeOf(name: string): number {
 	return dec ? Number(dec[1]) : Number.NaN
 }
 const isGreaseCode = (code: number): boolean => (code & 0x0f_0f) === 0x0a_0a
-const withoutGrease = (names: string[]): string[] =>
-	names.filter((n) => !isGreaseCode(codeOf(n)))
+const withoutGrease = (names: string[]): string[] => names.filter((n) => !isGreaseCode(codeOf(n)))
 
 const extensionIds = (names: string[]): number[] =>
-	withoutGrease(names).map(codeOf).sort((a, b) => a - b)
+	withoutGrease(names)
+		.map(codeOf)
+		.sort((a, b) => a - b)
 
 const fixtureExtension = (prefix: string): { supported_groups?: string[]; versions?: string[] } =>
 	fixture.tls?.extensions?.find((e) => e.name.startsWith(prefix)) ?? {}
 
 const toHex = (codes: number[]): string =>
-	codes.filter((c) => !isGreaseCode(c)).map((c) => c.toString(16).padStart(4, '0')).join(',')
+	codes
+		.filter((c) => !isGreaseCode(c))
+		.map((c) => c.toString(16).padStart(4, '0'))
+		.join(',')
 
 const VERSION_CODE: Record<string, number> = { 'TLS 1.3': 772, 'TLS 1.2': 771 }
 const versionCode = (name: string): number => VERSION_CODE[name] ?? codeOf(name)
@@ -97,13 +99,13 @@ it('ja4', () => {
 })
 
 it('ciphers', () => {
-	expect(withoutGrease(live.tls?.ciphers ?? []))
-		.toStrictEqual(withoutGrease(fixture.tls?.ciphers ?? []))
+	expect(withoutGrease(live.tls?.ciphers ?? [])).toStrictEqual(withoutGrease(fixture.tls?.ciphers ?? []))
 })
 
 it('extensions (set)', () => {
-	expect(extensionIds(live.tls?.extensions ?? []))
-		.toStrictEqual(extensionIds(fixture.tls?.extensions?.map((e) => e.name) ?? []))
+	expect(extensionIds(live.tls?.extensions ?? [])).toStrictEqual(
+		extensionIds(fixture.tls?.extensions?.map((e) => e.name) ?? [])
+	)
 })
 
 it('signature_algorithms', () => {
@@ -114,15 +116,13 @@ it('signature_algorithms', () => {
 
 it('supported_groups', () => {
 	// The two sides name the same curves differently (P-256 vs secp256r1), so compare codes.
-	expect(withoutGrease(live.tls?.curves ?? []).map(codeOf))
-		.toStrictEqual(withoutGrease(fixtureExtension('supported_groups').supported_groups ?? []).map(codeOf))
+	expect(withoutGrease(live.tls?.curves ?? []).map(codeOf)).toStrictEqual(
+		withoutGrease(fixtureExtension('supported_groups').supported_groups ?? []).map(codeOf)
+	)
 })
 
 it('supported_versions', () => {
-	expect((live.tls?.versions ?? []).map(Number).filter((v) => !isGreaseCode(v)))
-		.toStrictEqual(
-			(fixtureExtension('supported_versions').versions ?? [])
-				.map(versionCode)
-				.filter((v) => !isGreaseCode(v)),
-		)
+	expect((live.tls?.versions ?? []).map(Number).filter((v) => !isGreaseCode(v))).toStrictEqual(
+		(fixtureExtension('supported_versions').versions ?? []).map(versionCode).filter((v) => !isGreaseCode(v))
+	)
 })

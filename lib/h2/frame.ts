@@ -18,7 +18,8 @@ const TYPE = {
 	PING: 0x06,
 	GOAWAY: 0x07,
 	WINDOW_UPDATE: 0x08,
-	CONTINUATION: 0x09
+	CONTINUATION: 0x09,
+	ALTSVC: 0x0a
 }
 
 const FLAG = {
@@ -147,5 +148,28 @@ function parseGoaway(payload: Buffer): GoawayFrame {
 	}
 }
 
-export { TYPE, FLAG, ERROR, SETTING, build, parse, buildSettings, parseSettings, buildWindowUpdate, buildRstStream, buildGoaway, parseGoaway }
+// RFC 7838 §4: Origin-Len (16-bit) + Origin + Alt-Svc field value. Connection-level frames
+// (stream 0) carry the origin; stream-level frames leave it empty and refer to that stream's
+// origin, which the caller knows from the request that opened the stream.
+function parseAltsvc(payload: Buffer): { origin: string; value: string } {
+	const len = payload.length >= 2 ? payload.readUInt16BE(0) : 0
+	const origin = len ? payload.subarray(2, 2 + len).toString('utf8') : ''
+	return { origin, value: payload.subarray(2 + len).toString('utf8') }
+}
+
+export {
+	TYPE,
+	FLAG,
+	ERROR,
+	SETTING,
+	build,
+	parse,
+	buildSettings,
+	parseSettings,
+	buildWindowUpdate,
+	buildRstStream,
+	buildGoaway,
+	parseGoaway,
+	parseAltsvc
+}
 export type { Frame, GoawayFrame, SettingsPair }

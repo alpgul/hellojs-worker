@@ -1,5 +1,5 @@
-// h3:true prefers QUIC. Only an origin whose QUIC handshake cannot complete falls back
-// to TCP + TLS, and that fallback stays bounded (no ~55s of QUIC Initial retransmits).
+// Transport selection is automatic: QUIC and TCP race, with a bounded QUIC attempt before a
+// TCP-only origin answers. These checks prove both halves still work without any opt-in flag.
 
 import { expect, it } from 'vitest'
 
@@ -28,15 +28,14 @@ it('falls back to TCP quickly when the origin has no QUIC endpoint', async () =>
 	}
 }, 40_000)
 
-it('request({ h3: true }) answers from an origin without a QUIC endpoint', async () => {
+it('a request to an origin without a QUIC endpoint answers quickly', async () => {
+	// No `h3` option: whichever transport wins the race, the answer must arrive promptly.
 	const t0 = Date.now()
-	const res = await request({
-		url: `https://${HTTP_HOST}/get`,
+	const res = await request(`https://${HTTP_HOST}/get`, {
 		profile: 'chrome147-mac',
-		h3: true,
-		timeout: 30_000,
+		signal: AbortSignal.timeout(30_000)
 	})
 	const dt = Date.now() - t0
 	expect(res.status).toBe(200)
-	expect(dt, `expected the TCP fallback to answer quickly, took ${dt}ms`).toBeLessThan(5000)
+	expect(dt, `expected the request to answer quickly, took ${dt}ms`).toBeLessThan(5000)
 }, 40_000)
