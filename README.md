@@ -2,9 +2,9 @@
 
 A Node.js HTTP client whose on-the-wire TLS handshake, HTTP/2 setup, and
 HTTP/3 (QUIC) flight produces **the same JA4 / Akamai / peetprint
-fingerprint as Chrome 147 on macOS**. Fetch-compatible API (always a real
-`Response`) with [`request`](https://github.com/request/request)-style request
-options and helpers.
+fingerprint as Chrome 147 on macOS**. Fetch-shaped API — always a real
+`Response`, with `request(input, init)` and method shortcuts — plus a browser-like
+transport that picks h3/h2 automatically.
 
 ```bash
 npm install @unreleased/hellojs
@@ -17,12 +17,15 @@ import request from '@unreleased/hellojs'
 const res = await request('https://www.cloudflare.com/')
 console.log(res.status, res.ok, await res.text())
 
-// request.js-style request options and helpers are still supported.
-const post = await request({
-  url: 'https://api.example.com/v1/things',
-  method: 'POST',
-  json: { name: 'foo' },            // serializes + sets content-type
-  headers: { authorization: 'Bearer …' },
+// Same shape as fetch: the URL is the input, everything else is init.
+// Bodies are serialized by the caller — there is no `json` / `form` option.
+const post = await request('https://api.example.com/v1/things', {
+	method: 'POST',
+	body: JSON.stringify({ name: 'foo' }),
+	headers: {
+		'content-type': 'application/json',
+		authorization: 'Bearer …'
+	}
 })
 const data = await post.json()
 ```
@@ -36,13 +39,13 @@ const data = await post.json()
 - [Request options](#request-options)
 - [Method shortcuts and defaults](#method-shortcuts-and-defaults)
 - [Cookie jar](#cookie-jar)
-- [Per-phase timeouts](#per-phase-timeouts)
+- [Timeouts and redirects](#timeouts-and-redirects)
 - [Connection pool](#connection-pool)
 - [Proxies](#proxies)
 - [Observability hooks](#observability-hooks)
 - [Parrot: clone any fingerprint](#parrot-clone-any-fingerprint-from-a-tlspeetws-response)
 - [Fingerprint](#fingerprint)
-- [HTTP/3](#http3)
+- [HTTP/3 and automatic transport](#http3-and-automatic-transport)
 - [Certificate validation](#certificate-validation)
 - [TLS 1.3 session resumption](#tls-13-session-resumption)
 - [TypeScript](#typescript)
@@ -97,60 +100,58 @@ handshake — same as a real Chrome browser.
 // Like fetch: 4xx/5xx resolve as a Response, so inspect res.ok/res.status.
 const r = await request('https://httpbingo.org/status/418')
 console.log(r.status, r.ok) // 418 false
-await r.text()              // drain the stream
+await r.text() // drain the stream
 
 // Read the response body the fetch way.
 const body = await (await request('https://httpbingo.org/get')).json()
 console.log(body.url)
 
-// POST JSON (request.js form)
-await request({
-  url: 'https://httpbingo.org/post',
-  method: 'POST',
-  json: { hello: 'world' },
+// POST JSON — serialize it yourself and label the body.
+await request('https://httpbingo.org/post', {
+	method: 'POST',
+	body: JSON.stringify({ hello: 'world' }),
+	headers: { 'content-type': 'application/json' }
 })
 
-// POST form
-await request({
-  url: 'https://httpbingo.org/post',
-  method: 'POST',
-  form: { user: 'alice', role: 'admin' },
+// POST form — URLSearchParams supplies the content-type automatically.
+await request('https://httpbingo.org/post', {
+	method: 'POST',
+	body: new URLSearchParams({ user: 'alice', role: 'admin' })
 })
 
-// Query string
-await request({
-  url: 'https://httpbingo.org/get',
-  qs: { hello: 'world', n: 42 },
-})
+// Query string — part of the input URL.
+const url = new URL('https://httpbingo.org/get')
+url.search = new URLSearchParams({ hello: 'world', n: String(42) }).toString()
+await request(url)
 ```
 
 ---
 
 ## Request options
 
-| Option | Type | Default | Notes |
-|---|---|---|---|
-| `url` / `uri` | string | required | |
-| `method` | string | `'GET'` | |
-| `headers` | `HeadersInit` | `{}` | merged into the profile's header set; non-identity keys override in place, new keys append. Identity headers (`user-agent`, `sec-ch-ua*`) are fixed by the profile — a different value throws `EHEADERFIXED`. |
-| `body` | `BodyInit` \| Buffer \| object \| Readable | `null` | object → JSON when `json: true`. Accepts fetch `BodyInit` (including `Blob`, `FormData`, `URLSearchParams`, web `ReadableStream`) and Node `Readable`. |
-| `json` | bool \| object | `false` | if object, used as the request body with `content-type: application/json`; `true` does the same for an object `body`. It does not affect response parsing — use `res.json()`. |
-| `form` | object | — | `application/x-www-form-urlencoded` body |
-| `qs` | object | — | querystring appended to url |
-| `jar` | `request.jar()` | — | cookie persistence across requests |
-| `gzip` | bool | — | accepted for request.js compatibility; **no-op**. Response bodies are auto-decompressed based on the response's `Content-Encoding` header. To receive raw compressed bytes, override `Accept-Encoding: identity` in `headers`. |
-| `redirect` | `'follow' \| 'manual' \| 'error'` | `'follow'` | fetch-style redirect handling. |
-| `maxRedirects` | number | `10` | |
-| `timeout` | ms | — | single-phase timer. Responses always stream, so this is the **response-headers deadline**. Overrides the 60s response default. |
-| `timeouts` | object | — | per-phase timeouts: `{ connect, tlsHandshake, response, bodyIdle }`, all in ms. `response` is the header deadline; it defaults to **60_000ms** (60s) when neither `timeouts.response` nor `timeout` is set. `bodyIdle` (default `0`, disabled) cancels a streamed body that makes no progress for N ms. Pass `timeouts: { response: 0 }` to disable the header deadline. |
-| `proxy` | object | — | `{ url, authorization?, headers?, keepAlive? }` — all proxy settings live here; see [Proxies](#proxies). `proxy: null` clears a default. |
-| `retry` | object | none | `{ limit, methods, statusCodes, baseDelayMs }`; status-based retries inspect `res.status` directly |
-| `profile` | string | `'chrome147-mac'` | which fingerprint profile to emit |
-| `h3` | bool | `false` | opt in to HTTP/3 for this request; QUIC is tried first and TCP+TLS is used when the QUIC handshake cannot complete |
-| `resume` | bool | `true` | offer a cached TLS 1.3 `NewSessionTicket` (`pre_shared_key`) on the next connection to the same host. The extra extension changes JA3/JA4, so pass `false` for a fresh-handshake fingerprint — see [TLS 1.3 session resumption](#tls-13-session-resumption). h3/QUIC is not resumed. |
-| `keepalive` | bool | `true` | fetch's spelling. Reuse live HTTP/2 connections across requests (multiplex streams onto one socket per origin, like Chrome). Pass `false` for one-shot connections. When the pool has no capacity the request opens a connection and closes it after the response, so this can never hold more sockets than the [pool caps](#connection-pool) allow. Not pooled: h1 and h3 connections. |
-| `verifyTLS` | bool | `true` | Validate the server certificate chain (RFC 5280) + hostname (RFC 6125 SubjectAltName). |
-| `signal` | `AbortSignal` | — | Abort the request or an in-flight response body. Before headers the promise rejects; after headers `res.body` errors. |
+The URL is the **first argument** (`string`, `URL` or `Request`); there is no `url`/`uri` field
+in `init`. Everything else is fetch-shaped:
+
+| Option      | Type                              | Default           | Notes                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ----------- | --------------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `method`    | `HttpMethod`                      | `'GET'`           | Registered HTTP methods in either case (`GET`/`get`, `PATCH`/`patch`, …). The runtime still accepts any HTTP token; the type is deliberately closed.                                                                                                                                                                                                                                                    |
+| `headers`   | `HeadersInit`                     | `{}`              | `Headers`, tuple lists or plain records; merged into the profile's header set. Non-identity keys override in place, new keys append. Identity headers (`user-agent`, `sec-ch-ua*`) are fixed by the profile — a different value throws `EHEADERFIXED`.                                                                                                                                                  |
+| `body`      | `BodyInit`                        | `null`            | `string`, `Buffer`/`Uint8Array`, `ArrayBuffer`, `Blob`, `FormData`, `URLSearchParams`, web `ReadableStream`. No plain objects and no Node `Readable`; serialize JSON with `JSON.stringify`. Only body types with their own media type (`FormData`, `URLSearchParams`, typed `Blob`) set `content-type` automatically.                                                                                   |
+| `jar`       | `request.jar()`                   | —                 | cookie persistence across requests                                                                                                                                                                                                                                                                                                                                                                      |
+| `redirect`  | `'follow' \| 'manual' \| 'error'` | `'follow'`        | fetch-style redirect handling; `follow` stops after **20 hops** (the Fetch standard limit) with `ETOOMANYREDIRECTS`.                                                                                                                                                                                                                                                                                    |
+| `signal`    | `AbortSignal`                     | —                 | The only user-controlled deadline: abort before headers rejects the promise; after headers `res.body` errors. `AbortSignal.timeout(ms)` is the recommended way to cap a request.                                                                                                                                                                                                                        |
+| `proxy`     | object                            | —                 | `{ url, authorization?, headers?, keepAlive? }` — all proxy settings live here; see [Proxies](#proxies). `proxy: null` clears a default.                                                                                                                                                                                                                                                                |
+| `retry`     | object                            | none              | `{ limit, methods, statusCodes, baseDelayMs }`; status-based retries inspect `res.status` directly                                                                                                                                                                                                                                                                                                      |
+| `profile`   | string                            | `'chrome147-mac'` | which fingerprint profile to emit                                                                                                                                                                                                                                                                                                                                                                       |
+| `keepalive` | bool                              | `true`            | Reuse live h2/h3/h1 connections across requests (h2 multiplexes streams onto one socket per origin, h3 reuses the QUIC session, h1 parks an exclusive socket between requests). Pass `false` for one-shot connections. When the pool has no capacity the request opens a connection and closes it after the response, so this can never hold more sockets than the [pool caps](#connection-pool) allow. |
+| `verifyTLS` | bool                              | `true`            | Validate the server certificate chain (RFC 5280) + hostname (RFC 6125 SubjectAltName).                                                                                                                                                                                                                                                                                                                  |
+
+Removed options (`url`, `uri`, `json`, `form`, `qs`, `gzip`, `resume`, `h3`,
+`maxRedirects`, `timeout`, `timeouts`), the object call form, and callbacks all
+reject with `EBADOPTS` at runtime and are rejected by `index.d.ts` in TypeScript.
+Compression is always automatic; transport, TLS resumption and redirect limits
+are internal state — see [Timeouts and redirects](#timeouts-and-redirects) and
+[HTTP/3 and automatic transport](#http3-and-automatic-transport).
 
 > Responses always stream, like `fetch()`: `request()` resolves once the headers arrive and
 > `Response.body` delivers the rest progressively. Redirects are the exception — their
@@ -174,10 +175,10 @@ before `priority`, matching the browser header order.
 
 ```js
 await request.get('https://httpbingo.org/get')
-await request.post({ url: 'https://httpbingo.org/post', body: '...' })
-await request.put({ url: '...', json: { … } })
+await request.post('https://httpbingo.org/post', { body: '...' })
+await request.put('https://...', { body: JSON.stringify({ … }) })
 await request.del('https://...')
-await request.patch({ url: '...', form: { … } })
+await request.patch('https://...', { body: new URLSearchParams({ … }) })
 await request.head('https://...')
 await request.options('https://...')
 
@@ -185,7 +186,7 @@ const api = request.defaults({
   headers: { 'x-api-key': '…' },
 })
 
-const r = await api({ url: 'https://api.example.com/users' }) // Response
+const r = await api('https://api.example.com/users') // Response
 const data = await r.json()
 const r2 = await api.get('https://api.example.com/things/42')
 ```
@@ -201,15 +202,15 @@ suffix list defense.
 ```js
 const jar = request.jar()
 
-await request({
-  url: 'https://example.com/login',
-  jar, method: 'POST',
-  form: { user: '…', pass: '…' },
+await request('https://example.com/login', {
+	jar,
+	method: 'POST',
+	body: new URLSearchParams({ user: '…', pass: '…' })
 })
 
 // Subsequent requests sharing the same jar send saved cookies automatically.
 // Domain matching, path matching, Secure on https-only, all honored.
-const me = await request({ url: 'https://example.com/account', jar, json: true })
+const me = await request('https://example.com/account', { jar })
 ```
 
 To defend against supercookies (`Domain=co.uk`), plug in a public suffix list:
@@ -217,7 +218,7 @@ To defend against supercookies (`Domain=co.uk`), plug in a public suffix list:
 ```js
 const jar = request.jar()
 // A Set or a function(host) -> boolean
-jar.setPublicSuffixList(new Set(['co.uk', 'github.io', /* ... */]))
+jar.setPublicSuffixList(new Set(['co.uk', 'github.io' /* ... */]))
 ```
 
 The jar drops expired cookies automatically on read; call `jar.gc()` to bound memory
@@ -225,31 +226,34 @@ under high churn.
 
 ---
 
-## Per-phase timeouts
+## Timeouts and redirects
+
+There are no `timeout`, `timeouts` or `maxRedirects` options. Like a browser, hellojs
+owns the transport deadlines and keeps its own redirect state:
+
+| Phase                     | Fixed budget | Behavior on expiry                                          |
+| ------------------------- | ------------ | ----------------------------------------------------------- |
+| TCP connect (per attempt) | 30 s         | `ETIMEDOUT`, then the transport race can try the other path |
+| Overall connect job       | 30 s         | `ETIMEDOUT`; cancels every in-flight dial                   |
+| TLS 1.2/1.3 handshake     | 30 s         | `ETIMEDOUT`                                                 |
+| Proxy CONNECT / hop       | 30 s         | `ETIMEDOUT`                                                 |
+| QUIC handshake (h3)       | 2 s          | falls back to TCP                                           |
+| Redirect chain            | 20 hops      | `ETOOMANYREDIRECTS` (Fetch Standard limit)                  |
+
+These are the Chromium-shaped connect budgets, not a public knob. **There is no
+response-header deadline and no body-idle watchdog**: once headers arrive, `request()`
+has resolved and a streamed body can stay open as long as the server keeps sending —
+the same as `fetch()`. An unconsumed body keeps the socket or stream open until it is
+read, cancelled, or the signal aborts.
+
+`signal` is the only user-controlled deadline. Use `AbortSignal.timeout()` for a
+whole-request cap, or an `AbortController` for cancellation:
 
 ```js
-await request({
-  url: 'https://api.example.com/v1/things',
-  timeouts: {
-    connect:      2_000,   // TCP connect must complete within 2s
-    tlsHandshake: 5_000,   // TLS 1.2/1.3 handshake completion deadline
-    response:    10_000,   // response-headers deadline
-    bodyIdle:    30_000,   // optional: cancel a body that stalls for 30s
-  },
+await request('https://api.example.com/v1/things', {
+	signal: AbortSignal.timeout(10_000)
 })
 ```
-
-If only the legacy `timeout` option is set, it applies to the response phase.
-
-**Response-phase default: 60s.** If you don't pass `timeouts.response` OR `timeout`, requests
-still die after 60 seconds so a bad server can't hang a process indefinitely. To opt out
-explicitly (long-poll, SSE, download of unknown duration), pass `timeouts: { response: 0 }`.
-
-Responses always stream, so `response` only governs the time to **headers**. Once the
-promise resolves, the body can stay open for as long as the server keeps sending. That
-matches `fetch()`, but it also means an unconsumed or stalled body holds the socket until
-you read/cancel it. Set `timeouts.bodyIdle` to opt into an idle-body watchdog; a stall
-fails `res.body` with `EBODYIDLE` and closes the transport.
 
 ### Streaming response bodies
 
@@ -262,7 +266,9 @@ you when you do want the whole body.
 ```js
 const res = await request('https://example.com/big.iso')
 console.log(res.status, res.headers.get('content-length'))
-for await (const chunk of res.body) { /* Uint8Array */ }
+for await (const chunk of res.body) {
+	/* Uint8Array */
+}
 
 // Node stream interop:
 import { Readable } from 'node:stream'
@@ -276,36 +282,38 @@ Fetch parity details:
 
 - Redirects are followed after their (small) bodies are buffered, so the redirect
   target is complete. 4xx/5xx responses resolve like `fetch()`; inspect `res.ok`.
+- Redirects are counted internally and capped at 20 hops — there is no `maxRedirects`
+  option. `redirect: 'error'` rejects on the first redirect.
 - Errors before headers reject the `request()` promise. Errors after headers reject
   `res.body` and emit `request:error`; they are not retried because the request already
   resolved.
 - An unconsumed body keeps the H1 socket / H2 stream alive until it is read, cancelled
-  (`res.body.cancel()`) or the signal aborts. Set `timeouts.bodyIdle` if you need a
-  watchdog.
+  (`res.body.cancel()`) or the signal aborts. There is no body-idle watchdog; use
+  `AbortSignal.timeout()` if you need a deadline.
 - `simple`, `bodyOnly`, and the request.js callback form were removed. Passing
   `simple: true` or `bodyOnly: true`, or a callback function, rejects with `EBADOPTS`.
-- H2 applies real inbound backpressure by deferring the per-stream `WINDOW_UPDATE` while
-  the consumer is behind. H3 does not implement QUIC receive flow control yet, so it caps
-  the in-process buffer at 16 MiB and fails the body with `EBODYBACKPRESSURE` instead of
-  growing without bound.
-- H1 and H2 pause the transport/source while the consumer is behind; H3's cap is the
-  interim safety valve until QUIC flow control lands.
+- All three transports pause when the consumer falls behind: H2 defers the per-stream
+  `WINDOW_UPDATE`, H1 pauses the socket, and H3 withholds QUIC `MAX_DATA` /
+  `MAX_STREAM_DATA` grants and pauses the stream. There is no fixed in-process body
+  buffer cap and no `EBODYBACKPRESSURE` failure on the h3 path.
 
 The body is auto-decompressed (gzip / brotli / deflate / zstd — through `node:zlib`) before
 it reaches `res.body`/`res.text()`/`res.json()`.
 
 ### Streaming request bodies
 
-For large uploads, pass a Node `Readable`, a web `ReadableStream`, or any `BodyInit`.
-On H2/H3 it streams as DATA frames; on H1 it streams via `Transfer-Encoding: chunked`.
+For large uploads, pass a web `ReadableStream` (or any other `BodyInit`). Node streams
+are not request bodies anymore; wrap them with `Readable.toWeb()` if needed. On H2/H3
+the stream goes out as DATA frames; on H1 it uses `Transfer-Encoding: chunked`.
 
 ```js
 import { createReadStream } from 'node:fs'
+import { Readable } from 'node:stream'
+
 await request('https://upload.example.com/blob', {
-  method: 'POST',
-  body: createReadStream('./big-file.bin'),
-  headers: { 'content-type': 'application/octet-stream' },
-  duplex: 'half',
+	method: 'POST',
+	body: Readable.toWeb(createReadStream('./big-file.bin')),
+	headers: { 'content-type': 'application/octet-stream' }
 })
 ```
 
@@ -315,14 +323,17 @@ await request('https://upload.example.com/blob', {
 
 The keep-alive pool owns sockets process-wide, so its caps are configured once with a static
 call — they are not a request option. `keepalive` stays per request (default `true`): pass
-`false` to opt that request out of the pooled h2 socket.
+`false` to opt that request out of the pooled h2/h3/h1 socket. Bundles are keyed by origin,
+actual dial target (Alt-Svc can move it) and negotiated protocol, so a stale or different
+transport never inherits another endpoint's socket.
 
 ```js
 import request from '@unreleased/hellojs'
 
 request.setPoolConfig({ maxSockets: 8, maxPerOrigin: 2, idleMs: 30_000 })
-await request({ url: 'https://example.com' })                    // pooled
-await request({ url: 'https://example.com', keepalive: false })    // one-shot
+await request('https://example.com') // pooled
+await request('https://example.com', { keepalive: false }) // one-shot
+request.clearPool() // close and forget every pooled socket (test/shutdown helper)
 ```
 
 Defaults are `{ maxSockets: 16, maxPerOrigin: 1, idleMs: 15_000 }`. `setPoolConfig()` takes a
@@ -334,6 +345,72 @@ The same caps bound the proxy-hop pool ([`proxy.keepAlive`](#reusing-the-proxy-c
 counted separately). A change applies to sockets released after the call — an already-idle
 socket keeps its existing idle timer.
 
+### Keepalive in a Worker (Durable Object)
+
+A Worker isolate is short-lived, and a TCP socket belongs to the isolate that created it —
+it cannot be serialized into a Durable Object call or moved to another isolate. A module-scope
+pool in a Worker therefore only helps two requests that happen to land on the **same** isolate.
+To make reuse deterministic, keep the Worker stateless and let one named Durable Object own
+the client and the pool:
+
+```
+Worker (stateless) ──stub.fetch()──▶ Durable Object (hellojs + pool) ──▶ origin
+```
+
+`examples/connection-do.ts` is that DO. `examples/worker.ts` forwards `/run` to its tour path
+and `/proxy?url=...` to its proxy path; the DO calls `request()` with `keepalive: true` (the
+default), so later calls reuse the live h2 session for the same origin+profile. Only requests and
+responses cross the boundary, never sockets. `wrangler.jsonc` supplies the binding, the
+`new_classes` migration and the `ALLOWED_HOSTS` variable used by the Worker's proxy guard.
+
+```jsonc
+"durable_objects": { "bindings": [{ "name": "HELLO_POOL", "class_name": "HelloConnectionDO" }] },
+"migrations": [{ "tag": "v1", "new_classes": ["HelloConnectionDO"] }],
+"vars": { "ALLOWED_HOSTS": "httpbingo.org,tls.peet.ws" }
+```
+
+The `/proxy` route is allowlisted on purpose: an unrestricted `?url=` endpoint is an open
+relay. Only `http:`/`https:`, no URL credentials, no loopback/private targets, and the hostname
+must appear in `ALLOWED_HOSTS`. The same guard is a pure function in
+`examples/proxy-policy.ts`, covered by `test/unit/proxy-policy.test.ts`.
+
+**What this does and does not promise:**
+
+- The pool is **in-memory**, not durable. Eviction, a crash, or an idle DO drops it; the next
+  request handshakes again. An open socket keeps the DO resident for up to 15 minutes, then
+  normal eviction rules resume. `evictDurableObject()` in `test/unit/durable-object.test.ts`
+  demonstrates the reset.
+- The example calls `setPoolConfig({ idleMs: 60_000 })` inside the DO to widen the reuse window
+  from the library's 15s default. A longer idle window costs DO duration time while the socket
+  sits open.
+- A Durable Object is single-threaded, and hellojs does pure-JS TLS plus h2 framing on that
+  thread. CPU work blocks the object's other requests; a single global DO maximizes reuse but
+  is also a single point of contention. Shard by `getByName()` if CPU becomes the bottleneck —
+  each shard then has its own pool.
+- Every request pays for a DO fetch and, while sockets stay open, DO duration. Compare that
+  against the handshake latency the pool saves before adopting this in production.
+
+`GET /run` reports `pooledSockets` (one per origin+profile; h3 and one-shot requests never
+join the pool) so the reuse is observable from the test page. The four slowest scenarios
+(external fingerprint host, redirect chain, cookie redirect, h3 fallback) spend most of their
+time on network round trips; `GET /run?fast=1` runs four representative scenarios instead
+(GET, POST json, custom headers, status), which is the useful mode for a local smoke test.
+Every scenario is a live request, so even a plain GET can take 20 s when the upstream is slow.
+The test page exposes the same choice as a checkbox.
+
+For an apples-to-apples latency check, `GET /bench?url=https%3A%2F%2Fhttpbingo.org%2Fget&n=5`
+runs the same URL five times sequentially in three modes: the Worker's native `fetch()`, hellojs
+through the DO with `keepalive: false`, and hellojs with `keepalive: true`. Each hellojs run
+starts from an empty pool and the response reports per-request times, totals and medians plus
+the final pool size. `&mode=native|false|true` isolates one mode.
+
+`httpbingo.org` is far too jittery to benchmark against (a direct `curl` ranged from 1 s to
+30 s between consecutive calls), and it made hellojs look slower than native fetch. Against a
+stable target (`GET /bench?url=https%3A%2F%2Fapi.github.com%2F&n=5`), two consecutive runs
+gave medians of **~70–85 ms** for hellojs with keepalive, **~420–440 ms** with keepalive off,
+and **~290–550 ms** for native fetch — keepalive reuses one h2 socket (`pooledSockets: 1`) and
+is 4–5× faster than either one-shot path. Compare medians across repeated runs, not totals.
+
 ---
 
 ## Proxies
@@ -341,7 +418,7 @@ socket keeps its existing idle timer.
 ### HTTP CONNECT
 
 ```js
-await request({ url: 'https://example.com', proxy: { url: 'http://user:pass@proxy:8080' } })
+await request('https://example.com', { proxy: { url: 'http://user:pass@proxy:8080' } })
 ```
 
 `url` is required: `proxy: {}` (or a missing/blank URL) rejects with `EBADOPTS` before
@@ -351,14 +428,13 @@ any socket is opened. Basic auth credentials in the URL are auto-encoded into
 Basic auth:
 
 ```js
-await request({
-  url: 'https://example.com',
-  proxy: {
-    url: 'https://proxy.example:8443',
-    authorization: 'Bearer <jwt>',
-    headers: { 'x-tenant': 'acme' },
-    keepAlive: true,
-  },
+await request('https://example.com', {
+	proxy: {
+		url: 'https://proxy.example:8443',
+		authorization: 'Bearer <jwt>',
+		headers: { 'x-tenant': 'acme' },
+		keepAlive: true
+	}
 })
 ```
 
@@ -376,7 +452,7 @@ username/password and rejects supplied `authorization`/`headers` with `EBADOPTS`
 `proxy.keepAlive` (default `true`) keeps the connection to an `http://`/`ws://`/`https://`/`wss://`
 proxy open after the destination session closes, so the next request can issue a fresh
 CONNECT over the same socket; pass `false` for one-shot hops. Separate from the request's
-`keepalive` (which pools the h2 session to the origin), this pool is bounded by the same
+`keepalive` (which pools the h2/h3/h1 session to the origin), this pool is bounded by the same
 [process-wide caps](#connection-pool)
 and counts its sockets separately. One proxy hop is never shared by two live requests; if a
 reused hop is dead, it is discarded and the CONNECT retried once on a fresh socket. `socks5://`
@@ -385,7 +461,7 @@ and h3 never use the proxy-hop pool.
 ### HTTPS proxy (CONNECT over TLS)
 
 ```js
-await request({ url: 'https://example.com', proxy: { url: 'https://user:pass@proxy:443' } })
+await request('https://example.com', { proxy: { url: 'https://user:pass@proxy:443' } })
 ```
 
 `https://` (alias `wss://`) dials the proxy with our own TLS stack first, then sends
@@ -395,22 +471,22 @@ tunnel that follows carries the normal profile-faked handshake to the destinatio
 visible to the proxy, and it is the proxy's own certificate that gets validated under
 `verifyTLS` and the process-wide trusted roots.
 
-| scheme | default port | transport to the proxy |
-| --- | --- | --- |
-| `http://`, `ws://` (or no scheme) | 80 | plaintext TCP + CONNECT |
-| `https://`, `wss://` | 443 | TLS session, then CONNECT inside it |
-| `socks5://`, `socks5h://` | 1080 | SOCKS5 handshake |
+| scheme                            | default port | transport to the proxy              |
+| --------------------------------- | ------------ | ----------------------------------- |
+| `http://`, `ws://` (or no scheme) | 80           | plaintext TCP + CONNECT             |
+| `https://`, `wss://`              | 443          | TLS session, then CONNECT inside it |
+| `socks5://`, `socks5h://`         | 1080         | SOCKS5 handshake                    |
 
-Known limits: HTTP/3 is not supported through a proxy (`h3: true` falls back to
-TCP+CONNECT rather than silently bypassing it), a `407` answer is an `EPROXY` error
-instead of a challenge/response round, and a tunneled session pays for two TLS
+Known limits: HTTP/3 is not used through a proxy (the automatic transport selects
+TCP+CONNECT rather than silently bypassing the proxy), a `407` answer is an `EPROXY`
+error instead of a challenge/response round, and a tunneled session pays for two TLS
 keypairs — one per hop.
 
 ### SOCKS5 (RFC 1928 + RFC 1929)
 
 ```js
-await request({ url: 'https://example.com', proxy: { url: 'socks5://user:pass@proxy:1080' } })
-await request({ url: 'https://example.com', proxy: { url: 'socks5://proxy:1080' } })  // no-auth
+await request('https://example.com', { proxy: { url: 'socks5://user:pass@proxy:1080' } })
+await request('https://example.com', { proxy: { url: 'socks5://proxy:1080' } }) // no-auth
 ```
 
 `socks5h://` is accepted as an alias. We always do remote DNS resolution (the proxy
@@ -427,11 +503,11 @@ exceptions are swallowed — they never break the request.
 const request = require('@unreleased/hellojs')
 
 request.observability.on('request:end', (ev) => {
-  console.log(`req ${ev.id} ${ev.status} in ${ev.durationMs}ms; ${ev.totalBytes}B`)
+	console.log(`req ${ev.id} ${ev.status} in ${ev.durationMs}ms; ${ev.totalBytes}B`)
 })
 
 request.observability.on('request:firstByte', (ev) => {
-  histogram.observe('ttfb_ms', ev.durationMs)
+	histogram.observe('ttfb_ms', ev.durationMs)
 })
 ```
 
@@ -456,9 +532,10 @@ const request = require('@unreleased/hellojs')
 const peetJson = JSON.parse(fs.readFileSync('./captured.json', 'utf8'))
 request.profiles.registerFromPeet('chrome148-mac', peetJson)
 
-const r = await request({ url: 'https://tls.peet.ws/api/all', profile: 'chrome148-mac', json: true })
-// r.tls.ja4 will equal peetJson.tls.ja4
-// r.http2.akamai_fingerprint_hash will equal peetJson.http2.akamai_fingerprint_hash
+const r = await request('https://tls.peet.ws/api/all', { profile: 'chrome148-mac' })
+const captured = await r.json()
+// captured.tls.ja4 will equal peetJson.tls.ja4
+// captured.http2.akamai_fingerprint_hash will equal peetJson.http2.akamai_fingerprint_hash
 ```
 
 What gets cloned (the structural fingerprint — JA4, akamai_fingerprint, peetprint):
@@ -524,25 +601,97 @@ failure as a fingerprint regression.
 
 ---
 
-## HTTP/3
+## HTTP/3 and automatic transport
 
-Pure-JS QUIC + HTTP/3 client at `lib/h3/`, integrated into `request()`.
-HTTP/3 is **off by default** — a request uses h3 only when `h3: true` is passed:
+Pure-JS QUIC + HTTP/3 client at `lib/h3/`, integrated into `request()`. There is no
+`h3` option — transport is picked from internal state, like a browser:
+
+1. A live pooled session for the origin/dial target wins immediately: h3, then h2, then an
+   idle h1 socket (if there is one).
+2. Otherwise QUIC starts first and TCP+TLS starts **300 ms later** (Chromium's
+   `quic_delay_tcp_race`). Whichever handshake completes first wins; the loser is
+   closed at once. A QUIC handshake has a 2 s budget, so origins without QUIC do
+   not stall the request.
+3. No UDP provider, a configured proxy, or an Alt-Svc hint of h2/h1 skips QUIC
+   entirely and goes straight to TCP/CONNECT.
 
 ```js
-// Explicit h3 — opt in per request. QUIC is tried first; when the handshake
-// cannot complete (an origin with no QUIC endpoint), the request falls back
-// to TCP + TLS after a bounded budget instead of waiting out the QUIC Initial
-// retransmits.
-await request({ url: 'https://www.cloudflare.com/', h3: true })
-
-// Without the flag every request stays on TCP + TLS, even if the server
-// advertises `alt-svc: h3=":443"`
-await request({ url: 'https://www.cloudflare.com/api/foo' })   // h2
+await request('https://www.cloudflare.com/') // h3 or h2, chosen automatically
+await request('https://www.cloudflare.com/', { keepalive: false }) // fresh race, no pool
 ```
 
-h3-capable origins stay on QUIC; everything else falls back in roughly the
-default 2s QUIC handshake budget. Pass `timeouts: { connect }` to override it.
+### Capability matrix
+
+Everything below is internal state — none of these rows is a request option. "Supported"
+means the library does it automatically when the peer and the environment allow it.
+
+| Capability                             | HTTP/3 (QUIC)                                             | HTTP/2 (TCP + TLS)                                   | HTTP/1.1 (TCP + TLS)                                 |
+| -------------------------------------- | --------------------------------------------------------- | ---------------------------------------------------- | ---------------------------------------------------- |
+| Keep-alive / connection reuse          | Yes — QUIC session reused across requests                 | Yes — bounded process-wide pool, multiplexed streams | Yes — exclusive socket parked between requests       |
+| TLS 1.3 session resumption (1-RTT PSK) | Yes — internal ticket store, keyed by host/port/ALPN      | Yes — internal ticket store, keyed by host/port/ALPN | Yes — internal ticket store, keyed by host/port/ALPN |
+| 0-RTT / early data                     | No                                                        | No — replays requests                                | No — replays requests                                |
+| Learns `Alt-Svc` response header       | Yes                                                       | Yes                                                  | Yes                                                  |
+| Learns h2 `ALTSVC` frame (`0xa`)       | No                                                        | Yes                                                  | N/A — h1 has no frames                               |
+| Uses a cached Alt-Svc hint             | `h3` → QUIC directly, TCP fallback on failure             | `h2`/`h1` → TCP path, QUIC skipped                   | `h2`/`h1` → TCP path, QUIC skipped                   |
+| `Alt-Used` on alternative requests     | Yes                                                       | Yes                                                  | Yes                                                  |
+| Automatic selection                    | pooled h3 first, otherwise QUIC then TCP 300 ms later     | pooled session first, otherwise the race or TCP      | pooled h1 first, otherwise TCP (no UDP/proxy/hint)   |
+| Streamed response body                 | Yes — QUIC `MAX_DATA`/`MAX_STREAM_DATA` backpressure      | Yes — HTTP/2 WINDOW_UPDATE                           | Yes — TCP receive window                             |
+| Flow control / backpressure            | Receive windows granted as the app reads; no fixed cap    | Stream and connection windows                        | Socket pause/resume on consumer drain                |
+| Through an HTTP/SOCKS proxy            | No — QUIC cannot be tunneled; TCP/CONNECT is used instead | Yes                                                  | Yes                                                  |
+
+Resumption applies to TLS 1.3 on every transport: h3 caches QUIC `NewSessionTicket` PSKs
+and offers them in the QUIC ClientHello, while h2/h1 use the TCP TLS ticket store. The
+store is shared and ALPN-scoped, so h3 and h2 tickets for the same origin coexist and
+`clearSessionTickets()` empties all of them. A resumed ClientHello carries `pre_shared_key`,
+so fingerprint comparisons must use the same resumption state on both sides. Alt-Svc
+header parsing and `421` invalidation are protocol-independent; only the `ALTSVC` frame
+is h2-specific. See [TLS 1.3 session resumption](#tls-13-session-resumption) and
+[Alt-Svc](#alt-svc-rfc-7838) for details.
+
+### Chrome reference (Chromium defaults)
+
+Same rows, as Chrome behaves with stock Chromium defaults. These are browser defaults,
+not knobs hellojs exposes; flags, field trials and enterprise policy can change them.
+
+| Capability                             | HTTP/3 (QUIC)                                                                                               | HTTP/2 (TCP + TLS)                                       | HTTP/1.1 (TCP + TLS)                        |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------- |
+| Keep-alive / connection reuse          | Yes — `QuicSessionPool` reuses sessions (30 s idle default)                                                 | Yes — `SpdySessionPool` multiplexes onto one connection  | Yes — bounded TCP socket pool               |
+| TLS 1.3 session resumption (1-RTT PSK) | Yes — QUIC crypto config caches resumption state                                                            | Yes — `SSLClientSessionCache`                            | Yes — `SSLClientSessionCache`               |
+| 0-RTT / early data                     | Yes — QUIC 0-RTT when the server allows it and the request is replay-safe                                   | No — `kEnableTLS13EarlyData` is off by default           | No — same feature flag is off by default    |
+| Learns `Alt-Svc` response header       | Yes — primary h3 discovery                                                                                  | Yes — h3 entries; h2 entries off by default              | Yes — h3 entries; h2 entries off by default |
+| Learns h2 `ALTSVC` frame (`0xa`)       | N/A — Chromium uses h3's own discovery path                                                                 | Yes — parsed in `SpdySession`; h2 alternatives still off | N/A — h1 has no frames                      |
+| Uses a cached Alt-Svc hint             | h3 entry → QUIC alternative job, with TCP fallback                                                          | h3 entry → QUIC; h2 hint ignored by default              | h3 entry → QUIC; h2 hint ignored by default |
+| `Alt-Used` on alternative requests     | No — Chromium does not send the header (RFC 7838 only says SHOULD)                                          | No                                                       | No                                          |
+| Automatic selection                    | QUIC attempted by default (Alt-Svc or DNS HTTPS ALPN), TCP runs in parallel or after a short platform delay | TCP main job, h2 via ALPN                                | TCP main job, HTTP/1.1 via ALPN             |
+| Streamed response body                 | Yes — `Response.body` is a `ReadableStream`                                                                 | Yes                                                      | Yes                                         |
+| Flow control / backpressure            | QUIC stream + connection receive windows                                                                    | HTTP/2 WINDOW_UPDATE                                     | TCP receive window                          |
+| Through an HTTP/SOCKS proxy            | No for HTTP/SOCKS — TCP/CONNECT; a separate QUIC proxy scheme exists                                        | Yes                                                      | Yes                                         |
+
+Key differences from hellojs: both pool h2/h3/h1 connections and do 1-RTT PSK resumption,
+but Chrome supports QUIC 0-RTT, ignores h2 Alt-Svc hints by default, and does not send
+`Alt-Used`. hellojs deliberately skips 0-RTT, accepts h2/h1 Alt-Svc hints, and sends
+`Alt-Used` on every request that actually uses an alternative. Sources:
+[features.cc](https://chromium.googlesource.com/chromium/src/+/main/net/base/features.cc),
+[http_network_session.h](https://chromium.googlesource.com/chromium/src/+/HEAD/net/http/http_network_session.h),
+[quic_context.h](https://chromium.googlesource.com/chromium/src/+/HEAD/net/quic/quic_context.h),
+[http_stream_factory_job_controller.cc](https://chromium.googlesource.com/chromium/src/+/main/net/http/http_stream_factory_job_controller.cc).
+
+### Alt-Svc (RFC 7838)
+
+Servers can advertise an alternative via the `Alt-Svc` response header or an HTTP/2
+`ALTSVC` frame (type `0xa`). The cache is internal and keyed by origin:
+
+- `ma` sets freshness (default 24 h); `clear` invalidates the origin; a `421` drops
+  the cached entry. The cache lives in process memory (no on-disk persistence).
+- A cached `h3` hint skips the race and dials QUIC first; a failed handshake marks
+  that entry broken and the next request goes straight to TCP.
+- Requests actually sent to an alternative carry `Alt-Used`. SNI, `Host` and
+  certificate checks always stay on the **origin** authority — only the dial target
+  moves to the advertised host/port.
+- Proxy requests neither learn nor use Alt-Svc.
+- Fingerprint verification is transport-specific: a QUIC ClientHello is not a TCP
+  ClientHello. When comparing against a TCP capture, disable QUIC for that process
+  with `request.udp.setUdpProvider(null)` so both observations use the same transport.
 
 Or use the lower-level QUIC + H3 layer directly:
 
@@ -552,13 +701,13 @@ const { H3Client } = require('@unreleased/hellojs/lib/h3/h3')
 
 const conn = new QuicConnection('cloudflare-quic.com', 443)
 conn.on('ready', async () => {
-  const res = await new H3Client(conn).request({
-    method: 'GET',
-    path: '/',
-    host: 'cloudflare-quic.com',
-  })
-  console.log(res.status, res.headers, res.body.length)
-  conn.close()
+	const res = await new H3Client(conn).request({
+		method: 'GET',
+		path: '/',
+		host: 'cloudflare-quic.com'
+	})
+	console.log(res.status, res.headers, res.body.length)
+	conn.close()
 })
 await conn.connect()
 ```
@@ -572,17 +721,17 @@ swap. Runtimes without a UDP API — worker/edge sandboxes — can take HTTP/3 o
 without deleting the QUIC code:
 
 ```js
-const request = require('@unreleased/hellojs')
+import request from '@unreleased/hellojs'
 
-request.udp.setUdpProvider(null)          // h3 becomes unavailable
-await request({ url: 'https://…', h3: true })   // → TCP + TLS fallback, still 200
+request.udp.setUdpProvider(null) // QUIC skipped; transport selection uses TCP
+await request('https://…') // still 200
 ```
 
-`setUdpProvider(null)` makes `createSocket()` throw `EUDPUNAVAILABLE`, which the h3
-fallback path turns into a plain TCP request. A runtime that *does* expose datagram
-sockets installs its own provider instead — any object with `on('message'|'error')`,
-`bind(port, cb)`, `send(buf, port, host[, cb])`, `close()` and a `destroyed` flag
-(the subset of `dgram.Socket` we use):
+`setUdpProvider(null)` makes `createSocket()` throw `EUDPUNAVAILABLE`, which the
+transport selector treats as "go straight to TCP". A runtime that _does_ expose
+datagram sockets installs its own provider instead — any object with
+`on('message'|'error')`, `bind(port, cb)`, `send(buf, port, host[, cb])`, `close()` and
+a `destroyed` flag (the subset of `dgram.Socket` we use):
 
 ```js
 request.udp.setUdpProvider((type) => myRuntimeUdpSocket(type))
@@ -590,18 +739,20 @@ request.udp.setUdpProvider((type) => myRuntimeUdpSocket(type))
 
 With no provider configured the seam resolves to `dgram`, so Node needs no setup.
 
-`examples/worker.ts` is the worked version of this: a Worker (workerd) entry point whose
-runtime has no outbound UDP, so it takes HTTP/3 off the table at module scope, installs the
-generated Mozilla root bundle from `examples/root-certificates.ts` (workerd ships no roots),
-and still serves `h3: true` requests over TCP + TLS. Open the URL wrangler prints and the
-Worker serves its run-test page (`/run-test.html`): one button runs all fourteen scenarios
-from `examples/scenarios.ts` concurrently and colors each result; `GET /run` answers the
-same report as JSON.
+`examples/worker.ts` plus `examples/connection-do.ts` are the worked version of this. The
+Worker is stateless and imports no TLS code; the Durable Object it forwards to has no outbound
+UDP, so it takes HTTP/3 off the table at module scope, installs the generated Mozilla root
+bundle from `examples/root-certificates.ts` (workerd ships no roots), and still serves
+every request over TCP + TLS. Open the URL wrangler prints and the Worker serves its
+run-test page (`/run-test.html`): one button runs all fourteen scenarios from
+`examples/scenarios.ts` concurrently inside the DO and colors each result; `GET /run` answers
+the same report as JSON, plus a `pooledSockets` count. See
+[Keepalive in a Worker](#keepalive-in-a-worker-durable-object).
 
 `examples/node.ts` is the same tour on Node: `npm run example:node` runs all fourteen
 scenarios concurrently and prints the report. Node needs no module-scope setup — it has a
-real `node:dgram` transport (so `h3: true` actually attempts QUIC), a built-in trust store,
-and Node 24.21+ supplies ML-KEM through `node:crypto.webcrypto`.
+real `node:dgram` transport (so the QUIC/TCP race actually attempts h3), a built-in trust
+store, and Node 24.21+ supplies ML-KEM through `node:crypto.webcrypto`.
 
 `wrangler.jsonc` is the single source of truth for the runtime config:
 `compatibility_date` plus `nodejs_compat` (for the `node:` modules hellojs uses) and
@@ -634,13 +785,13 @@ executes the library tests is the runtime the library is written for.
 
 ### Server compatibility
 
-| Server | Result |
-|---|---|
-| `cloudflare-quic.com` | ✅ |
-| `www.cloudflare.com` | ✅ |
-| `quic.aiortc.org` | ✅ |
-| `www.google.com` | timeout (likely MTU/firewall on test network) |
-| `cloud.google.com` | timeout |
+| Server                | Result                                        |
+| --------------------- | --------------------------------------------- |
+| `cloudflare-quic.com` | ✅                                            |
+| `www.cloudflare.com`  | ✅                                            |
+| `quic.aiortc.org`     | ✅                                            |
+| `www.google.com`      | timeout (likely MTU/firewall on test network) |
+| `cloud.google.com`    | timeout                                       |
 
 ---
 
@@ -649,18 +800,18 @@ executes the library tests is the runtime the library is written for.
 By default (`verifyTLS: true`), hellojs validates the server's certificate chain
 on every handshake — both TLS 1.3 and TLS 1.2. A request to a host whose cert
 doesn't chain to a trusted root, doesn't match the hostname, or is outside its
-validity window will be rejected with `ETLS_CERT_VERIFY` *before any application
-data is sent*.
+validity window will be rejected with `ETLS_CERT_VERIFY` _before any application
+data is sent_.
 
 ```js
 // Default — chain is validated, hostname must match, must terminate in
 // Node's bundled root CAs (tls.rootCertificates). MITM proxies are rejected.
-await request({ url: 'https://api.example.com/' })
+await request('https://api.example.com/')
 
 // Opt out — handshake completes regardless of cert validity. Useful for
 // self-signed dev servers or when you've wired your own validation elsewhere.
 // Treat this as analogous to curl -k / NODE_TLS_REJECT_UNAUTHORIZED=0.
-await request({ url: 'https://localhost:8443/', verifyTLS: false })
+await request('https://localhost:8443/', { verifyTLS: false })
 ```
 
 ### What's checked
@@ -687,7 +838,7 @@ none (workerd's `node:tls` reports an empty `rootCertificates`), and useful for 
 CA. `examples/root-certificates.ts` is the generated Mozilla bundle the Worker example
 installs at module scope.
 
-On TLS 1.2, the server's `ServerKeyExchange` signature is *additionally* verified
+On TLS 1.2, the server's `ServerKeyExchange` signature is _additionally_ verified
 against the leaf cert's public key — this authenticates the ECDHE parameters
 themselves, not just the cert chain. (TLS 1.3 has equivalent built-in via
 `CertificateVerify`.)
@@ -727,71 +878,93 @@ certificate validation failed: OCSP responder reported the leaf as revoked
 
 ## TLS 1.3 session resumption
 
-TLS 1.3 PSK resumption (RFC 8446 §4.6.1) is on by default. The handshake stores each
-`NewSessionTicket` the server sends; later handshakes to the
+TLS 1.3 PSK resumption (RFC 8446 §4.6.1) is internal state, not a request option. The
+handshake stores each `NewSessionTicket` the server sends; later handshakes to the
 same `host:port` offer the most recent ticket in `pre_shared_key` as the last
 ClientHello extension and reuse it when `ServerHello` selects it. The resumption
 master secret and per-ticket PSK are derived per RFC 8446 §7.1, and the ClientHello
 binder (§4.2.11.2) is verified byte-for-byte against the RFC 8448 §4 vector in the
-test suite.
+test suite. QUIC carries the same handshake messages on its 1-RTT CRYPTO stream, so
+h3 uses the same schedule and the same ticket store; Retry simply replays the already
+built ClientHello.
 
 - Only tickets from handshakes whose chain was verified are offered to requests that
   require verification (`verifyTLS: true`), so a `verifyTLS: false` session cannot
-  seed a trusted connection.
+  seed a trusted connection. QUIC does not validate certificate chains, so its tickets
+  are marked unverified and stays h3-only (ALPN scoping) instead of seeding a TCP
+  handshake.
 - The store is keyed by host, port and ALPN, capped at 64 entries (LRU) with a 7-day
-  ceiling. `clearSessionTickets()` empties it.
-- On by default: a resumed ClientHello carries `pre_shared_key` (0x0029), so resumed
-  and fresh connections have different JA3/JA4. Pass `resume: false` when a stable
-  fresh-handshake fingerprint matters more than the saved certificate flight.
-- Only plain 1-RTT resumption is implemented. 0-RTT (`early_data`) would save a round
-  trip but replays requests, so it is deliberately not offered. h3/QUIC is not
-  resumed yet.
+  ceiling. h3 (`h3`) and TCP (`h2` / `http/1.1`) tickets for one origin coexist;
+  `clearSessionTickets()` empties all of them.
+- `connect()` always enables resumption internally. There is no escape hatch: a
+  resumed ClientHello carries `pre_shared_key` (0x0029), so resumed and fresh
+  connections can have different JA3/JA4.
+- Only plain 1-RTT resumption is implemented on both TCP and QUIC. 0-RTT (`early_data`)
+  would save a round trip but replays requests, so it is deliberately not offered.
 
 ```js
-await request({ url })                 // offers a cached ticket, if one exists
-await request({ url, resume: false })   // fresh handshake, stable JA3/JA4
-clearSessionTickets()                  // forget every stored ticket
+await request(url) // offers a cached ticket, if one exists
+clearSessionTickets() // forget every stored ticket
 ```
 
 ---
 
-## Migration (fetch-compatible Response)
+## Migration from request.js-shaped calls
 
-Recent releases return a **real WHATWG `Response`** (the same object shape as `fetch()`),
-with full streaming on H1/H2/H3 in Node and Cloudflare Workers.
+`request()` now has exactly fetch's call shape and always returns a real WHATWG
+`Response`, with full streaming on H1/H2/H3 in Node and Cloudflare Workers.
 
-| Old (request.js style) | New (fetch style) |
-|---|---|
-| `res.statusCode` | `res.status` |
-| `res.headers['x']` (plain object) | `res.headers.get('x')` (`Headers`) |
-| parsed `res.body` / returned body | `await res.text()` / `await res.json()` / `res.body` (`ReadableStream`) |
-| buffered response before resolving | resolves at headers and streams `res.body`; `await res.arrayBuffer()` if you need the whole body |
-| `simple: true` (4xx/5xx throw) | removed: 4xx/5xx always resolve; inspect `res.ok` and `res.status` |
+| Old                                            | New                                                                                                    |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `request({ url, ...init })`                    | `request(url, init)`                                                                                   |
+| `request.get({ url, ...init })`                | `request.get(url, init)`                                                                               |
+| `json: { ... }`                                | `body: JSON.stringify({ ... })` + `headers: { 'content-type': 'application/json' }`                    |
+| `form: { ... }`                                | `body: new URLSearchParams({ ... })` (content-type is automatic)                                       |
+| `qs: { ... }`                                  | build the query into the input `URL`                                                                   |
+| `gzip: true`                                   | nothing — decompression is automatic                                                                   |
+| `h3: true`                                     | nothing — QUIC/TCP are selected automatically                                                          |
+| `resume: false`                                | nothing — resumption is internal state                                                                 |
+| `maxRedirects: n`                              | nothing — the Fetch standard 20-hop limit is fixed                                                     |
+| `timeout` / `timeouts`                         | `signal: AbortSignal.timeout(ms)`; connect budgets are browser-shaped and fixed                        |
+| `res.statusCode`                               | `res.status`                                                                                           |
+| `res.headers['x']` (plain object)              | `res.headers.get('x')` (`Headers`)                                                                     |
+| parsed `res.body` / returned body              | `await res.text()` / `await res.json()` / `res.body` (`ReadableStream`)                                |
+| buffered response before resolving             | resolves at headers and streams `res.body`; `await res.arrayBuffer()` if you need the whole body       |
+| `simple: true` (4xx/5xx throw)                 | removed: 4xx/5xx always resolve; inspect `res.ok` and `res.status`                                     |
 | `bodyOnly: true` / callback `(err, res, body)` | removed: every call resolves a `Response`; use `await res.text()` / `res.json()` / `res.arrayBuffer()` |
-| `stream: true` resolved a Node `Readable` body | no option needed: `request()` always resolves a `Response` whose `res.body` is a web `ReadableStream` |
-| Node stream consumption | `for await (const chunk of res.body)` or `Readable.fromWeb(res.body)` |
-| `request<T>({ ... })` typed body | `const data = await res.json() as T` |
+| Node `Readable` request body                   | `Readable.toWeb(stream)` or any fetch `BodyInit`                                                       |
+| `request<T>({ ... })` typed body               | `const data = await res.json() as T`                                                                   |
+
+Any removed key still present in `init` rejects with `EBADOPTS` at runtime — this is a
+deliberate breaking change, not a silent no-op.
 
 ---
 
 ## TypeScript
 
 Type declarations ship with the package (`index.d.ts`) and are validated under
-`tsc --strict` in CI.
+`tsc --strict` in CI. `RequestOptions` lists only the fields the client actually
+consumes; other `RequestInit` fields such as `cache` or `integrity` are intentionally
+not accepted. `body` is exactly fetch's `BodyInit`, and `method` is the closed
+registered-method union (either case).
 
 ```ts
 import request, { HellojsError, type Response } from '@unreleased/hellojs'
 
 try {
-  const res: Response = await request('https://api.example.com', {
-    method: 'POST',
-    json: { name: 'x' },
-  })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  const data = (await res.json()) as { name: string }
-  console.log(res.headers.get('content-type'), data.name)
+	const res: Response = await request('https://api.example.com', {
+		method: 'POST',
+		body: JSON.stringify({ name: 'x' }),
+		headers: { 'content-type': 'application/json' },
+		signal: AbortSignal.timeout(5_000)
+	})
+	if (!res.ok) throw new Error(`HTTP ${res.status}`)
+	const data = (await res.json()) as { name: string }
+	console.log(res.headers.get('content-type'), data.name)
 } catch (e) {
-  if (e instanceof HellojsError && e.code === 'ETIMEDOUT') { /* retry */ }
+	if (e instanceof HellojsError && e.category === 'transport') {
+		/* retry */
+	}
 }
 
 // Read the body explicitly — there is no parsed-body escape hatch:
@@ -819,15 +992,15 @@ fixed-size response). Each client runs as a fresh subprocess: 1 cold request
 then 50 parallel requests. Reproduce with `npm run bench`; the same harness runs
 in CI (`bench` job) to prove every client still completes.
 
-| Client | Cold | Warm p50 | Warm p99 | 50 parallel | RSS Δ |
-|---|---:|---:|---:|---:|---:|
-| got (h2)         | 9.1 ms  | 0.3 ms   | 1.3 ms   | 6.2 ms       | 9.3 MB |
-| node-https (h1)  | 15.6 ms | 0.8 ms   | 1.4 ms   | 21.0 ms      | 15.8 MB |
-| node-http2       | 16.3 ms | **0.2 ms** | **0.4 ms** | **2.4 ms** | **7.9 MB** |
-| undici (h1)      | 17.3 ms | 0.2 ms   | 0.5 ms   | 26.3 ms      | 11.7 MB |
-| axios (h1)       | 17.3 ms | 1.1 ms   | 2.6 ms   | 23.7 ms      | 14.3 MB |
-| node-fetch (h1)  | 17.7 ms | 0.9 ms   | 2.1 ms   | 23.8 ms      | 14.2 MB |
-| **hellojs**      | **18.9 ms** | **0.3 ms** | **0.7 ms** | **4.6 ms** | **11.8 MB** |
+| Client          |        Cold |   Warm p50 |   Warm p99 | 50 parallel |       RSS Δ |
+| --------------- | ----------: | ---------: | ---------: | ----------: | ----------: |
+| got (h2)        |      9.1 ms |     0.3 ms |     1.3 ms |      6.2 ms |      9.3 MB |
+| node-https (h1) |     15.6 ms |     0.8 ms |     1.4 ms |     21.0 ms |     15.8 MB |
+| node-http2      |     16.3 ms | **0.2 ms** | **0.4 ms** |  **2.4 ms** |  **7.9 MB** |
+| undici (h1)     |     17.3 ms |     0.2 ms |     0.5 ms |     26.3 ms |     11.7 MB |
+| axios (h1)      |     17.3 ms |     1.1 ms |     2.6 ms |     23.7 ms |     14.3 MB |
+| node-fetch (h1) |     17.7 ms |     0.9 ms |     2.1 ms |     23.8 ms |     14.2 MB |
+| **hellojs**     | **18.9 ms** | **0.3 ms** | **0.7 ms** |  **4.6 ms** | **11.8 MB** |
 
 **Where hellojs sits:**
 
@@ -852,16 +1025,16 @@ Same harness, different target — measures the cost over a real network path wi
 genuine TLS handshake RTT. 10 warm + 10 parallel (smaller load to be polite to a
 shared endpoint).
 
-| Client | Cold | Warm p50 | Warm p99 | 10 parallel | RSS Δ |
-|---|---:|---:|---:|---:|---:|
-| axios (h1)       | 82.5 ms  | 23.9 ms | 28.4 ms | 85.6 ms | 9.1 MB |
-| node-https (h1)  | 85.4 ms  | 20.8 ms | 22.9 ms | 74.3 ms | 9.9 MB |
-| undici (h1)      | 86.9 ms  | 22.0 ms | 23.7 ms | 90.0 ms | 9.4 MB |
-| fetch-native     | 93.5 ms  | 21.4 ms | 28.8 ms | 92.6 ms | 29.1 MB |
-| node-fetch (h1)  | 95.9 ms  | 24.9 ms | 27.7 ms | 88.0 ms | 10.2 MB |
-| node-http2       | 111.0 ms | 22.7 ms | 25.2 ms | **31.4 ms** | 9.4 MB |
-| **hellojs**      | 157.1 ms | 25.3 ms | 49.5 ms | **41.9 ms** | 10.8 MB |
-| got              | 199.0 ms | 54.1 ms | 62.4 ms | 39.5 ms | 7.9 MB |
+| Client          |     Cold | Warm p50 | Warm p99 | 10 parallel |   RSS Δ |
+| --------------- | -------: | -------: | -------: | ----------: | ------: |
+| axios (h1)      |  82.5 ms |  23.9 ms |  28.4 ms |     85.6 ms |  9.1 MB |
+| node-https (h1) |  85.4 ms |  20.8 ms |  22.9 ms |     74.3 ms |  9.9 MB |
+| undici (h1)     |  86.9 ms |  22.0 ms |  23.7 ms |     90.0 ms |  9.4 MB |
+| fetch-native    |  93.5 ms |  21.4 ms |  28.8 ms |     92.6 ms | 29.1 MB |
+| node-fetch (h1) |  95.9 ms |  24.9 ms |  27.7 ms |     88.0 ms | 10.2 MB |
+| node-http2      | 111.0 ms |  22.7 ms |  25.2 ms | **31.4 ms** |  9.4 MB |
+| **hellojs**     | 157.1 ms |  25.3 ms |  49.5 ms | **41.9 ms** | 10.8 MB |
+| got             | 199.0 ms |  54.1 ms |  62.4 ms |     39.5 ms |  7.9 MB |
 
 **What this shows:**
 
@@ -882,21 +1055,20 @@ override with `REMOTE_TARGET=host/path`).
 
 ### Fresh connections vs curl
 
-The current tree opens a new TCP+TLS (or QUIC) connection for every request, so the
-per-request comparison that matches this design is against `curl` invoked once per
-sample. `npm run bench:curl` interleaves hellojs and curl, flips the order every round,
+These numbers predate the keep-alive pool; the per-request comparison that matches
+this fresh-connection design is against `curl` invoked once per sample. `npm run bench:curl` interleaves hellojs and curl, flips the order every round,
 verifies the negotiated protocol from the Cloudflare trace body (`http=...`) and curl's
 `http_version`, and reports end-to-end latency (curl's own `-w '%{json}'` timers, so
 process spawn is excluded). The local curl 8.5.0 has no HTTP/3, so its h3 row is N/A.
 
 Target `https://www.cloudflare.com/cdn-cgi/trace`, one fresh connection per request:
 
-| Build | hellojs h2 p50 / mean | curl h2 p50 / mean | Δ p50 / Δ mean |
-|---|---:|---:|---:|
-| After Nagle fix | 212–215 ms / — | 145–152 ms / — | +39–48% / — |
-| After `setNoDelay` | 153.0 / 158.8 ms | 144.1 / 145.8 ms | +6.2% / +8.9% |
-| After certificate cache (25 samples) | 151.8 / 154.4 ms | 150.7 / 152.1 ms | **+0.7% / +1.5%** |
-| After DNS cache (25 samples × 2 runs) | 117.6–121.8 / 121.4–127.2 ms | 144.9–148.7 / 146.0–152.3 ms | **−18% / −17%** |
+| Build                                 |        hellojs h2 p50 / mean |           curl h2 p50 / mean |    Δ p50 / Δ mean |
+| ------------------------------------- | ---------------------------: | ---------------------------: | ----------------: |
+| After Nagle fix                       |               212–215 ms / — |               145–152 ms / — |       +39–48% / — |
+| After `setNoDelay`                    |             153.0 / 158.8 ms |             144.1 / 145.8 ms |     +6.2% / +8.9% |
+| After certificate cache (25 samples)  |             151.8 / 154.4 ms |             150.7 / 152.1 ms | **+0.7% / +1.5%** |
+| After DNS cache (25 samples × 2 runs) | 117.6–121.8 / 121.4–127.2 ms | 144.9–148.7 / 146.0–152.3 ms |   **−18% / −17%** |
 
 hellojs h3 in the same runs: p50 118.6–119.6 ms; a curl h3 column requires an
 HTTP/3-capable curl via `CURL_BIN`.
@@ -940,9 +1112,10 @@ Measured: one resolver call across 3 sequential requests, both h2 and h3; with c
 unchanged at 145–149 ms, hellojs h2 went 151.8 → 117.6–121.8 ms p50 and now leads
 curl by ~18%.
 
-**Fix 4 — TLS 1.3 PSK resumption (on by default).** `resume` stores the server's
-`NewSessionTicket` and offers it as `pre_shared_key` on the next connection to the same
-host, so the server can skip the certificate flight and CertificateVerify. Measured with
+**Fix 4 — TLS 1.3 PSK resumption (internal, on by default).** The client stores the
+server's `NewSessionTicket` and offers it as `pre_shared_key` on the next connection to
+the same host, so the server can skip the certificate flight and CertificateVerify.
+Measured with
 an interleaved connect-only A/B (30 rounds each, ticket seeded, 30/30 PSK accepted):
 full handshake p50 82.2–82.6 ms vs resumed 80.0–83.4 ms, mean −1.9% / −2.5%. A 60-sample
 end-to-end A/B left the median flat (120.2 vs 120.7 ms) and moved the mean by −7.5% to
@@ -950,12 +1123,13 @@ end-to-end A/B left the median flat (120.2 vs 120.7 ms) and moved the mean by �
 here is structural: full and resumed TLS 1.3 handshakes are both 1-RTT, so resumption
 removes only the ~4–6 KB certificate flight and its signature check — a few ms on this
 path, and less than DNS caching saved. It scales with chain size and path loss, and 0-RTT
-would remove a real round trip but replays requests, so it is not offered. Pass `resume: false`
-to keep a fresh-handshake fingerprint.
+would remove a real round trip but replays requests, so it is not offered. The resumed
+ClientHello differs from a fresh one, so a resumed connection's JA3/JA4 changes —
+resumption is internal state and cannot be disabled per request.
 
 **What remains.** TCP connect + one TLS round trip. CertificateVerify is still checked on
 every full handshake (~1–2 ms), and run-to-run network drift moves both columns by
-several ms. PSK resumption is on by default for repeated connections to the same host;
+several ms. PSK resumption is internal and on for repeated connections to the same host;
 0-RTT is the only remaining handshake shortcut, and it trades replay safety for the round trip.
 
 **Pooling, now on by default.** Pooling removes DNS + TCP + TLS altogether, and the
@@ -980,11 +1154,11 @@ the order flipped every round. The pool ran bounded, as configured by the caller
 
 Target `https://example.com/` (fast CDN edge), 15 samples, one proxy:
 
-| Row | min | p50 | p95 |
-|---|---:|---:|---:|
+| Row                              |   min |   p50 |    p95 |
+| -------------------------------- | ----: | ----: | -----: |
 | curl (fresh process per request) | 571.7 | 721.5 | 7526.3 |
-| hellojs, fresh connection | 74.1 | 94.7 | 123.1 |
-| hellojs, `keepalive: true` | 26.7 | 33.7 | 99.1 |
+| hellojs, fresh connection        |  74.1 |  94.7 |  123.1 |
+| hellojs, `keepalive: true`       |  26.7 |  33.7 |   99.1 |
 
 hellojs beats curl by **−86.9% p50** even cold — per-sample curl carries process spawn,
 proxy-side TLS and CONNECT setup, and the proxy's own handshake variance (its p95 tail
@@ -1029,11 +1203,11 @@ exercise it run there — via the official
 which boots a worker from `wrangler.jsonc` and gives each test file the real
 `crypto.subtle`.
 
-| Project | Location | Runs in | Covers |
-|---|---|---|---|
-| `workers` | `test/unit/**/*.test.ts` | workerd (`cloudflare-pool`) | the library itself: handshake crypto, HKDF, HPACK/Huffman, frame codecs, parsers, profiles, fingerprint shaping |
-| `node` | `test/node/**/*.test.ts`, `test/soak/**/*.test.ts` | Node | the same lib, plus what workerd cannot host: `node:fs` fixtures, `openssl` subprocesses, loopback servers, `node:dgram`, a real trust store — and the sustained-load soak |
-| `network` | `test/integration/**`, `test/fingerprint/**` | Node, live internet | round-trips against public servers and the Chrome 147 fingerprint regression, over a minimal host set (`test/helpers/hosts.ts`) |
+| Project   | Location                                           | Runs in                     | Covers                                                                                                                                                                    |
+| --------- | -------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workers` | `test/unit/**/*.test.ts`                           | workerd (`cloudflare-pool`) | the library itself: handshake crypto, HKDF, HPACK/Huffman, frame codecs, parsers, profiles, fingerprint shaping                                                           |
+| `node`    | `test/node/**/*.test.ts`, `test/soak/**/*.test.ts` | Node                        | the same lib, plus what workerd cannot host: `node:fs` fixtures, `openssl` subprocesses, loopback servers, `node:dgram`, a real trust store — and the sustained-load soak |
+| `network` | `test/integration/**`, `test/fingerprint/**`       | Node, live internet         | round-trips against public servers and the Chrome 147 fingerprint regression, over a minimal host set (`test/helpers/hosts.ts`)                                           |
 
 ```bash
 npm test                    # workers + node (incl. the soak) — offline, the default gate
@@ -1100,25 +1274,29 @@ and the code for precise behavior.
 const request = require('@unreleased/hellojs')
 
 try {
-  await request({ url: 'https://example.com/foo' })
+	await request('https://example.com/foo')
 } catch (e) {
-  if (e instanceof request.HellojsError) {
-    console.error(e.code, e.category, e.message)
-    if (e.category === 'timeout') { /* retry */ }
-    if (e.code === 'ETLS_CERT_VERIFY') { /* refuse to trust */ }
-  }
+	if (e instanceof request.HellojsError) {
+		console.error(e.code, e.category, e.message)
+		if (e.category === 'timeout') {
+			/* retry */
+		}
+		if (e.code === 'ETLS_CERT_VERIFY') {
+			/* refuse to trust */
+		}
+	}
 }
 ```
 
-| Category | Codes | Meaning |
-|---|---|---|
-| `usage` | `EBADOPTS`, `EBADARG`, `EHEADERFIXED` | Caller passed bad options (programmer error) |
-| `transport` | `ECONNREFUSED`, `ECONNRESET`, `ENOTFOUND`, `EPROXY`, `EUDPUNAVAILABLE` | TCP / DNS / proxy issues, or no UDP provider for HTTP/3 |
-| `tls` | `ETLS_ALERT`, `ETLS_HANDSHAKE`, `ETLS_CERT_VERIFY`, `ETLS_VERSION`, `ECERTPARSE`, `ECERTVALIDATION`, `ECERTVERIFY`, `ETLSPSK`, `ETLS12`, `EHRR` | Handshake, record-layer or certificate problem |
-| `protocol` | `EH2STREAM`, `EH2GOAWAY`, `EH2COMPRESS`, `EH2KEEPALIVE`, `EH3STREAM`, `EH3CONN`, `EH3PARSE`, `EPROTO` | h2 / h3 / QUIC protocol-level failure |
-| `http` | `EHTTP`, `EBADRESP`, `EDECOMPRESS` | HTTP policy error (e.g. `redirect: 'error'`), parser failure, or content-encoding error |
-| `body` | `EBODYSTREAM`, `EBODYBACKPRESSURE` | Request body stream errored mid-upload, or the response consumer fell too far behind a transport that cannot pause inbound flow (H3) |
-| `timeout` | `ETIMEDOUT`, `EBODYIDLE` | A phase exceeded its budget, or a streamed response body made no progress before `timeouts.bodyIdle` — see the `timeouts` option |
+| Category    | Codes                                                                                                                                           | Meaning                                                                                                          |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `usage`     | `EBADOPTS`, `EBADARG`, `EHEADERFIXED`                                                                                                           | Caller passed bad options (programmer error)                                                                     |
+| `transport` | `ECONNREFUSED`, `ECONNRESET`, `ENOTFOUND`, `EPROXY`, `EUDPUNAVAILABLE`, `ETOOMANYREDIRECTS`                                                     | TCP / DNS / proxy issues, no UDP provider, or a redirect chain exceeding the 20-hop Fetch limit                  |
+| `tls`       | `ETLS_ALERT`, `ETLS_HANDSHAKE`, `ETLS_CERT_VERIFY`, `ETLS_VERSION`, `ECERTPARSE`, `ECERTVALIDATION`, `ECERTVERIFY`, `ETLSPSK`, `ETLS12`, `EHRR` | Handshake, record-layer or certificate problem                                                                   |
+| `protocol`  | `EH2STREAM`, `EH2GOAWAY`, `EH2COMPRESS`, `EH2KEEPALIVE`, `EH3STREAM`, `EH3CONN`, `EH3PARSE`, `EPROTO`                                           | h2 / h3 / QUIC protocol-level failure                                                                            |
+| `http`      | `EHTTP`, `EBADRESP`, `EDECOMPRESS`                                                                                                              | HTTP policy error (e.g. `redirect: 'error'`), parser failure, or content-encoding error                          |
+| `body`      | `EBODYSTREAM`                                                                                                                                   | Request body stream errored mid-upload                                                                           |
+| `timeout`   | `ETIMEDOUT`                                                                                                                                     | A fixed connect / handshake phase budget was exceeded (`signal` aborts are reported through the signal's reason) |
 
 Retries (when `opts.retry.limit > 0` is set and the method is in
 `opts.retry.methods`) automatically retry these codes:
@@ -1147,7 +1325,7 @@ aliases for `trace`. You can also set the level from JS:
 ```js
 const log = require('@unreleased/hellojs/lib/models/log')
 log.setLevel('info')
-log.setJsonMode(true)   // emit JSON-line records instead of colored text
+log.setJsonMode(true) // emit JSON-line records instead of colored text
 ```
 
 `HELLOJS_LOG_JSON=1` is the env-var equivalent for JSON-line output (useful for
@@ -1177,16 +1355,16 @@ HELLOJS_KEYLOG=/tmp/hellojs.keys node my-script.js
 ```js
 const request = require('@unreleased/hellojs')
 
-// Main API
-request(opts)                    // Promise<Response>
-request.get(...)
-request.post(...)
-request.put(...)
-request.del(...)
-request.patch(...)
-request.head(...)
-request.options(...)
-request.defaults(defaultOpts)    // bound instance
+// Main API — fetch's (input, init) shape
+request(input, init?)            // Promise<Response>
+request.get(input, init?)
+request.post(input, init?)
+request.put(input, init?)
+request.del(input, init?)
+request.patch(input, init?)
+request.head(input, init?)
+request.options(input, init?)
+request.defaults(defaultInit)    // bound instance
 request.jar()                    // new RFC 6265 cookie jar
 request.setPoolConfig(opts?)     // set process-wide keep-alive pool caps
 request.clearSessionTickets()    // forget cached TLS 1.3 session tickets
@@ -1218,8 +1396,11 @@ lib/
 ├── client.ts                  request()-shape API (URL parsing, redirects,
 │                              cookie jar integration, body codec, retry policy,
 │                              streaming response, observability hooks)
+├── transport-race.ts          automatic QUIC/TCP race (300ms TCP delay), UDP/proxy fallback
+├── alt-svc.ts                 RFC 7838 origin-keyed cache (header + h2 ALTSVC frame,
+│                              ma/clear/persist, 421 invalidation, Alt-Used)
 ├── connect.ts                 per-request TLS/QUIC connection factory (h2/h1/h3),
-│                              per-phase timeouts
+│                              fixed Chromium-shaped connect budgets
 ├── socks5.ts                  SOCKS5 client (RFC 1928 + RFC 1929 user/pass)
 ├── dns-cache.ts               TTL-bounded getaddrinfo cache + net lookup seam (Node only)
 ├── tls-summary.ts             best-effort TLS state summary for observability hooks
