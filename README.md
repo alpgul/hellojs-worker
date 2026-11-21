@@ -144,7 +144,7 @@ in `init`. Everything else is fetch-shaped:
 | `retry`     | object                            | none              | `{ limit, methods, statusCodes, baseDelayMs }`; status-based retries inspect `res.status` directly                                                                                                                                                                                                                                                                                                      |
 | `profile`   | string                            | `'chrome147-mac'` | which fingerprint profile to emit                                                                                                                                                                                                                                                                                                                                                                       |
 | `keepalive` | bool                              | `true`            | Reuse live h2/h3/h1 connections across requests (h2 multiplexes streams onto one socket per origin, h3 reuses the QUIC session, h1 parks an exclusive socket between requests). Pass `false` for one-shot connections. When the pool has no capacity the request opens a connection and closes it after the response, so this can never hold more sockets than the [pool caps](#connection-pool) allow. |
-| `verifyTLS` | bool                              | `true`            | Validate the server certificate chain (RFC 5280) + hostname (RFC 6125 SubjectAltName).                                                                                                                                                                                                                                                                                                                  |
+| `verifyTLS` | bool                              | `true`            | Validate the server certificate chain (RFC 5280) + hostname (RFC 6125 SubjectAltName) on the TCP h2/h1 path. The pure-JS QUIC/h3 path does not currently validate chains; see [Certificate validation](#certificate-validation).                                                                                                                                                                        |
 
 Removed options (`url`, `uri`, `json`, `form`, `qs`, `gzip`, `resume`, `h3`,
 `maxRedirects`, `timeout`, `timeouts`), the object call form, and callbacks all
@@ -684,10 +684,12 @@ Servers can advertise an alternative via the `Alt-Svc` response header or an HTT
 - `ma` sets freshness (default 24 h); `clear` invalidates the origin; a `421` drops
   the cached entry. The cache lives in process memory (no on-disk persistence).
 - A cached `h3` hint skips the race and dials QUIC first; a failed handshake marks
-  that entry broken and the next request goes straight to TCP.
-- Requests actually sent to an alternative carry `Alt-Used`. SNI, `Host` and
-  certificate checks always stay on the **origin** authority — only the dial target
-  moves to the advertised host/port.
+  that entry broken and the current request falls back to TCP at the **origin**
+  (not the alternative), without sending `Alt-Used`.
+- Requests actually sent to an alternative carry `Alt-Used`. SNI and `Host` stay on
+  the **origin** authority — only the dial target moves. TCP h2/h1 also validate
+  the certificate against the origin; the current QUIC path does not validate a
+  certificate chain (see [Certificate validation](#certificate-validation)).
 - Proxy requests neither learn nor use Alt-Svc.
 - Fingerprint verification is transport-specific: a QUIC ClientHello is not a TCP
   ClientHello. When comparing against a TCP capture, disable QUIC for that process
@@ -798,10 +800,16 @@ executes the library tests is the runtime the library is written for.
 ## Certificate validation
 
 By default (`verifyTLS: true`), hellojs validates the server's certificate chain
-on every handshake — both TLS 1.3 and TLS 1.2. A request to a host whose cert
+on the **TCP** path (h2/h1), for both TLS 1.3 and TLS 1.2. A request whose cert
 doesn't chain to a trusted root, doesn't match the hostname, or is outside its
-validity window will be rejected with `ETLS_CERT_VERIFY` _before any application
-data is sent_.
+validity window is rejected with `ETLS_CERT_VERIFY` _before any application data
+is sent_.
+
+The pure-JS **QUIC/h3** path currently does **not** validate the certificate
+chain; it completes the TLS 1.3 handshake messages without running the RFC 5280
+checks. Its session tickets are therefore marked unverified and ALPN-scoped to
+`h3`, so they can never seed a verifying TCP handshake. See
+[TLS 1.3 session resumption](#tls-13-session-resumption) for the store rules.
 
 ```js
 // Default — chain is validated, hostname must match, must terminate in
