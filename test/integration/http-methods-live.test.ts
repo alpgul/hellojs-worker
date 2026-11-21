@@ -7,6 +7,8 @@ import { expect, it } from 'vitest'
 import request from '../../index.ts'
 import { HTTP_HOST } from '../helpers/hosts.ts'
 
+import type { HttpMethod } from '../../index.ts'
+
 const BASE = `https://${HTTP_HOST}`
 
 interface Echo {
@@ -19,39 +21,45 @@ interface Echo {
 
 const jsonBody = async (p: Promise<Response>): Promise<Echo> => (await p).json() as Promise<Echo>
 
-const viaMethod = (verb: string, url: string) =>
-	jsonBody(request({ url, method: verb, timeout: 15_000 }))
+// No response-header watchdog in the library any more — carry the deadline on the signal.
+const deadline = () => AbortSignal.timeout(15_000)
+const json = (value: unknown) => ({
+	headers: { 'content-type': 'application/json' },
+	body: JSON.stringify(value)
+})
+
+const viaMethod = (verb: HttpMethod, url: string) => jsonBody(request(url, { method: verb, signal: deadline() }))
 
 it('GET /get', async () => {
-	const body = await jsonBody(request.get({ url: `${BASE}/get`, timeout: 15_000 }))
+	const body = await jsonBody(request.get(`${BASE}/get`, { signal: deadline() }))
 	expect(body.method).toBe('GET')
 })
 
 it('POST /post', async () => {
-	const body = await jsonBody(request.post({ url: `${BASE}/post`, json: { probe: 'post' }, timeout: 15_000 }))
+	const body = await jsonBody(request.post(`${BASE}/post`, { ...json({ probe: 'post' }), signal: deadline() }))
 	expect(body.method).toBe('POST')
 	expect(body.json?.probe).toBe('post')
 })
 
 it('PUT /put', async () => {
-	const body = await jsonBody(request.put({ url: `${BASE}/put`, json: { probe: 'put' }, timeout: 15_000 }))
+	const body = await jsonBody(request.put(`${BASE}/put`, { ...json({ probe: 'put' }), signal: deadline() }))
 	expect(body.method).toBe('PUT')
 	expect(body.json?.probe).toBe('put')
 })
 
 it('PATCH /patch', async () => {
-	const body = await jsonBody(request.patch({ url: `${BASE}/patch`, json: { probe: 'patch' }, timeout: 15_000 }))
+	const body = await jsonBody(request.patch(`${BASE}/patch`, { ...json({ probe: 'patch' }), signal: deadline() }))
 	expect(body.method).toBe('PATCH')
 	expect(body.json?.probe).toBe('patch')
 })
 
 it('DELETE /delete', async () => {
-	const body = await jsonBody(request.del({ url: `${BASE}/delete`, json: { probe: 'delete' }, timeout: 15_000 }))
+	const body = await jsonBody(request.del(`${BASE}/delete`, { ...json({ probe: 'delete' }), signal: deadline() }))
 	expect(body.method).toBe('DELETE')
 })
 
 it('HEAD /head — headers only, empty body', async () => {
-	const res = await request.head({ url: `${BASE}/head`, timeout: 15_000 })
+	const res = await request.head(`${BASE}/head`, { signal: deadline() })
 	expect(res.status).toBe(200)
 	expect(Array.from(res.headers.keys()).length).toBeGreaterThan(0)
 	// HEAD carries no body at all.
@@ -62,7 +70,7 @@ it('HEAD /head — headers only, empty body', async () => {
 it('OPTIONS /options — CORS preflight: headers only, empty body', async () => {
 	// httpbin answers OPTIONS as a CORS preflight: 200 + access-control-allow-* headers and a
 	// zero-length body, so there is no JSON echo to read. Assert the headers, not a body.
-	const res = await request.options({ url: `${BASE}/options`, timeout: 15_000 })
+	const res = await request.options(`${BASE}/options`, { signal: deadline() })
 	expect(res.status).toBe(200)
 	expect(String(res.headers.get('access-control-allow-methods'))).toContain('OPTIONS')
 	expect(await res.text()).toBe('')
@@ -71,7 +79,7 @@ it('OPTIONS /options — CORS preflight: headers only, empty body', async () => 
 it('every verb round-trips at /anything', async () => {
 	// /anything echoes the verb in a JSON body for the body-carrying methods; OPTIONS is a
 	// preflight with an empty body, so it is asserted separately above.
-	for (const verb of ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']) {
+	for (const verb of ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const) {
 		const body = await viaMethod(verb, `${BASE}/anything`)
 		expect(body.method).toBe(verb)
 	}

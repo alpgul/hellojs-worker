@@ -34,7 +34,7 @@ function stats(arr: number[]): Stats {
 		p95: sorted[Math.floor(arr.length * 0.95)] ?? sorted[arr.length - 1]!,
 		max: sorted[arr.length - 1]!,
 		mean: sum / arr.length,
-		total: sum,
+		total: sum
 	}
 }
 
@@ -50,7 +50,7 @@ async function timeOne(fn: () => Promise<unknown>): Promise<number> {
 
 const { default: got } = await import('got')
 
-const helloRun = () => hello({ url: URL })
+const helloRun = () => hello(URL)
 
 const gotH2 = got.extend({ http2: true, throwHttpErrors: false })
 const gotH2Run = () => gotH2(URL)
@@ -128,7 +128,7 @@ row('throughput (req/s)', [
 	((N * 1000) / hCon.wall).toFixed(0),
 	((N * 1000) / g2Con.wall).toFixed(0),
 	((N * 1000) / g1Con.wall).toFixed(0),
-	((N * 1000) / axCon.wall).toFixed(0),
+	((N * 1000) / axCon.wall).toFixed(0)
 ])
 
 axiosAgent.destroy()

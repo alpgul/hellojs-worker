@@ -11,15 +11,22 @@ import { expect, it } from 'vitest'
 import request from '../../index.ts'
 import { listenOnLoopback } from '../helpers/tcp.ts'
 
-interface ObsEvent { name: string; status?: number; durationMs?: number }
+interface ObsEvent {
+	name: string
+	status?: number
+	durationMs?: number
+}
 
 const LIFECYCLE = ['request:start', 'request:headersSent', 'request:firstByte', 'request:end']
 
 function genCert(): { key: Buffer; cert: Buffer } {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-'))
-	const k = path.join(dir, 'k'), c = path.join(dir, 'c')
+	const k = path.join(dir, 'k'),
+		c = path.join(dir, 'c')
 	try {
-		execSync(`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days 1 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null`)
+		execSync(
+			`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days 1 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null`
+		)
 		return { key: fs.readFileSync(k), cert: fs.readFileSync(c) }
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true })
@@ -29,15 +36,20 @@ function genCert(): { key: Buffer; cert: Buffer } {
 it('request lifecycle emits start, headersSent, firstByte, end', async () => {
 	const { key, cert } = genCert()
 	const server = http2.createSecureServer({ key, cert })
-	server.on('stream', (s) => { s.respond({ ':status': 200 }); s.end('ok') })
+	server.on('stream', (s) => {
+		s.respond({ ':status': 200 })
+		s.end('ok')
+	})
 	const port = await listenOnLoopback(server)
 
 	const events: ObsEvent[] = []
-	const recorder = (name: string) => (ev: unknown) => { events.push({ ...(ev as ObsEvent), name }) }
+	const recorder = (name: string) => (ev: unknown) => {
+		events.push({ ...(ev as ObsEvent), name })
+	}
 	for (const e of LIFECYCLE) request.observability.on(e, recorder(e))
 
 	try {
-		const res = await request({ url: `https://127.0.0.1:${port}/`, verifyTLS: false,  })
+		const res = await request(`https://127.0.0.1:${port}/`, { verifyTLS: false })
 		expect(res.status).toBe(200)
 
 		const names = new Set(events.map((e) => e.name))
@@ -58,12 +70,17 @@ it('request lifecycle emits start, headersSent, firstByte, end', async () => {
 it('throwing in a hook listener does not break the request', async () => {
 	const { key, cert } = genCert()
 	const server = http2.createSecureServer({ key, cert })
-	server.on('stream', (s) => { s.respond({ ':status': 200 }); s.end('ok') })
+	server.on('stream', (s) => {
+		s.respond({ ':status': 200 })
+		s.end('ok')
+	})
 	const port = await listenOnLoopback(server)
 
-	request.observability.on('request:start', () => { throw new Error('boom') })
+	request.observability.on('request:start', () => {
+		throw new Error('boom')
+	})
 	try {
-		const res = await request({ url: `https://127.0.0.1:${port}/`, verifyTLS: false,  })
+		const res = await request(`https://127.0.0.1:${port}/`, { verifyTLS: false })
 		expect(res.status).toBe(200)
 	} finally {
 		request.observability.removeAllListeners('request:start')

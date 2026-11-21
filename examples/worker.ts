@@ -11,30 +11,26 @@
 // that fires all fourteen scenarios from examples/scenarios.ts in parallel and renders the
 // results. `GET /run` is the same answer as JSON, for curl or for another Worker.
 //
-// What the sandbox changes, and what this file does about it:
+// This Worker is deliberately stateless: it owns no sockets and imports no TLS code. Every
+// outbound request is forwarded to one named Durable Object (connection-do.ts), which owns
+// the hellojs keep-alive pool in its long-lived isolate. See that file for the workerd
+// setup (no UDP, no built-in roots, ML-KEM behind a flag) and for the pool configuration.
 //
-//   1. No outbound UDP. Worker runtime APIs cover HTTP fetch and TCP sockets only, so QUIC
-//      has no transport here. hellojs reaches `node:dgram` exclusively through its UDP seam;
-//      `setUdpProvider(null)` declares that up front, so scenario 13 fails over to TCP + TLS
-//      immediately instead of waiting on a handshake that cannot start. (A sandbox that DOES
-//      expose datagrams installs a provider instead — see README → UDP transport.)
-//   2. No built-in root certificates. workerd's TLS ships an empty trust store, so the
-//      generated Mozilla bundle in ./root-certificates.ts is installed at module scope —
-//      no secret, no binding, and verification behaves the same as it does in Node.
-//   3. ML-KEM is behind a flag. The Chrome 147 key share is X25519MLKEM768, and workerd only
-//      puts ML-KEM on `crypto.subtle` when `webcrypto_modern_algorithms` is set — that flag
-//      has no default enable date, so a compatibility date alone will not turn it on and the
-//      ClientHello would fail to build without it.
-//   4. No direct TCP to Cloudflare's own ranges, which is why the tour's endpoints are
-//      httpbingo (Fly.io) and tls.peet.ws rather than cloudflare.com.
-//   5. Everything with no sockets works unchanged: profile lookup, the TLS 1.3 record and key
-//      layer, certificate verification, QPACK/Huffman codecs, fingerprint derivations.
+// Routes:
+//   / and /run-test.html — the local test page
+//   /run                 — the fourteen-scenario tour, executed inside the DO
+//   /proxy?url=...       — an allowlisted pass-through to an external origin, via the DO
+//   /bench?url=...&n=5   — native fetch vs hellojs, with keepalive true and false
+//
+// /proxy is guarded by ALLOWED_HOSTS: an unrestricted `?url=` endpoint would turn this
+// Worker into an open relay.
 
-import request from '../index.ts'
+import { resolveProxyTarget } from './proxy-policy.ts'
 
-import roots from './root-certificates.ts'
-import { runScenario } from './scenario-runner.ts'
-import { scenarios } from './scenarios.ts'
+import type { Env } from './connection-do.ts'
+
+// Wrangler discovers the Durable Object class from the Worker's main module, so re-export it.
+export { HelloConnectionDO } from './connection-do.ts'
 
 // Served at / and /run-test.html. Static text, no interpolation: the page pulls its own
 // results from /run and writes them with textContent.
@@ -60,11 +56,12 @@ li.fail { border-color: #c62828; background: rgba(198, 40, 40, .09) }
 <body>
 <h1>hellojs in a Worker</h1>
 <p class="lede">Fourteen scenarios from examples/scenarios.ts, run concurrently in one fetch. HTTP/3 needs a datagram socket, which this sandbox has no API for, so that scenario reports the TCP + TLS fallback.</p>
-<p><button id="run" type="button">Run tests</button></p>
+<p><button id="run" type="button">Run tests</button> <label><input id="fast" type="checkbox"> quick smoke test (4 scenarios)</label></p>
 <p id="summary">not run yet</p>
 <ul id="results"></ul>
 <script>
 const btn = document.getElementById('run')
+const fast = document.getElementById('fast')
 const summary = document.getElementById('summary')
 const results = document.getElementById('results')
 
@@ -74,11 +71,12 @@ btn.addEventListener('click', async () => {
   summary.textContent = 'running the tour…'
   const t0 = Date.now()
   try {
-    const res = await fetch('/run', { headers: { accept: 'application/json' } })
+    const res = await fetch(fast.checked ? '/run?fast=1' : '/run', { headers: { accept: 'application/json' } })
     const data = await res.json()
     summary.textContent = data.passed + '/' + data.total + ' passed in ' + data.durationMs +
-      'ms (' + (Date.now() - t0) + 'ms seen by the browser) · UDP transport: ' +
-      (data.h3Available ? 'available' : 'absent, h3 falls back to TCP + TLS')
+      'ms (' + (Date.now() - t0) + 'ms seen by the browser) · pooled sockets: ' + data.pooledSockets +
+      (data.fast ? ' · skipped: ' + data.skipped.join(',') : '') +
+      ' · UDP transport: ' + (data.h3Available ? 'available' : 'absent, h3 falls back to TCP + TLS')
     data.results.forEach((row) => {
       const li = document.createElement('li')
       li.className = row.ok ? 'ok' : 'fail'
@@ -94,34 +92,127 @@ btn.addEventListener('click', async () => {
 </body>
 </html>`
 
-// Both fixes are module scope, so they run once per isolate before any handler: the seam
-// declares that this sandbox has no datagram transport (HTTP/3 is out of reach instead of
-// each request discovering that on its own), and the generated bundle stands in for the
-// trust store workerd does not ship.
-request.udp.setUdpProvider(null)
-request.setTrustedRoots(roots)
+const DO_NAME = 'global'
+
+// The DO cleans these too; drop the caller's copies here so a client cannot forge our control
+// header or pin the origin's Host to the Worker's hostname. `keepalive` is the only hellojs
+// option the proxy exposes: the benchmark needs a true/false pair on the same DO.
+function doHeaders(source: Headers | null, keepalive: boolean): Headers {
+	const out = new Headers()
+	if (source) {
+		for (const [name, value] of source) {
+			const lower = name.toLowerCase()
+			if (lower === 'host' || lower.startsWith('cf-') || lower.startsWith('x-hello-')) continue
+			out.set(name, value)
+		}
+	}
+	out.set('x-hello-proxy', '1')
+	out.set('x-hello-keepalive', keepalive ? 'true' : 'false')
+	return out
+}
+
+async function timed(run: () => Promise<Response>): Promise<number> {
+	const t0 = performance.now()
+	const res = await run()
+	await res.arrayBuffer()
+	return Math.round(performance.now() - t0)
+}
+
+async function pooledSockets(stub: DurableObjectStub): Promise<number> {
+	const res = await stub.fetch('http://do/__stats')
+	return ((await res.json()) as { pooledSockets: number }).pooledSockets
+}
+
+const sum = (values: number[]) => values.reduce((a, b) => a + b, 0)
+
+// Upstream latency is wildly variable (httpbingo.org swings from 2s to 20s), so the median
+// says more than the total. Report both.
+function median(values: number[]): number {
+	if (values.length === 0) return 0
+	const sorted = [...values].sort((a, b) => a - b)
+	const mid = sorted.length >> 1
+	return sorted.length % 2 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2)
+}
 
 export default {
-	async fetch(req: Request): Promise<Response> {
+	async fetch(req: Request, env: Env): Promise<Response> {
 		const path = new URL(req.url).pathname
-		if (path !== '/run' && path !== '/' && path !== '/run-test.html') {
+		const stub = env.HELLO_POOL.getByName(DO_NAME)
+
+		if (path === '/run') {
+			const fast = new URL(req.url).searchParams.get('fast') === '1'
+			return stub.fetch(`http://do/__tour${fast ? '?fast=1' : ''}`)
+		}
+
+		if (path === '/proxy') {
+			const target = resolveProxyTarget(new URL(req.url).searchParams.get('url'), env.ALLOWED_HOSTS)
+			if (!target.ok) {
+				return new Response(target.message, { status: target.status })
+			}
+			const init: RequestInit = { method: req.method, headers: doHeaders(req.headers, true) }
+			if (req.body) init.body = req.body
+			return stub.fetch(new Request(target.url.toString(), init))
+		}
+
+		if (path === '/bench') {
+			const query = new URL(req.url).searchParams
+			const target = resolveProxyTarget(query.get('url'), env.ALLOWED_HOSTS)
+			if (!target.ok) {
+				return new Response(target.message, { status: target.status })
+			}
+			const n = Math.max(1, Math.min(10, Number(query.get('n')) || 5))
+			const mode = query.get('mode') // native | false | true | (absent = all three)
+			const url = target.url.toString()
+			const report: Record<string, unknown> = {
+				url,
+				n,
+				mode: mode ?? 'all',
+				note: 'network-bound: compare medians across runs, not a single total'
+			}
+
+			// Native Worker fetch: no DO, no hellojs, platform-managed connection reuse.
+			if (mode !== 'false' && mode !== 'true') {
+				const native: number[] = []
+				for (let i = 0; i < n; i++) native.push(await timed(() => fetch(url)))
+				report.native = { ms: native, total: sum(native), median: median(native) }
+			}
+
+			// Each hellojs mode starts from an empty pool so the two runs are comparable.
+			if (mode !== 'native' && mode !== 'true') {
+				await stub.fetch('http://do/__clear')
+				const noKeep: number[] = []
+				for (let i = 0; i < n; i++) {
+					noKeep.push(await timed(() => stub.fetch(new Request(url, { headers: doHeaders(null, false) }))))
+				}
+				report.helloNoKeepalive = {
+					ms: noKeep,
+					total: sum(noKeep),
+					median: median(noKeep),
+					pooledSockets: await pooledSockets(stub)
+				}
+			}
+
+			if (mode !== 'native' && mode !== 'false') {
+				await stub.fetch('http://do/__clear')
+				const keep: number[] = []
+				for (let i = 0; i < n; i++) {
+					keep.push(await timed(() => stub.fetch(new Request(url, { headers: doHeaders(null, true) }))))
+				}
+				report.helloKeepalive = {
+					ms: keep,
+					total: sum(keep),
+					median: median(keep),
+					pooledSockets: await pooledSockets(stub)
+				}
+			}
+
+			return Response.json(report)
+		}
+
+		if (path !== '/' && path !== '/run-test.html') {
 			return new Response('not found', { status: 404 })
 		}
 
-		if (path === '/run') {
-			const t0 = Date.now()
-			const results = await Promise.all(scenarios.map(runScenario))
-			const passed = results.filter((row) => row.ok).length
-			return Response.json({
-				h3Available: request.udp.udpAvailable(),
-				total: results.length,
-				passed,
-				failed: results.length - passed,
-				durationMs: Date.now() - t0,
-				results,
-			})
-		}
-
 		return new Response(RUN_TEST_PAGE, { headers: { 'content-type': 'text/html; charset=utf-8' } })
-	},
-} satisfies ExportedHandler
+	}
+} satisfies ExportedHandler<Env>

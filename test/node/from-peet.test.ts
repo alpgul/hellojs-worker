@@ -32,27 +32,50 @@ const SAMPLE = {
 			'TLS_RSA_WITH_AES_128_GCM_SHA256',
 			'TLS_RSA_WITH_AES_256_GCM_SHA384',
 			'TLS_RSA_WITH_AES_128_CBC_SHA',
-			'TLS_RSA_WITH_AES_256_CBC_SHA',
+			'TLS_RSA_WITH_AES_256_CBC_SHA'
 		],
 		extensions: [
 			{ name: 'TLS_GREASE (0x6a6a)' },
 			{ name: 'session_ticket (35)', data: '' },
 			{ name: 'extensionEncryptedClientHello (boringssl) (65037)', data: '...' },
-			{ name: 'supported_groups (10)', supported_groups: ['TLS_GREASE (0x7a7a)', 'X25519MLKEM768 (4588)', 'X25519 (29)', 'P-256 (23)', 'P-384 (24)'] },
+			{
+				name: 'supported_groups (10)',
+				supported_groups: [
+					'TLS_GREASE (0x7a7a)',
+					'X25519MLKEM768 (4588)',
+					'X25519 (29)',
+					'P-256 (23)',
+					'P-384 (24)'
+				]
+			},
 			{ name: 'application_layer_protocol_negotiation (16)', protocols: ['h2', 'http/1.1'] },
 			{ name: 'supported_versions (43)', versions: ['TLS_GREASE (0x8a8a)', 'TLS 1.3', 'TLS 1.2'] },
-			{ name: 'signature_algorithms (13)', signature_algorithms: [
-				'ecdsa_secp256r1_sha256', 'rsa_pss_rsae_sha256', 'rsa_pkcs1_sha256',
-				'ecdsa_secp384r1_sha384', 'rsa_pss_rsae_sha384', 'rsa_pkcs1_sha384',
-				'rsa_pss_rsae_sha512', 'rsa_pkcs1_sha512',
-			] },
-			{ name: 'psk_key_exchange_modes (45)', PSK_Key_Exchange_Mode: 'PSK with (EC)DHE key establishment (psk_dhe_ke) (1)' },
+			{
+				name: 'signature_algorithms (13)',
+				signature_algorithms: [
+					'ecdsa_secp256r1_sha256',
+					'rsa_pss_rsae_sha256',
+					'rsa_pkcs1_sha256',
+					'ecdsa_secp384r1_sha384',
+					'rsa_pss_rsae_sha384',
+					'rsa_pkcs1_sha384',
+					'rsa_pss_rsae_sha512',
+					'rsa_pkcs1_sha512'
+				]
+			},
+			{
+				name: 'psk_key_exchange_modes (45)',
+				PSK_Key_Exchange_Mode: 'PSK with (EC)DHE key establishment (psk_dhe_ke) (1)'
+			},
 			{ name: 'extended_master_secret (23)' },
-			{ name: 'key_share (51)', shared_keys: [
-				{ 'TLS_GREASE (0x7a7a)': '00' },
-				{ 'X25519MLKEM768 (4588)': 'aabb' },
-				{ 'X25519 (29)': 'aabb' },
-			] },
+			{
+				name: 'key_share (51)',
+				shared_keys: [
+					{ 'TLS_GREASE (0x7a7a)': '00' },
+					{ 'X25519MLKEM768 (4588)': 'aabb' },
+					{ 'X25519 (29)': 'aabb' }
+				]
+			},
 			{ name: 'application_settings (17613)', protocols: ['h2'] },
 			{ name: 'extensionRenegotiationInfo (boringssl) (65281)', data: '00' },
 			{ name: 'ec_point_formats (11)', elliptic_curves_point_formats: ['0x00'] },
@@ -60,20 +83,29 @@ const SAMPLE = {
 			{ name: 'signed_certificate_timestamp (18)' },
 			{ name: 'compress_certificate (27)', algorithms: ['brotli (2)'] },
 			{ name: 'status_request (5)' },
-			{ name: 'TLS_GREASE (0x7a7a)' },
+			{ name: 'TLS_GREASE (0x7a7a)' }
 		],
 		ja3_hash: '6ca16c714c730295e4b3eb9ed9f9109b',
 		ja4: 't13d1516h2_8daaf6152771_d8a2da3f94cd',
-		peetprint_hash: '1d4ffe9b0e34acac0bd883fa7f79d7b5',
+		peetprint_hash: '1d4ffe9b0e34acac0bd883fa7f79d7b5'
 	},
 	http2: {
 		akamai_fingerprint_hash: '52d84b11737d980aef856699f885ca86',
 		sent_frames: [
-			{ frame_type: 'SETTINGS', settings: [
-				'HEADER_TABLE_SIZE = 65536', 'ENABLE_PUSH = 0', 'INITIAL_WINDOW_SIZE = 6291456', 'MAX_HEADER_LIST_SIZE = 262144',
-			] },
+			{
+				frame_type: 'SETTINGS',
+				settings: [
+					'HEADER_TABLE_SIZE = 65536',
+					'ENABLE_PUSH = 0',
+					'INITIAL_WINDOW_SIZE = 6291456',
+					'MAX_HEADER_LIST_SIZE = 262144'
+				]
+			},
 			{ frame_type: 'WINDOW_UPDATE', increment: 15663105 },
-			{ frame_type: 'HEADERS', stream_id: 1, flags: ['EndStream (0x1)', 'EndHeaders (0x4)', 'Priority (0x20)'],
+			{
+				frame_type: 'HEADERS',
+				stream_id: 1,
+				flags: ['EndStream (0x1)', 'EndHeaders (0x4)', 'Priority (0x20)'],
 				priority: { weight: 256, depends_on: 0, exclusive: 1 },
 				headers: [
 					':method: GET',
@@ -84,11 +116,11 @@ const SAMPLE = {
 					'sec-ch-ua-mobile: ?0',
 					'user-agent: Mozilla/5.0 Chrome/147.0',
 					'accept: text/html',
-					'accept-encoding: gzip, deflate, br, zstd',
-				],
-			},
-		],
-	},
+					'accept-encoding: gzip, deflate, br, zstd'
+				]
+			}
+		]
+	}
 } as unknown as PeetJson
 
 it('fromPeet: cipher list omits GREASE and preserves order', () => {
@@ -110,9 +142,7 @@ it('fromPeet: keyShareGroups parsed from peet shared_keys', () => {
 
 it('fromPeet: signatureAlgorithms in order', () => {
 	const p = fromPeet(SAMPLE)
-	expect(p.tls.signatureAlgorithms).toStrictEqual([
-		0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601,
-	])
+	expect(p.tls.signatureAlgorithms).toStrictEqual([0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601])
 })
 
 it('fromPeet: ALPN order', () => {
@@ -190,7 +220,7 @@ it('fromPeet: detects useGrease=true when GREASE appears anywhere', () => {
 //   - extension 50 raw bytes captured for byte-exact emission
 //   - status_request_v2 shape captured
 const MIDDLEBOX = JSON.parse(
-	fs.readFileSync(path.join(import.meta.dirname, '../fixtures/middlebox-tls12-peet.json'), 'utf8'),
+	fs.readFileSync(path.join(import.meta.dirname, '../fixtures/middlebox-tls12-peet.json'), 'utf8')
 ) as PeetJson
 
 it('fromPeet (middlebox-tls12): parses without throwing', () => {
@@ -216,12 +246,8 @@ it('fromPeet (middlebox-tls12): supportedVersions = [TLS 1.2] only', () => {
 it('fromPeet (middlebox-tls12): full sigalg list incl. rsa_pss_pss_* + bare-hex codepoints', () => {
 	const p = fromPeet(MIDDLEBOX)
 	expect(p.tls.signatureAlgorithms).toStrictEqual([
-		0x0403, 0x0503, 0x0603,
-		0x0804, 0x0805, 0x0806,
-		0x0809, 0x080a, 0x080b,
-		0x0401, 0x0501, 0x0601,
-		0x0402, 0x0303, 0x0301, 0x0302,
-		0x0203, 0x0201, 0x0202,
+		0x0403, 0x0503, 0x0603, 0x0804, 0x0805, 0x0806, 0x0809, 0x080a, 0x080b, 0x0401, 0x0501, 0x0601, 0x0402, 0x0303,
+		0x0301, 0x0302, 0x0203, 0x0201, 0x0202
 	])
 })
 
@@ -242,7 +268,7 @@ it('fromPeet (middlebox-tls12): status_request_v2 shape captured', () => {
 	expect(p.tls.statusRequestV2).toStrictEqual({
 		certificateStatusType: 0,
 		responderIdListLength: 7,
-		requestExtensionsLength: 2,
+		requestExtensionsLength: 2
 	})
 })
 

@@ -6,7 +6,7 @@
 //
 //   - decoding (gzip / br / deflate / zstd) with errors propagated end to end
 //   - backpressure signalling so the source can pause
-//   - abort / cancel / idle-timeout teardown
+//   - abort / cancel teardown (`signal` is the only deadline; browsers have no body-idle timer)
 
 import { PassThrough, pipeline, type Readable, type Transform } from 'node:stream'
 import * as zlib from 'node:zlib'
@@ -25,8 +25,6 @@ interface ProgressiveStreamOptions {
 	redirected: boolean
 	method: string
 	signal?: AbortSignal | null
-	/** Cancel the body when no bytes move for this many ms. `0` / unset disables. */
-	idleTimeoutMs?: number
 	/** Fallback code when the source itself errors without a stable Hellojs code. */
 	errorCode: ErrorCode | string
 	/** Tear down the transport side (close socket, RST stream, release pool slot). */
@@ -87,39 +85,25 @@ export function startProgressiveResponse(opts: ProgressiveStreamOptions): Progre
 	const pass = new PassThrough()
 	// No body means no decoder: a gzip/brotli stream over zero bytes reports a spurious
 	// truncated-input error. The buffered path has the same guard.
-	const emptyBody = opts.method === 'HEAD' || opts.status === 204 || opts.status === 205 ||
-		opts.status === 304 || headerValue(opts.headers['content-length']) === '0'
+	const emptyBody =
+		opts.method === 'HEAD' ||
+		opts.status === 204 ||
+		opts.status === 205 ||
+		opts.status === 304 ||
+		headerValue(opts.headers['content-length']) === '0'
 	const decoder = emptyBody ? null : decompressStreamForEncoding(headerValue(opts.headers['content-encoding']) || '')
 	const source: Readable = decoder ?? pass
-	const idleMs = opts.idleTimeoutMs ?? 0
 
 	let finished = false
 	let canceled = false
 	let firstByte = false
 	let bytes = 0
 	let pausedNotified = false
-	let idleTimer: ReturnType<typeof setTimeout> | null = null
 	let removeAbort = () => {}
 
 	const cleanup = () => {
-		if (idleTimer) {
-			clearTimeout(idleTimer)
-			idleTimer = null
-		}
 		removeAbort()
 		removeAbort = () => {}
-	}
-
-	const armIdle = () => {
-		if (!idleMs || finished) return
-		if (idleTimer) {
-			idleTimer.refresh()
-			return
-		}
-		idleTimer = setTimeout(() => {
-			fail(new HellojsError(`response body idle for ${idleMs}ms`, 'EBODYIDLE'))
-		}, idleMs)
-		idleTimer.unref?.()
 	}
 
 	if (decoder) {
@@ -156,11 +140,7 @@ export function startProgressiveResponse(opts: ProgressiveStreamOptions): Progre
 
 	// The caller always gets a fetch `Response` over a web `ReadableStream`; redirect
 	// responses are buffered by the transport before reaching this helper.
-	const web = nodeToWebStream(
-		source,
-		(reason) => cancel(reason),
-		() => armIdle(),
-	)
+	const web = nodeToWebStream(source, (reason) => cancel(reason))
 	const result = buildResponse({
 		status: opts.status,
 		statusText: opts.statusText ?? statusTextFor(opts.status),
@@ -168,7 +148,7 @@ export function startProgressiveResponse(opts: ProgressiveStreamOptions): Progre
 		body: web,
 		url: opts.url,
 		redirected: opts.redirected,
-		method: opts.method,
+		method: opts.method
 	})
 
 	// Destroying the source must still close the transport instead of leaving a pooled
@@ -181,7 +161,6 @@ export function startProgressiveResponse(opts: ProgressiveStreamOptions): Progre
 	source.on('error', () => {})
 
 	removeAbort = onAbort(opts.signal, () => fail(abortReason(opts.signal)))
-	armIdle()
 
 	return {
 		result,
@@ -191,7 +170,6 @@ export function startProgressiveResponse(opts: ProgressiveStreamOptions): Progre
 				firstByte = true
 				opts.onFirstByte?.()
 			}
-			armIdle()
 			bytes += chunk.length
 			const ok = pass.write(chunk)
 			if (!ok && !pausedNotified) {
@@ -221,9 +199,13 @@ export function startProgressiveResponse(opts: ProgressiveStreamOptions): Progre
 		},
 		fail,
 		bufferedBytes(): number {
-			return pass.readableLength + pass.writableLength +
-				(decoder?.readableLength ?? 0) + (decoder?.writableLength ?? 0)
-		},
+			return (
+				pass.readableLength +
+				pass.writableLength +
+				(decoder?.readableLength ?? 0) +
+				(decoder?.writableLength ?? 0)
+			)
+		}
 	}
 }
 

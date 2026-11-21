@@ -38,7 +38,7 @@ function stats(arr: number[]): Stats {
 		p95: sorted[Math.floor(arr.length * 0.95)] ?? sorted[arr.length - 1]!,
 		max: sorted[arr.length - 1]!,
 		mean: sum / arr.length,
-		total: sum,
+		total: sum
 	}
 }
 
@@ -54,7 +54,7 @@ async function timeOne(fn: () => Promise<unknown>): Promise<number> {
 
 // hellojs runner
 const helloAgent = hello.defaults({})
-const helloFresh = () => helloAgent({ url: URL })
+const helloFresh = () => helloAgent(URL)
 
 // axios with a keep-alive https.Agent
 const keepAliveAgent = new https.Agent({ keepAlive: true, maxSockets: 30 })
@@ -132,9 +132,15 @@ const means = [helloSerial.mean, axSerial.mean, httpsSerial.mean]
 const winner = ['hellojs', 'axios', 'node https'][means.indexOf(Math.min(...means))]!
 const tbl: (string | number)[][] = [
 	['scenario', 'hellojs', 'axios', 'node https', 'winner'],
-	['serial mean', helloSerial.mean.toFixed(1) + 'ms', axSerial.mean.toFixed(1) + 'ms', httpsSerial.mean.toFixed(1) + 'ms', winner],
+	[
+		'serial mean',
+		helloSerial.mean.toFixed(1) + 'ms',
+		axSerial.mean.toFixed(1) + 'ms',
+		httpsSerial.mean.toFixed(1) + 'ms',
+		winner
+	],
 	['serial total', helloSerial.total + 'ms', axSerial.total + 'ms', httpsSerial.total + 'ms', ''],
-	['concurrent wall', helloConc.wall + 'ms', axConc.wall + 'ms', httpsConc.wall + 'ms', ''],
+	['concurrent wall', helloConc.wall + 'ms', axConc.wall + 'ms', httpsConc.wall + 'ms', '']
 ]
 for (const r of tbl) console.log(r.map((x) => String(x).padEnd(18)).join(''))
 

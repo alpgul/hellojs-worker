@@ -52,6 +52,12 @@ import type { Profile } from '../profiles/types.ts'
 
 const log = logFactory('[tls]')
 
+// Browser-like (Chromium) connection budgets. There is no public knob: `connect()` in
+// lib/connect.ts adds the whole-job ceiling on top of these per-phase timers.
+const TCP_CONNECT_TIMEOUT_MS = 30_000
+const PROXY_CONNECT_TIMEOUT_MS = 30_000
+const PROXY_HOP_TIMEOUT_MS = 30_000
+
 // Errors the TLS layer emits carry a stable machine-readable code; a fatal alert adds the two raw
 // alert fields so callers can tell close_notify from a real failure. Node's socket errors are
 // already shaped this way, which is why `code` is not a custom field here.
@@ -164,6 +170,9 @@ export interface ProxyHop {
 interface TLSOptions {
 	// Internal test affordance, see the TLS constructor.
 	_forceHRRGroup?: number | null
+	// Internal: Alt-Svc can move the dial target while SNI / certificate identity stay on
+	// the origin. Defaults to `host`; never exposed through the public TLSOptions type.
+	sniHost?: string
 	verifyTLS?: boolean
 	profile?: string | Profile
 	// Override the profile's ALPN advertisement. Used by the proxy hop of an HTTPS proxy, which
@@ -289,6 +298,8 @@ class TLS extends EventEmitter {
 	// Fields are declared, never initialised here: `declare` emits nothing, so the object keeps
 	// exactly the shape the constructor and the handshake parsers build at runtime.
 	declare host: string
+	/** SNI / certificate identity; differs from `host` only for Alt-Svc connections. */
+	declare sniHost: string
 	declare port: number
 	declare proxy: string | null
 	declare _forceHRRGroup: number | null
@@ -382,6 +393,7 @@ class TLS extends EventEmitter {
 		super()
 
 		this.host = host
+		this.sniHost = opts.sniHost || host
 		this.port = port
 		this.proxy = proxy
 		// Internal test affordance: when set to 0x0017 / 0x0018, CH1 advertises only that
@@ -500,8 +512,14 @@ class TLS extends EventEmitter {
 				// HTTP, so CONNECT auth headers have nowhere to go. Rejected instead of dropped for
 				// the same reason h3+proxy is: a credential the caller believes was sent. An empty
 				// header map is a no-op, so it does not count as "supplied".
-				if (this.proxyAuthorization !== null || (this.proxyHeaders && Object.keys(this.proxyHeaders).length > 0)) {
-					throw new HellojsError('proxy.authorization/proxy.headers are not supported with socks5:// proxies', 'EBADOPTS')
+				if (
+					this.proxyAuthorization !== null ||
+					(this.proxyHeaders && Object.keys(this.proxyHeaders).length > 0)
+				) {
+					throw new HellojsError(
+						'proxy.authorization/proxy.headers are not supported with socks5:// proxies',
+						'EBADOPTS'
+					)
 				}
 				socks5Connect({
 					proxyHost: proxyUrl.hostname,
@@ -510,7 +528,7 @@ class TLS extends EventEmitter {
 					password: proxyUrl.password ? decodeUserinfo(proxyUrl.password) : null,
 					destHost: this.host,
 					destPort: this.port,
-					connectTimeoutMs: 10_000
+					connectTimeoutMs: TCP_CONNECT_TIMEOUT_MS
 				})
 					.then((sock) => {
 						this.socket = sock
@@ -558,7 +576,7 @@ class TLS extends EventEmitter {
 				const err = new Error(`connect timed out (${this.host}:${this.port})`) as NodeJS.ErrnoException
 				err.code = 'ETIMEDOUT'
 				sock.destroy(err)
-			}, 10_000)
+			}, TCP_CONNECT_TIMEOUT_MS)
 			timer.unref?.()
 			const onError = (err: Error) => {
 				clearTimeout(timer)
@@ -621,7 +639,7 @@ class TLS extends EventEmitter {
 		this._socketListeners = [
 			['data', onData as (...args: never[]) => void],
 			['error', onError as (...args: never[]) => void],
-			['close', onClose as (...args: never[]) => void],
+			['close', onClose as (...args: never[]) => void]
 		]
 	}
 
@@ -629,7 +647,9 @@ class TLS extends EventEmitter {
 	// clean. The transport itself stays open — only the destination session is discarded.
 	detachSocketListeners(): void {
 		for (const [event, listener] of this._socketListeners) {
-			try { this.socket?.removeListener(event, listener) } catch {}
+			try {
+				this.socket?.removeListener(event, listener)
+			} catch {}
 		}
 		this._socketListeners = []
 	}
@@ -644,15 +664,14 @@ class TLS extends EventEmitter {
 		// CONNECT-phase timeout. Without this, a proxy that accepts the connection but never
 		// returns the CONNECT response (overloaded, blackholed, malicious) leaves createTLS in
 		// lib/connect.ts waiting on tls.on('error') forever.
-		const CONNECT_TIMEOUT_MS = 10_000
 		const MAX_PROXY_RESP_BYTES = 65536
 		let proxyDone = false
 		const connectTimer = setTimeout(() => {
 			if (proxyDone) return
-			const err: TLSError = new Error(`Proxy CONNECT timed out after ${CONNECT_TIMEOUT_MS}ms`)
+			const err: TLSError = new Error(`Proxy CONNECT timed out after ${PROXY_CONNECT_TIMEOUT_MS}ms`)
 			err.code = 'ETIMEDOUT'
 			proxyFail(err)
-		}, CONNECT_TIMEOUT_MS)
+		}, PROXY_CONNECT_TIMEOUT_MS)
 		connectTimer.unref?.()
 		const proxyFail = (err: TLSError): void => {
 			if (proxyDone) return
@@ -692,7 +711,9 @@ class TLS extends EventEmitter {
 			if (proxyAuthorization === null && proxyUrl.username && proxyUrl.password) {
 				proxyAuthorization =
 					'Basic ' +
-					Buffer.from(`${decodeUserinfo(proxyUrl.username)}:${decodeUserinfo(proxyUrl.password)}`).toString('base64')
+					Buffer.from(`${decodeUserinfo(proxyUrl.username)}:${decodeUserinfo(proxyUrl.password)}`).toString(
+						'base64'
+					)
 			}
 			const authValue = proxyAuthorization?.trim() ?? ''
 			if (authValue) connectHeaders += `Proxy-Authorization: ${authValue}\r\n`
@@ -736,9 +757,16 @@ class TLS extends EventEmitter {
 						tls: outer,
 						detach: () => this.detachSocketListeners(),
 						close: () => {
-							if (outer) { try { outer.socket?.destroy() } catch {} }
-							else { try { transport.destroy() } catch {} }
-						},
+							if (outer) {
+								try {
+									outer.socket?.destroy()
+								} catch {}
+							} else {
+								try {
+									transport.destroy()
+								} catch {}
+							}
+						}
 					}
 				}
 				this._markTransportReady()
@@ -806,7 +834,6 @@ class TLS extends EventEmitter {
 		})
 		this._proxyTls = outer
 
-		const PROXY_HOP_TIMEOUT_MS = 10_000
 		let failed = false
 
 		const proxyFail = (cause: unknown, what: string): void => {
@@ -823,9 +850,12 @@ class TLS extends EventEmitter {
 		}
 
 		// A proxy that accepts TCP and then never finishes the handshake would otherwise be bounded
-		// only by the caller's response deadline, so the hop gets the same hard budget the cleartext
-		// path gives its CONNECT exchange.
-		const hopTimer = setTimeout(() => proxyFail(new Error(`timed out after ${PROXY_HOP_TIMEOUT_MS}ms`), 'Proxy TLS handshake'), PROXY_HOP_TIMEOUT_MS)
+		// only by the caller's signal, so the hop gets the same hard budget the cleartext path
+		// gives its CONNECT exchange.
+		const hopTimer = setTimeout(
+			() => proxyFail(new Error(`timed out after ${PROXY_HOP_TIMEOUT_MS}ms`), 'Proxy TLS handshake'),
+			PROXY_HOP_TIMEOUT_MS
+		)
 		hopTimer.unref?.()
 
 		// Before the tunnel opens, the outer handshake failing IS the proxy failure. Afterwards
@@ -1053,7 +1083,7 @@ class TLS extends EventEmitter {
 			const certs = parseCertificateList(body)
 			this.serverCertChain = certs
 			if (this.verifyTLS) {
-				const r = validateChain(certs, this.host)
+				const r = validateChain(certs, this.sniHost)
 				if (!r.ok) return this._certFail('ECERTVALIDATION', `certificate validation failed: ${r.reason}`)
 			}
 			return true
@@ -1078,7 +1108,7 @@ class TLS extends EventEmitter {
 			const plain = certDecompressCached(algo, comp, uncompLen)
 			const certs = parseCertificateList(plain)
 			this.serverCertChain = certs
-			const r = validateChain(certs, this.host)
+			const r = validateChain(certs, this.sniHost)
 			if (!r.ok) return this._certFail('ECERTVALIDATION', `certificate validation failed: ${r.reason}`)
 			return true
 		} catch (e) {
@@ -1915,9 +1945,9 @@ class TLS extends EventEmitter {
 		// back to the legacy "every Chrome 147 extension" set defined below. key_share and
 		// server_name are the builders that can legitimately return null (no key_share
 		// constructed; an IP-literal proxy host, which RFC 6066 forbids in SNI).
-		const skipSni = this.proxyTunnel && net.isIP(this.host) !== 0
+		const skipSni = this.proxyTunnel && net.isIP(this.sniHost) !== 0
 		const EXT_BUILDERS: Record<number, () => Buffer | null> = {
-			0: () => (skipSni ? null : CreateSNIExtension(this.host)), // server_name
+			0: () => (skipSni ? null : CreateSNIExtension(this.sniHost)), // server_name
 			5: () => CreateStatusRequestExtension(ptls.statusRequest), // status_request
 			10: () => CreateSupportedGroupsExtension(grease.c, ptls.supportedGroups, { useGrease }), // supported_groups
 			11: () => CreateECPointFormatsExtension(), // ec_point_formats

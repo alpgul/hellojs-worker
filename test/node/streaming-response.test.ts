@@ -12,16 +12,22 @@ import * as path from 'node:path'
 import { expect, it } from 'vitest'
 
 import request from '../../index.ts'
+import type { FetchInit } from '../../index.ts'
 import { listenOnLoopback } from '../helpers/tcp.ts'
 
 import type { Server as NetServer } from 'node:net'
 
+const req = (url: string, init: FetchInit = {}) => request(url, { verifyTLS: false, ...init })
+
 function genServerCert(): { key: Buffer; cert: Buffer } {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hjsrv-'))
-	const k = path.join(dir, 'k.pem'), c = path.join(dir, 'c.pem')
+	const k = path.join(dir, 'k.pem'),
+		c = path.join(dir, 'c.pem')
 	try {
 		// Fixed tmpdir paths, no user input reaches the shell string.
-		execSync(`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days 1 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null`)
+		execSync(
+			`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days 1 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null`
+		)
 		return { key: fs.readFileSync(k), cert: fs.readFileSync(c) }
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true })
@@ -36,7 +42,10 @@ it('resolves a Response whose body yields chunks progressively', async () => {
 		// Write 16 chunks of 8KB so the client receives them piecewise.
 		let n = 0
 		const tick = () => {
-			if (n >= 16) { stream.end(); return }
+			if (n >= 16) {
+				stream.end()
+				return
+			}
 			stream.write(crypto.randomBytes(8192))
 			n++
 			setImmediate(tick)
@@ -47,10 +56,7 @@ it('resolves a Response whose body yields chunks progressively', async () => {
 
 	try {
 		// localhost cert is not in trust store, so we must disable cert validation.
-		const res = await request({
-			url: `https://127.0.0.1:${port}/`,
-			verifyTLS: false,
-		})
+		const res = await req(`https://127.0.0.1:${port}/`)
 
 		expect(res.body).toBeInstanceOf(ReadableStream)
 		const reader = res.body!.getReader()
@@ -80,10 +86,7 @@ it('exposes status, headers and a web body stream', async () => {
 	const port = await listenOnLoopback(server)
 
 	try {
-		const res = await request({
-			url: `https://127.0.0.1:${port}/`,
-			verifyTLS: false,
-		})
+		const res = await req(`https://127.0.0.1:${port}/`)
 		expect(res.status).toBe(201)
 		expect(res.headers.get('x-hello')).toBe('world')
 		expect(res.body).toBeInstanceOf(ReadableStream)
@@ -111,10 +114,10 @@ it('streams by default: resolves at HEADERS before the body finishes', async () 
 	const port = await listenOnLoopback(server)
 
 	try {
-		const res = await Promise.race([
-			request({ url: `https://127.0.0.1:${port}/`, verifyTLS: false }),
-			new Promise((_, reject) => setTimeout(() => reject(new Error('request did not resolve at headers')), 5_000)),
-		]) as Response
+		const res = (await Promise.race([
+			req(`https://127.0.0.1:${port}/`),
+			new Promise((_, reject) => setTimeout(() => reject(new Error('request did not resolve at headers')), 5_000))
+		])) as Response
 
 		expect(res.status).toBe(200)
 		const reader = res.body!.getReader()
@@ -132,7 +135,7 @@ it('streams by default: resolves at HEADERS before the body finishes', async () 
 	}
 }, 10_000)
 
-it('json:true does not buffer the response; res.json() reads the stream', async () => {
+it('res.json() reads the stream without a buffering option', async () => {
 	const { key, cert } = genServerCert()
 	const server = http2.createSecureServer({ key, cert })
 	server.on('stream', (stream) => {
@@ -142,7 +145,7 @@ it('json:true does not buffer the response; res.json() reads the stream', async 
 	const port = await listenOnLoopback(server)
 
 	try {
-		const res = await request({ url: `https://127.0.0.1:${port}/`, json: true, verifyTLS: false })
+		const res = await req(`https://127.0.0.1:${port}/`)
 		expect(res).toBeInstanceOf(Response)
 		expect(res.body).toBeInstanceOf(ReadableStream)
 		expect(await res.json()).toEqual({ ok: true })
@@ -162,10 +165,14 @@ it('callback form is rejected with EBADOPTS', async () => {
 
 	try {
 		const cb = (() => {}) as unknown as (err: unknown, res: unknown) => void
-		await expect((request as unknown as (opts: object, fn: (err: unknown, res: unknown) => void) => Promise<unknown>)(
-			{ url: `https://127.0.0.1:${port}/`, verifyTLS: false },
-			cb,
-		)).rejects.toMatchObject({ code: 'EBADOPTS' })
+		let err: unknown
+		try {
+			// Usage errors are validated before the request starts, so they throw synchronously.
+			request(`https://127.0.0.1:${port}/`, cb as unknown as FetchInit)
+		} catch (e) {
+			err = e
+		}
+		expect(err).toMatchObject({ code: 'EBADOPTS' })
 	} finally {
 		server.close()
 	}
@@ -182,7 +189,7 @@ it('H2 applies inbound backpressure and resumes a slow consumer', async () => {
 	const port = await listenOnLoopback(server)
 
 	try {
-		const res = await request({ url: `https://127.0.0.1:${port}/`, verifyTLS: false })
+		const res = await req(`https://127.0.0.1:${port}/`)
 		const reader = res.body!.getReader()
 		const first = await reader.read()
 		expect(first.done).toBe(false)
@@ -213,7 +220,7 @@ it('H1 pauses the socket for a slow consumer and resumes without dropping bytes'
 	const port = await listenOnLoopback(server as unknown as NetServer)
 
 	try {
-		const res = await request({ url: `https://127.0.0.1:${port}/`, verifyTLS: false })
+		const res = await req(`https://127.0.0.1:${port}/`)
 		const reader = res.body!.getReader()
 		const first = await reader.read()
 		expect(first.done).toBe(false)
@@ -242,7 +249,7 @@ it('an empty body with a content-encoding does not report a decoder error', asyn
 	const port = await listenOnLoopback(server)
 
 	try {
-		const res = await request({ url: `https://127.0.0.1:${port}/`, verifyTLS: false })
+		const res = await req(`https://127.0.0.1:${port}/`)
 		expect(await res.text()).toBe('')
 	} finally {
 		server.close()
@@ -259,14 +266,14 @@ it('an empty chunked body with a content-encoding closes cleanly', async () => {
 	const port = await listenOnLoopback(server)
 
 	try {
-		const res = await request({ url: `https://127.0.0.1:${port}/`, verifyTLS: false })
+		const res = await req(`https://127.0.0.1:${port}/`)
 		expect(await res.text()).toBe('')
 	} finally {
 		server.close()
 	}
 }, 10_000)
 
-it('timeouts.bodyIdle fails a stalled streamed body with EBODYIDLE', async () => {
+it('an aborted stalled streamed body rejects the reader', async () => {
 	const { key, cert } = genServerCert()
 	const server = http2.createSecureServer({ key, cert })
 	server.on('stream', (stream) => {
@@ -277,14 +284,12 @@ it('timeouts.bodyIdle fails a stalled streamed body with EBODYIDLE', async () =>
 	const port = await listenOnLoopback(server)
 
 	try {
-		const res = await request({
-			url: `https://127.0.0.1:${port}/`,
-			verifyTLS: false,
-			timeouts: { bodyIdle: 50 },
-		})
+		const ac = new AbortController()
+		const res = await request(`https://127.0.0.1:${port}/`, { verifyTLS: false, signal: ac.signal })
 		const reader = res.body!.getReader()
 		await reader.read()
-		await expect(reader.read()).rejects.toMatchObject({ code: 'EBODYIDLE' })
+		ac.abort()
+		await expect(reader.read()).rejects.toThrow()
 	} finally {
 		server.close()
 	}

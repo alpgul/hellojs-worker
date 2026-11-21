@@ -1,6 +1,6 @@
 // TypeScript declarations for @unreleased/hellojs.
 //
-// Public surface: a request.js-shape `request()` function plus the lower-level
+// Public surface: a fetch-shape `request(input, init)` function plus the lower-level
 // `TLS` export.
 
 /// <reference types="node" />
@@ -9,45 +9,104 @@ import { EventEmitter } from 'node:events'
 
 import type { Duplex } from 'node:stream'
 
-/**
- * Methods registered with IANA (RFC 9110 §9, RFC 5789). The protocol allows extension
- * methods, so any token is accepted at runtime — the literals exist for autocomplete,
- * not to close the set.
- */
+/** Methods registered with IANA (RFC 9110 §9, RFC 5789). */
 export type RegisteredHttpMethod =
-	| 'GET' | 'HEAD' | 'POST' | 'PUT' | 'DELETE' | 'CONNECT' | 'OPTIONS' | 'TRACE' | 'PATCH'
+	| 'GET'
+	| 'HEAD'
+	| 'POST'
+	| 'PUT'
+	| 'DELETE'
+	| 'CONNECT'
+	| 'OPTIONS'
+	| 'TRACE'
+	| 'PATCH'
 
-/** The method may be given in either case; `request()` uppercases it before use. */
-export type HttpMethod = RegisteredHttpMethod | Lowercase<RegisteredHttpMethod> | (string & {})
+/**
+ * The method may be given in either case; `request()` uppercases it before use. The type
+ * is deliberately closed to the registered set; the runtime still accepts any HTTP token.
+ */
+export type HttpMethod = RegisteredHttpMethod | Lowercase<RegisteredHttpMethod>
 
 /** Status codes registered with IANA. Unknown codes are accepted (servers invent them). */
 export type RegisteredHttpStatusCode =
-	| 100 | 101 | 102 | 103
-	| 200 | 201 | 202 | 203 | 204 | 205 | 206 | 207 | 208 | 226
-	| 300 | 301 | 302 | 303 | 304 | 305 | 307 | 308
-	| 400 | 401 | 402 | 403 | 404 | 405 | 406 | 407 | 408 | 409
-	| 410 | 411 | 412 | 413 | 414 | 415 | 416 | 417 | 418 | 421
-	| 422 | 423 | 424 | 425 | 426 | 428 | 429 | 431 | 451
-	| 500 | 501 | 502 | 503 | 504 | 505 | 506 | 507 | 508 | 509 | 510 | 511
+	| 100
+	| 101
+	| 102
+	| 103
+	| 200
+	| 201
+	| 202
+	| 203
+	| 204
+	| 205
+	| 206
+	| 207
+	| 208
+	| 226
+	| 300
+	| 301
+	| 302
+	| 303
+	| 304
+	| 305
+	| 307
+	| 308
+	| 400
+	| 401
+	| 402
+	| 403
+	| 404
+	| 405
+	| 406
+	| 407
+	| 408
+	| 409
+	| 410
+	| 411
+	| 412
+	| 413
+	| 414
+	| 415
+	| 416
+	| 417
+	| 418
+	| 421
+	| 422
+	| 423
+	| 424
+	| 425
+	| 426
+	| 428
+	| 429
+	| 431
+	| 451
+	| 500
+	| 501
+	| 502
+	| 503
+	| 504
+	| 505
+	| 506
+	| 507
+	| 508
+	| 509
+	| 510
+	| 511
 
 export type HttpStatusCode = RegisteredHttpStatusCode | (number & {})
 
 /**
  * Redirect handling, as the Fetch standard defines the mode. `'follow'` (default) follows
- * 3xx with a `Location` up to `maxRedirects`; `'manual'` stops and returns the 3xx response
- * itself; `'error'` rejects the request when a redirect is seen.
+ * 3xx with a `Location` up to the fixed 20-hop Fetch limit; `'manual'` stops and returns the
+ * 3xx response itself; `'error'` rejects the request when a redirect is seen.
  */
 export type RedirectMode = 'follow' | 'manual' | 'error'
 
 /** ALPN identifiers this client can negotiate. */
 export type AlpnProtocol = 'h2' | 'http/1.1'
 
-/** RFC 8259 JSON — the shape `json` and a serialized `body` are restricted to. */
-export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
-
-/** A percent-encoded `key=value` pair set, as `application/x-www-form-urlencoded` defines it. */
-export type QueryValue = string | number | ReadonlyArray<string | number>
-export type QueryParams = Record<string, QueryValue>
+/** Request bodies are exactly fetch's `BodyInit` — serialize JSON/forms before calling. */
+export type RequestBodyValue = BodyInit
 
 /**
  * Header field names registered for HTTP requests (RFC 9110 + the IANA registry, plus the
@@ -55,22 +114,62 @@ export type QueryParams = Record<string, QueryValue>
  * lowercases them on the wire.
  */
 export type KnownHttpRequestHeader =
-	| 'accept' | 'accept-charset' | 'accept-encoding' | 'accept-language' | 'accept-ranges'
-	| 'authorization' | 'cache-control' | 'connection' | 'content-encoding' | 'content-language'
-	| 'content-length' | 'content-location' | 'content-range' | 'content-type' | 'cookie'
-	| 'date' | 'expect' | 'forwarded' | 'from' | 'host' | 'if-match' | 'if-modified-since'
-	| 'if-none-match' | 'if-range' | 'if-unmodified-since' | 'max-forwards' | 'pragma'
-	| 'proxy-authorization' | 'range' | 'referer' | 'te' | 'trailer' | 'transfer-encoding'
-	| 'upgrade' | 'upgrade-insecure-requests' | 'user-agent' | 'via' | 'warning'
-	| 'x-forwarded-for' | 'x-forwarded-host'
-	| 'sec-ch-ua' | 'sec-ch-ua-mobile' | 'sec-ch-ua-platform'
-	| 'sec-fetch-dest' | 'sec-fetch-mode' | 'sec-fetch-site' | 'sec-fetch-user'
-	| 'sec-websocket-accept' | 'sec-websocket-extensions' | 'sec-websocket-key' | 'sec-websocket-version'
+	| 'accept'
+	| 'accept-charset'
+	| 'accept-encoding'
+	| 'accept-language'
+	| 'accept-ranges'
+	| 'authorization'
+	| 'cache-control'
+	| 'connection'
+	| 'content-encoding'
+	| 'content-language'
+	| 'content-length'
+	| 'content-location'
+	| 'content-range'
+	| 'content-type'
+	| 'cookie'
+	| 'date'
+	| 'expect'
+	| 'forwarded'
+	| 'from'
+	| 'host'
+	| 'if-match'
+	| 'if-modified-since'
+	| 'if-none-match'
+	| 'if-range'
+	| 'if-unmodified-since'
+	| 'max-forwards'
+	| 'pragma'
+	| 'proxy-authorization'
+	| 'range'
+	| 'referer'
+	| 'te'
+	| 'trailer'
+	| 'transfer-encoding'
+	| 'upgrade'
+	| 'upgrade-insecure-requests'
+	| 'user-agent'
+	| 'via'
+	| 'warning'
+	| 'x-forwarded-for'
+	| 'x-forwarded-host'
+	| 'sec-ch-ua'
+	| 'sec-ch-ua-mobile'
+	| 'sec-ch-ua-platform'
+	| 'sec-fetch-dest'
+	| 'sec-fetch-mode'
+	| 'sec-fetch-site'
+	| 'sec-fetch-user'
+	| 'sec-websocket-accept'
+	| 'sec-websocket-extensions'
+	| 'sec-websocket-key'
+	| 'sec-websocket-version'
 
 /** Known names autocomplete; any other field name is allowed, since HTTP defines extensions. */
-export type HttpRequestHeaders =
-	& { [name: string]: string | string[] }
-	& Partial<Record<KnownHttpRequestHeader, string | string[]>>
+export type HttpRequestHeaders = { [name: string]: string | string[] } & Partial<
+	Record<KnownHttpRequestHeader, string | string[]>
+>
 
 /** Profiles this build ships with. `default` aliases `chrome147-mac`; `register()` adds more. */
 export type BuiltInProfileName = 'default' | 'chrome147-mac' | 'firefox147'
@@ -94,21 +193,6 @@ export interface RetryPolicy {
 	methods?: HttpMethod[]
 	statusCodes?: HttpStatusCode[]
 	baseDelayMs?: number
-}
-
-export interface PerPhaseTimeouts {
-	connect?: number
-	tlsHandshake?: number
-	/**
-	 * Deadline for the response headers. Responses always stream, so this no longer covers
-	 * the body; use `bodyIdle` for long-running progressive responses.
-	 */
-	response?: number
-	/**
-	 * Cancel a progressive response body when no bytes move for this many milliseconds.
-	 * `0` / unset disables the watchdog (fetch-like behavior).
-	 */
-	bodyIdle?: number
 }
 
 /** Per-request proxy configuration. Every CONNECT detail lives under `proxy`. */
@@ -147,40 +231,30 @@ export interface ProxyOptions {
 }
 
 /**
- * Fetch's `RequestInit` supplies `method`, `headers`, `body`, `redirect`, `keepalive`, `signal`,
- * etc.; only hellojs-specific options are added here. Note that `keepalive` — the fetch spelling —
- * is the per-request h2 connection-pool switch (default `true`; pass `false` to opt out).
+ * Options accepted as the second argument of `request(input, init)`. Deliberately not an
+ * extension of `RequestInit`: inherited fields such as `cache`, `integrity`, `mode`,
+ * `credentials` and `priority` are never consulted by the transports, so accepting them
+ * would promise behavior that does not exist. The URL always comes from `input`.
  */
-export interface RequestOptions extends RequestInit {
-	url?: string
-	uri?: string
-	/** An RFC 8259 value is serialized as the request body; `true` does the same for an object `body`. */
-	json?: boolean | JsonValue
-	form?: QueryParams
-	qs?: QueryParams
+export interface RequestOptions {
+	method?: HttpMethod
+	/** `Headers`, tuple lists and plain records are normalized to a lowercase record internally. */
+	headers?: HeadersInit | Record<string, string | string[]> | null
+	body?: RequestBodyValue | null
+	redirect?: RedirectMode
+	signal?: AbortSignal | null
 	jar?: CookieJar | null
-	gzip?: boolean
-	maxRedirects?: number
-	timeout?: number
-	timeouts?: PerPhaseTimeouts | null
 	proxy?: ProxyOptions | null
-	retry?: RetryPolicy
-
 	/** TLS-only: turn on cert chain validation (default `true`). */
 	verifyTLS?: boolean
-	/**
-	 * TLS-only: reuse a TLS 1.3 session ticket from an earlier request to the same host
-	 * (default `true`; pass `false` for a fresh-handshake fingerprint). Resumed handshakes skip
-	 * the certificate flight, but add `pre_shared_key` to the ClientHello.
-	 */
-	resume?: boolean
-	/** Opt in to HTTP/3 (QUIC) for this request. Off unless explicitly `true`; QUIC is tried first with a bounded TCP fallback. */
-	h3?: boolean
+	/** Hellojs-specific: reuse a pooled h2 socket (default `true`); `false` forces a fresh connection. Unrelated to fetch's same-named flag. */
+	keepalive?: boolean
+	retry?: RetryPolicy
 	/** Profile name, or an inline profile object shaped like lib/profiles/types.ts `Profile`. */
 	profile?: ProfileName | Record<string, unknown>
 }
 
-/** Fetch-style init accepted as the second argument; request.js options may be mixed in. */
+/** Fetch-style init accepted as the second argument. */
 export type FetchInit = RequestOptions
 
 export interface PoolConfig {
@@ -196,8 +270,7 @@ export interface PoolConfig {
  */
 export type Response = globalThis.Response
 
-export type HellojsErrorCategory =
-	| 'usage' | 'transport' | 'tls' | 'protocol' | 'http' | 'body' | 'timeout'
+export type HellojsErrorCategory = 'usage' | 'transport' | 'tls' | 'protocol' | 'http' | 'body' | 'timeout'
 
 /**
  * The stable taxonomy in `lib/errors.ts`. `code` is typed with a `(string & {})` escape so
@@ -205,14 +278,38 @@ export type HellojsErrorCategory =
  * autocompletes and narrows.
  */
 export type HellojsErrorCode =
-	| 'EBADOPTS' | 'EBADARG' | 'EHEADERFIXED'
-	| 'ECONNREFUSED' | 'ECONNRESET' | 'ENOTFOUND' | 'EPROXY' | 'EUDPUNAVAILABLE'
-	| 'ETLS_ALERT' | 'ETLS_HANDSHAKE' | 'ETLS_CERT_VERIFY' | 'ETLS_VERSION'
-	| 'ECERTPARSE' | 'ECERTVALIDATION' | 'ECERTVERIFY' | 'ETLSPSK' | 'ETLS12' | 'EHRR'
-	| 'EH2STREAM' | 'EH2GOAWAY' | 'EH2COMPRESS' | 'EH2KEEPALIVE'
-	| 'EH3STREAM' | 'EH3CONN' | 'EH3PARSE' | 'EPROTO'
-	| 'EHTTP' | 'EBADRESP' | 'EDECOMPRESS'
-	| 'EBODYSTREAM' | 'EBODYBACKPRESSURE' | 'EBODYIDLE'
+	| 'EBADOPTS'
+	| 'EBADARG'
+	| 'EHEADERFIXED'
+	| 'ECONNREFUSED'
+	| 'ECONNRESET'
+	| 'ENOTFOUND'
+	| 'EPROXY'
+	| 'EUDPUNAVAILABLE'
+	| 'ETLS_ALERT'
+	| 'ETLS_HANDSHAKE'
+	| 'ETLS_CERT_VERIFY'
+	| 'ETLS_VERSION'
+	| 'ECERTPARSE'
+	| 'ECERTVALIDATION'
+	| 'ECERTVERIFY'
+	| 'ETLSPSK'
+	| 'ETLS12'
+	| 'EHRR'
+	| 'EH2STREAM'
+	| 'EH2GOAWAY'
+	| 'EH2COMPRESS'
+	| 'EH2KEEPALIVE'
+	| 'EH3STREAM'
+	| 'EH3CONN'
+	| 'EH3PARSE'
+	| 'EPROTO'
+	| 'EHTTP'
+	| 'EBADRESP'
+	| 'EDECOMPRESS'
+	| 'EBODYSTREAM'
+	| 'EBODYBACKPRESSURE'
+	| 'ETOOMANYREDIRECTS'
 	| 'ETIMEDOUT'
 
 /**
@@ -221,10 +318,19 @@ export type HellojsErrorCode =
  * instead of collapsing it to `EPROTO`.
  */
 export type TLSErrorCode =
-	| 'ETLS_ALERT' | 'ETLS_HANDSHAKE' | 'ETLS_VERSION'
-	| 'ETLS_CERT_VERIFY' | 'ECERTPARSE' | 'ECERTVALIDATION' | 'ECERTVERIFY'
-	| 'ETLSPSK' | 'ETLS12' | 'EHRR'
-	| 'ECONNRESET' | 'ECONNREFUSED' | 'ETIMEDOUT'
+	| 'ETLS_ALERT'
+	| 'ETLS_HANDSHAKE'
+	| 'ETLS_VERSION'
+	| 'ETLS_CERT_VERIFY'
+	| 'ECERTPARSE'
+	| 'ECERTVALIDATION'
+	| 'ECERTVERIFY'
+	| 'ETLSPSK'
+	| 'ETLS12'
+	| 'EHRR'
+	| 'ECONNRESET'
+	| 'ECONNREFUSED'
+	| 'ETIMEDOUT'
 
 export interface TLSError extends Error {
 	code?: TLSErrorCode | (string & {})
@@ -236,11 +342,10 @@ export class HellojsError extends Error {
 	cause?: unknown
 }
 
-// The root export and every `defaults()`-derived entry point share one call shape: fetch's
-// `(input, init)` plus the request.js object form. The result is always a real `Response`.
+// The root export and every `defaults()`-derived entry point share fetch's `(input, init)`
+// call shape. The result is always a real `Response`.
 interface Invokable {
 	(input: string | URL | Request, init?: FetchInit): Promise<Response>
-	(opts: RequestOptions): Promise<Response>
 }
 
 interface Shortcuts {
@@ -271,11 +376,14 @@ export interface RequestFn extends Invokable, Shortcuts {
 	/** Install a Mozilla/NSS PEM bundle when the runtime has no built-in roots. */
 	setTrustedRoots(pems: string[]): void
 
-	/** Drop every cached TLS 1.3 session ticket (used by default, disabled with `resume: false`). */
+	/** Drop every cached TLS 1.3 session ticket. Resumption is always driven by the internal store. */
 	clearSessionTickets(): void
 
 	/** Set the process-wide keep-alive pool caps; each call starts from the defaults. */
 	setPoolConfig(config?: Partial<PoolConfig>): void
+
+	/** Close and forget every pooled h2/h3/h1 connection (test/shutdown helper). */
+	clearPool(reason?: string): void
 
 	/** Request lifecycle events — see [Observability](README.md#observability). */
 	observability: Observability
@@ -319,15 +427,18 @@ export const udp: UdpTransport
 export function setTrustedRoots(pems: string[]): void
 export function clearSessionTickets(): void
 export function setPoolConfig(config?: Partial<PoolConfig>): void
+export function clearPool(reason?: string): void
 
 export interface TLSOptions {
 	verifyTLS?: boolean
-	resume?: boolean
 }
 
 /** The subset of `node:dgram.Socket` that the QUIC client depends on. */
 export interface UdpSocket {
-	on(event: 'message', listener: (buf: Buffer, rinfo: { address: string; family: string; port: number }) => void): unknown
+	on(
+		event: 'message',
+		listener: (buf: Buffer, rinfo: { address: string; family: string; port: number }) => void
+	): unknown
 	on(event: 'error', listener: (err: Error) => void): unknown
 	bind(port: number, callback: () => void): unknown
 	send(buf: Buffer, port: number, host: string, callback?: () => void): unknown

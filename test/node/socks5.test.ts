@@ -7,12 +7,17 @@ import { expect, it } from 'vitest'
 import request from '../../index.ts'
 import { socks5Connect } from '../../lib/socks5.ts'
 
-interface FakeServer { port: number; close: () => void }
+interface FakeServer {
+	port: number
+	close: () => void
+}
 
 // Spin up a minimal in-process SOCKS5 server that:
 //   - accepts 0x00 (no-auth) and 0x02 (userpass)
 //   - on CONNECT, dials a local upstream and bridges
-function startFakeSocksServer(opts: { requireUserPass?: boolean; creds?: { u: string; p: string } | null } = {}): Promise<FakeServer> {
+function startFakeSocksServer(
+	opts: { requireUserPass?: boolean; creds?: { u: string; p: string } | null } = {}
+): Promise<FakeServer> {
 	const { requireUserPass = false, creds = null } = opts
 	return new Promise((resolve) => {
 		const upstream = net.createServer((c) => {
@@ -36,24 +41,37 @@ function startFakeSocksServer(opts: { requireUserPass?: boolean; creds?: { u: st
 							const methods = Array.from(buf.subarray(2, 2 + n))
 							buf = buf.subarray(2 + n)
 							if (requireUserPass) {
-								if (!methods.includes(0x02)) { c.write(Buffer.from([0x05, 0xff])); c.end(); return }
-								c.write(Buffer.from([0x05, 0x02])); state = 'auth'
+								if (!methods.includes(0x02)) {
+									c.write(Buffer.from([0x05, 0xff]))
+									c.end()
+									return
+								}
+								c.write(Buffer.from([0x05, 0x02]))
+								state = 'auth'
 							} else {
-								c.write(Buffer.from([0x05, 0x00])); state = 'connect'
+								c.write(Buffer.from([0x05, 0x00]))
+								state = 'connect'
 							}
 						} else if (state === 'auth') {
 							if (buf.length < 2) return
-							const ulen = buf[1]; if (buf.length < 2 + ulen + 1) return
+							const ulen = buf[1]
+							if (buf.length < 2 + ulen + 1) return
 							const u = buf.subarray(2, 2 + ulen).toString()
-							const plen = buf[2 + ulen]; if (buf.length < 2 + ulen + 1 + plen) return
+							const plen = buf[2 + ulen]
+							if (buf.length < 2 + ulen + 1 + plen) return
 							const p = buf.subarray(2 + ulen + 1, 2 + ulen + 1 + plen).toString()
 							buf = buf.subarray(2 + ulen + 1 + plen)
-							if (creds && (u !== creds.u || p !== creds.p)) { c.write(Buffer.from([0x01, 0x01])); c.end(); return }
-							c.write(Buffer.from([0x01, 0x00])); state = 'connect'
+							if (creds && (u !== creds.u || p !== creds.p)) {
+								c.write(Buffer.from([0x01, 0x01]))
+								c.end()
+								return
+							}
+							c.write(Buffer.from([0x01, 0x00]))
+							state = 'connect'
 						} else if (state === 'connect') {
 							if (buf.length < 5) return
 							const atyp = buf[3]
-							let total = 4 + 2  // BND.PORT
+							let total = 4 + 2 // BND.PORT
 							if (atyp === 0x01) total += 4
 							else if (atyp === 0x04) total += 16
 							else if (atyp === 0x03) total += 1 + buf[4]
@@ -62,7 +80,8 @@ function startFakeSocksServer(opts: { requireUserPass?: boolean; creds?: { u: st
 							// Always bridge to our upstream regardless of requested address.
 							const target = net.createConnection({ host: '127.0.0.1', port: upstreamPort }, () => {
 								c.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))
-								c.pipe(target); target.pipe(c)
+								c.pipe(target)
+								target.pipe(c)
 							})
 							return
 						}
@@ -72,7 +91,13 @@ function startFakeSocksServer(opts: { requireUserPass?: boolean; creds?: { u: st
 			sock5.listen(0, '127.0.0.1', () => {
 				const saddr = sock5.address()
 				if (!saddr || typeof saddr === 'string') throw new Error('expected a bound TCP port')
-				resolve({ port: saddr.port, close: () => { sock5.close(); upstream.close() } })
+				resolve({
+					port: saddr.port,
+					close: () => {
+						sock5.close()
+						upstream.close()
+					}
+				})
 			})
 		})
 	})
@@ -85,37 +110,48 @@ function echo(sock: net.Socket): Promise<Buffer> {
 it('SOCKS5 no-auth: connect + bridge', async () => {
 	const srv = await startFakeSocksServer()
 	const sock = await socks5Connect({
-		proxyHost: '127.0.0.1', proxyPort: srv.port,
-		destHost: 'unused.example.com', destPort: 1234,
-		connectTimeoutMs: 1000,
+		proxyHost: '127.0.0.1',
+		proxyPort: srv.port,
+		destHost: 'unused.example.com',
+		destPort: 1234,
+		connectTimeoutMs: 1000
 	})
 	try {
 		sock.write('hello')
 		expect((await echo(sock)).toString()).toBe('ECHO:hello')
 	} finally {
-		sock.destroy(); srv.close()
+		sock.destroy()
+		srv.close()
 	}
 }, 5000)
 
 it('SOCKS5 user/pass: correct creds succeed, wrong creds fail', async () => {
 	const srv = await startFakeSocksServer({ requireUserPass: true, creds: { u: 'alice', p: 'secret' } })
 	const sock = await socks5Connect({
-		proxyHost: '127.0.0.1', proxyPort: srv.port,
-		username: 'alice', password: 'secret',
-		destHost: 'unused.example.com', destPort: 1234,
-		connectTimeoutMs: 1000,
+		proxyHost: '127.0.0.1',
+		proxyPort: srv.port,
+		username: 'alice',
+		password: 'secret',
+		destHost: 'unused.example.com',
+		destPort: 1234,
+		connectTimeoutMs: 1000
 	})
 	try {
 		sock.write('hi')
 		expect((await echo(sock)).toString()).toBe('ECHO:hi')
 		sock.destroy()
 
-		await expect(socks5Connect({
-			proxyHost: '127.0.0.1', proxyPort: srv.port,
-			username: 'alice', password: 'wrong',
-			destHost: 'unused.example.com', destPort: 1234,
-			connectTimeoutMs: 1000,
-		})).rejects.toThrow(/authentication failed/)
+		await expect(
+			socks5Connect({
+				proxyHost: '127.0.0.1',
+				proxyPort: srv.port,
+				username: 'alice',
+				password: 'wrong',
+				destHost: 'unused.example.com',
+				destPort: 1234,
+				connectTimeoutMs: 1000
+			})
+		).rejects.toThrow(/authentication failed/)
 	} finally {
 		srv.close()
 	}
@@ -128,10 +164,9 @@ it('SOCKS5 user/pass: correct creds succeed, wrong creds fail', async () => {
 // ECONNREFUSED is the proof the check runs before the handshake.
 it('socks5:// rejects proxy.authorization/proxy.headers as EBADOPTS', async () => {
 	for (const extra of [{ authorization: 'Bearer x' }, { headers: { 'x-a': 'v' } }]) {
-		const err = (await request({
-			url: 'https://example.invalid/',
+		const err = (await request('https://example.invalid/', {
 			proxy: { url: 'socks5://127.0.0.1:1', ...extra },
-			timeout: 5000,
+			signal: AbortSignal.timeout(5000)
 		}).catch((e: Error) => e)) as Error & { code?: string; category?: string }
 		expect(err).toBeInstanceOf(Error)
 		expect(err.code, JSON.stringify(extra)).toBe('EBADOPTS')
@@ -139,10 +174,9 @@ it('socks5:// rejects proxy.authorization/proxy.headers as EBADOPTS', async () =
 	}
 
 	// An empty map adds nothing, so it is not a usage error: the request goes on to dial the proxy.
-	const err = (await request({
-		url: 'https://example.invalid/',
+	const err = (await request('https://example.invalid/', {
 		proxy: { url: 'socks5://127.0.0.1:1', headers: {} },
-		timeout: 5000,
+		signal: AbortSignal.timeout(5000)
 	}).catch((e: Error) => e)) as Error & { code?: string }
 	expect(err).toBeInstanceOf(Error)
 	expect(err.code).not.toBe('EBADOPTS')

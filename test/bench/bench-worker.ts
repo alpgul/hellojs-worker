@@ -36,10 +36,10 @@ async function makeAdapter(name: string | undefined): Promise<Adapter> {
 		const { default: request } = await import('../../index.ts')
 		return {
 			fn: async (url) => {
-				const r = await request({ url, verifyTLS: VERIFY_TLS })
+				const r = await request(url, { verifyTLS: VERIFY_TLS })
 				return (await r.arrayBuffer()).byteLength
 			},
-			cleanup: () => {},
+			cleanup: () => {}
 		}
 	}
 	if (name === 'node-https') {
@@ -54,7 +54,7 @@ async function makeAdapter(name: string | undefined): Promise<Adapter> {
 					})
 					req.on('error', reject)
 				}),
-			cleanup: () => agent.destroy(),
+			cleanup: () => agent.destroy()
 		}
 	}
 	if (name === 'node-http2') {
@@ -77,7 +77,7 @@ async function makeAdapter(name: string | undefined): Promise<Adapter> {
 						':method': 'GET',
 						':path': u.pathname + u.search,
 						':authority': u.host,
-						':scheme': 'https',
+						':scheme': 'https'
 					})
 					let total = 0
 					req.on('data', (c: Buffer) => (total += c.length))
@@ -87,7 +87,7 @@ async function makeAdapter(name: string | undefined): Promise<Adapter> {
 				}),
 			cleanup: () => {
 				for (const s of sessions.values()) s.destroy()
-			},
+			}
 		}
 	}
 	if (name === 'undici') {
@@ -100,7 +100,7 @@ async function makeAdapter(name: string | undefined): Promise<Adapter> {
 				for await (const chunk of body) total += chunk.length
 				return total
 			},
-			cleanup: () => agent.close(),
+			cleanup: () => agent.close()
 		}
 	}
 	if (name === 'got') {
@@ -111,7 +111,7 @@ async function makeAdapter(name: string | undefined): Promise<Adapter> {
 				const r = await client(url, { responseType: 'buffer' })
 				return r.body.length
 			},
-			cleanup: () => {},
+			cleanup: () => {}
 		}
 	}
 	if (name === 'axios') {
@@ -123,7 +123,7 @@ async function makeAdapter(name: string | undefined): Promise<Adapter> {
 				const r = await inst.get<ArrayBuffer>(url)
 				return Buffer.from(r.data).length
 			},
-			cleanup: () => agent.destroy(),
+			cleanup: () => agent.destroy()
 		}
 	}
 	if (name === 'node-fetch') {
@@ -135,7 +135,7 @@ async function makeAdapter(name: string | undefined): Promise<Adapter> {
 				const b = await r.arrayBuffer()
 				return b.byteLength
 			},
-			cleanup: () => agent.destroy(),
+			cleanup: () => agent.destroy()
 		}
 	}
 	if (name === 'fetch-native') {
@@ -151,7 +151,7 @@ async function makeAdapter(name: string | undefined): Promise<Adapter> {
 				const b = await r.arrayBuffer()
 				return b.byteLength
 			},
-			cleanup: () => {},
+			cleanup: () => {}
 		}
 	}
 	throw new Error(`unknown client: ${name}`)
@@ -207,7 +207,7 @@ async function run(): Promise<void> {
 		warmP99: percentile(warmTimes, 99),
 		concWallMs,
 		concRps: (CONCURRENT * 1000) / concWallMs,
-		rssDeltaMB: (rssAfter - rssBefore) / 1024 / 1024,
+		rssDeltaMB: (rssAfter - rssBefore) / 1024 / 1024
 	}
 	process.stdout.write(JSON.stringify(result) + '\n')
 	process.exit(0)

@@ -29,7 +29,7 @@ function taggedCodes(): string[] {
 	const found = new Set<string>()
 	const patterns = [
 		/\.code\s*=\s*'(E[A-Z0-9_]+)'/g, //   err.code = 'ETLS_ALERT'
-		/_certFail\(\s*'(E[A-Z0-9_]+)'/g, //  this._certFail('ECERTPARSE', …)
+		/_certFail\(\s*'(E[A-Z0-9_]+)'/g //  this._certFail('ECERTPARSE', …)
 	]
 	for (const file of walk(path.join(ROOT, 'lib'))) {
 		const text = fs.readFileSync(file, 'utf8')
@@ -65,9 +65,14 @@ it('a fatal TLS alert surfaces as ETLS_ALERT with the tls category', () => {
 	// otherwise wrap() below cannot find it and the caller sees EPROTO instead.
 	const t = new TLS('127.0.0.1', 1, null)
 	let raw!: Error & { code?: string }
-	t.on('error', (e) => { raw = e as Error & { code?: string } })
-	;(t as unknown as { _handleAlert(level: number, desc: number, where: string): void })
-		._handleAlert(2, 40, 'unit-test')
+	t.on('error', (e) => {
+		raw = e as Error & { code?: string }
+	})
+	;(t as unknown as { _handleAlert(level: number, desc: number, where: string): void })._handleAlert(
+		2,
+		40,
+		'unit-test'
+	)
 
 	expect(raw.code, 'emitted code').toBe('ETLS_ALERT')
 	const e = wrap(raw)

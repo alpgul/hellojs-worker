@@ -1,24 +1,22 @@
-// Benchmark: hellojs vs curl (HTTP/2; HTTP/3 when the curl build supports it).
+// Benchmark: hellojs vs curl (curl pinned to HTTP/2 or HTTP/3).
 //
 // Both tools use one fresh connection per request (hellojs does not pool), so every sample is
 // cold-connection end-to-end latency: DNS + TCP/QUIC + TLS + request + body. Samples are
 // interleaved and the order flips each round to reduce drift from network / CDN changes.
 //
 // hellojs is timed with process.hrtime around request(); curl reports its own timing via
-// `-w %{json}`, which excludes process startup. curl h3 is skipped when the binary lacks
-// HTTP3 (point CURL_BIN at an h3-capable curl to enable that row). The `http=` line in
-// Cloudflare's /cdn-cgi/trace body verifies which protocol actually answered; an h3 request
-// that fell back to TCP is detected and the rest of that row is skipped.
+// `-w %{json}`, which excludes process startup. hellojs selects its transport automatically
+// (QUIC when a UDP provider exists, otherwise TCP + TLS) — there is no public h3/h2 option —
+// while curl h3 rows are skipped when the binary lacks HTTP3 (point CURL_BIN at an h3-capable
+// curl to enable them). The `http=` line in Cloudflare's /cdn-cgi/trace body reports the
+// protocol that actually answered; a curl h3 request that fell back to TCP is detected and
+// the rest of that row is skipped.
 //
 // Caveats: this is connect/handshake-dominated, hellojs runs its own JS TLS/QUIC stack (JIT
 // warm-up on the first sample) while curl is compiled C, and a single run is directional.
-// With BENCH_RESUME=1 the hellojs h2 row opts into TLS 1.3 PSK resumption: the first sample
-// stores the server's ticket and later samples resume (curl spawns a new process per sample
-// and therefore has no comparable ticket cache).
 //
 //   npm run bench:curl
 //   SAMPLES=20 npm run bench:curl
-//   BENCH_RESUME=1 npm run bench:curl
 //   CURL_BIN=/opt/curl/bin/curl npm run bench:curl
 
 import { spawn } from 'node:child_process'
@@ -28,7 +26,6 @@ import request from '../../index.ts'
 const TARGET = process.env.BENCH_URL ?? 'https://www.cloudflare.com/cdn-cgi/trace'
 const SAMPLES = positiveInt(process.env.SAMPLES, 15)
 const CURL_BIN = process.env.CURL_BIN ?? 'curl'
-const RESUME = process.env.BENCH_RESUME === '1'
 const MAX_CONSECUTIVE_FAILURES = 3
 const CURL_TIMEOUT_MS = 45_000
 
@@ -75,14 +72,14 @@ interface CurlWriteOut {
 	time_total: number
 }
 
-type ComboId = 'hellojs-h2' | 'curl-h2' | 'hellojs-h3' | 'curl-h3'
+type ComboId = 'hellojs' | 'curl-h2' | 'curl-h3'
 
 interface Combo {
 	id: ComboId
 	label: string
 	kind: 'hellojs' | 'curl'
-	h3: boolean
-	resume: boolean
+	/** Curl-only: which protocol to pin. hellojs picks its own transport. */
+	h3?: boolean
 	enabled: boolean
 	note?: string
 	samples: Sample[]
@@ -198,14 +195,9 @@ async function runCurl(info: CurlInfo, url: string, h3: boolean): Promise<CurlSa
 	}
 }
 
-async function runHello(url: string, h3: boolean, resume: boolean): Promise<Sample> {
+async function runHello(url: string): Promise<Sample> {
 	const t0 = process.hrtime.bigint()
-	const res = await request({
-		url,
-		h3,
-		resume,
-		timeouts: h3 ? { connect: 3000, response: 15_000 } : { response: 15_000 }
-	})
+	const res = await request(url, { signal: AbortSignal.timeout(30_000) })
 	const ms = Number(process.hrtime.bigint() - t0) / 1e6
 	if (!res.ok) throw new Error(`HTTP ${res.status}`)
 	const body = await res.text()
@@ -219,11 +211,9 @@ function isCurlSample(s: Sample): s is CurlSample {
 function makeCombos(curl: CurlInfo): Combo[] {
 	const combos: Combo[] = [
 		{
-			id: 'hellojs-h2',
-			label: RESUME ? 'hellojs h2+psk' : 'hellojs h2',
+			id: 'hellojs',
+			label: 'hellojs (auto transport)',
 			kind: 'hellojs',
-			h3: false,
-			resume: RESUME,
 			enabled: true,
 			samples: [],
 			curlSamples: [],
@@ -234,18 +224,6 @@ function makeCombos(curl: CurlInfo): Combo[] {
 			label: 'curl h2',
 			kind: 'curl',
 			h3: false,
-			resume: false,
-			enabled: true,
-			samples: [],
-			curlSamples: [],
-			failures: 0
-		},
-		{
-			id: 'hellojs-h3',
-			label: 'hellojs h3',
-			kind: 'hellojs',
-			h3: true,
-			resume: false,
 			enabled: true,
 			samples: [],
 			curlSamples: [],
@@ -257,7 +235,6 @@ function makeCombos(curl: CurlInfo): Combo[] {
 		label: 'curl h3',
 		kind: 'curl',
 		h3: true,
-		resume: false,
 		enabled: curl.hasH3,
 		note: curl.hasH3 ? undefined : 'curl build lacks HTTP3 (set CURL_BIN to an h3-capable curl)',
 		samples: [],
@@ -267,9 +244,11 @@ function makeCombos(curl: CurlInfo): Combo[] {
 	return combos
 }
 
-/** Verifies the protocol actually negotiated; h3 falling back to TCP is a hard error here. */
+/** Verifies the protocol actually negotiated; a pinned curl h3 row falling back is a hard error. */
 function protocolProblem(c: Combo, protocol: string): string | undefined {
 	if (protocol === 'unknown') return undefined
+	// hellojs selects h2/h3 itself, so either negotiated protocol is acceptable.
+	if (c.kind === 'hellojs') return undefined
 	if (c.h3) return protocol === 'http/3' ? undefined : `negotiated ${protocol}, expected http/3 (fallback)`
 	return protocol === 'http/2' ? undefined : `negotiated ${protocol}, expected http/2`
 }
@@ -281,8 +260,7 @@ async function runSamples(combos: Combo[], curl: CurlInfo): Promise<void> {
 		for (const c of order) {
 			if (!c.enabled) continue
 			try {
-				const sample =
-					c.kind === 'hellojs' ? await runHello(TARGET, c.h3, c.resume) : await runCurl(curl, TARGET, c.h3)
+				const sample = c.kind === 'hellojs' ? await runHello(TARGET) : await runCurl(curl, TARGET, c.h3!)
 				const problem = protocolProblem(c, sample.protocol)
 				if (problem) {
 					c.enabled = false
@@ -358,7 +336,7 @@ async function main(): Promise<void> {
 	console.log(`Target: ${TARGET}`)
 	console.log(`Samples: ${SAMPLES} per row (one fresh connection per request)`)
 	console.log(`curl: ${curl.version} — HTTP3 ${curl.hasH3 ? 'yes' : 'no'}`)
-	console.log(`hellojs TLS 1.3 resumption: ${RESUME ? 'on (hellojs h2 row, first sample is cold)' : 'off'}`)
+	console.log('hellojs transport: selected automatically (h3 when a UDP provider exists, else TCP + TLS)')
 	console.log()
 	await runSamples(combos, curl)
 	console.log()
@@ -384,8 +362,8 @@ async function main(): Promise<void> {
 	}
 
 	const delta = deltaRow(
-		'hellojs h2 vs curl h2',
-		statsOf(combos.find((c) => c.id === 'hellojs-h2')),
+		'hellojs (auto) vs curl h2',
+		statsOf(combos.find((c) => c.id === 'hellojs')),
 		statsOf(combos.find((c) => c.id === 'curl-h2'))
 	)
 	if (delta) {

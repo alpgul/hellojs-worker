@@ -18,64 +18,64 @@
 // README.md → "Errors".
 
 const CATEGORY = Object.freeze({
-	USAGE:     'usage',
+	USAGE: 'usage',
 	TRANSPORT: 'transport',
-	TLS:       'tls',
-	PROTOCOL:  'protocol',
-	HTTP:      'http',
-	BODY:      'body',
-	TIMEOUT:   'timeout',
+	TLS: 'tls',
+	PROTOCOL: 'protocol',
+	HTTP: 'http',
+	BODY: 'body',
+	TIMEOUT: 'timeout'
 } as const)
 
 export type ErrorCategory = (typeof CATEGORY)[keyof typeof CATEGORY]
 
 const CODES = Object.freeze({
 	// Usage
-	EBADOPTS:        { category: CATEGORY.USAGE,     msg: 'invalid request options' },
-	EBADARG:         { category: CATEGORY.USAGE,     msg: 'invalid argument' },
-	EHEADERFIXED:    { category: CATEGORY.USAGE,     msg: 'header is fixed by the profile' },
+	EBADOPTS: { category: CATEGORY.USAGE, msg: 'invalid request options' },
+	EBADARG: { category: CATEGORY.USAGE, msg: 'invalid argument' },
+	EHEADERFIXED: { category: CATEGORY.USAGE, msg: 'header is fixed by the profile' },
 
 	// Transport
-	ECONNREFUSED:    { category: CATEGORY.TRANSPORT, msg: 'TCP connection refused' },
-	ECONNRESET:      { category: CATEGORY.TRANSPORT, msg: 'TCP connection reset' },
-	ENOTFOUND:       { category: CATEGORY.TRANSPORT, msg: 'DNS resolution failed' },
-	EPROXY:          { category: CATEGORY.TRANSPORT, msg: 'proxy CONNECT failed' },
+	ECONNREFUSED: { category: CATEGORY.TRANSPORT, msg: 'TCP connection refused' },
+	ECONNRESET: { category: CATEGORY.TRANSPORT, msg: 'TCP connection reset' },
+	ENOTFOUND: { category: CATEGORY.TRANSPORT, msg: 'DNS resolution failed' },
+	EPROXY: { category: CATEGORY.TRANSPORT, msg: 'proxy CONNECT failed' },
 	EUDPUNAVAILABLE: { category: CATEGORY.TRANSPORT, msg: 'no UDP provider — HTTP/3 unreachable' },
+	ETOOMANYREDIRECTS: { category: CATEGORY.TRANSPORT, msg: 'redirect count exceeded the 20-hop browser limit' },
 
 	// TLS
-	ETLS_ALERT:      { category: CATEGORY.TLS,       msg: 'fatal TLS alert from server' },
-	ETLS_HANDSHAKE:  { category: CATEGORY.TLS,       msg: 'TLS handshake failed' },
-	ETLS_CERT_VERIFY:{ category: CATEGORY.TLS,       msg: 'server certificate chain validation failed' },
-	ETLS_VERSION:    { category: CATEGORY.TLS,       msg: 'server picked an unsupported TLS version' },
-	ECERTPARSE:      { category: CATEGORY.TLS,       msg: 'server certificate could not be parsed' },
-	ECERTVALIDATION: { category: CATEGORY.TLS,       msg: 'certificate chain failed path validation' },
-	ECERTVERIFY:     { category: CATEGORY.TLS,       msg: 'CertificateVerify signature failed' },
-	ETLSPSK:         { category: CATEGORY.TLS,       msg: 'PSK / session-resumption setup failed' },
-	ETLS12:          { category: CATEGORY.TLS,       msg: 'TLS 1.2 record-layer failure' },
-	EHRR:            { category: CATEGORY.TLS,       msg: 'HelloRetryRequest could not be honored' },
+	ETLS_ALERT: { category: CATEGORY.TLS, msg: 'fatal TLS alert from server' },
+	ETLS_HANDSHAKE: { category: CATEGORY.TLS, msg: 'TLS handshake failed' },
+	ETLS_CERT_VERIFY: { category: CATEGORY.TLS, msg: 'server certificate chain validation failed' },
+	ETLS_VERSION: { category: CATEGORY.TLS, msg: 'server picked an unsupported TLS version' },
+	ECERTPARSE: { category: CATEGORY.TLS, msg: 'server certificate could not be parsed' },
+	ECERTVALIDATION: { category: CATEGORY.TLS, msg: 'certificate chain failed path validation' },
+	ECERTVERIFY: { category: CATEGORY.TLS, msg: 'CertificateVerify signature failed' },
+	ETLSPSK: { category: CATEGORY.TLS, msg: 'PSK / session-resumption setup failed' },
+	ETLS12: { category: CATEGORY.TLS, msg: 'TLS 1.2 record-layer failure' },
+	EHRR: { category: CATEGORY.TLS, msg: 'HelloRetryRequest could not be honored' },
 
 	// Protocol
-	EH2STREAM:       { category: CATEGORY.PROTOCOL,  msg: 'h2 stream error' },
-	EH2GOAWAY:       { category: CATEGORY.PROTOCOL,  msg: 'h2 GOAWAY received' },
-	EH2COMPRESS:     { category: CATEGORY.PROTOCOL,  msg: 'h2 HPACK compression failure' },
-	EH2KEEPALIVE:    { category: CATEGORY.PROTOCOL,  msg: 'h2 keepalive PING timed out' },
-	EH3STREAM:       { category: CATEGORY.PROTOCOL,  msg: 'h3 stream error' },
-	EH3CONN:         { category: CATEGORY.PROTOCOL,  msg: 'h3 / QUIC connection error' },
-	EH3PARSE:        { category: CATEGORY.PROTOCOL,  msg: 'h3 response could not be parsed' },
-	EPROTO:          { category: CATEGORY.PROTOCOL,  msg: 'protocol-level violation' },
+	EH2STREAM: { category: CATEGORY.PROTOCOL, msg: 'h2 stream error' },
+	EH2GOAWAY: { category: CATEGORY.PROTOCOL, msg: 'h2 GOAWAY received' },
+	EH2COMPRESS: { category: CATEGORY.PROTOCOL, msg: 'h2 HPACK compression failure' },
+	EH2KEEPALIVE: { category: CATEGORY.PROTOCOL, msg: 'h2 keepalive PING timed out' },
+	EH3STREAM: { category: CATEGORY.PROTOCOL, msg: 'h3 stream error' },
+	EH3CONN: { category: CATEGORY.PROTOCOL, msg: 'h3 / QUIC connection error' },
+	EH3PARSE: { category: CATEGORY.PROTOCOL, msg: 'h3 response could not be parsed' },
+	EPROTO: { category: CATEGORY.PROTOCOL, msg: 'protocol-level violation' },
 
 	// HTTP
-	EHTTP:           { category: CATEGORY.HTTP,      msg: 'HTTP policy error (e.g. redirect: \'error\')' },
-	EBADRESP:        { category: CATEGORY.HTTP,      msg: 'malformed HTTP response' },
-	EDECOMPRESS:     { category: CATEGORY.HTTP,      msg: 'response body decompression failed' },
+	EHTTP: { category: CATEGORY.HTTP, msg: "HTTP policy error (e.g. redirect: 'error')" },
+	EBADRESP: { category: CATEGORY.HTTP, msg: 'malformed HTTP response' },
+	EDECOMPRESS: { category: CATEGORY.HTTP, msg: 'response body decompression failed' },
 
 	// Body
-	EBODYSTREAM:     { category: CATEGORY.BODY,      msg: 'request body stream error' },
-	EBODYBACKPRESSURE: { category: CATEGORY.BODY,    msg: 'response body consumer fell too far behind' },
-	EBODYIDLE:       { category: CATEGORY.TIMEOUT,   msg: 'response body made no progress before its idle deadline' },
+	EBODYSTREAM: { category: CATEGORY.BODY, msg: 'request body stream error' },
+	EBODYBACKPRESSURE: { category: CATEGORY.BODY, msg: 'response body consumer fell too far behind' },
 
 	// Timeout
-	ETIMEDOUT:       { category: CATEGORY.TIMEOUT,   msg: 'phase deadline exceeded' },
+	ETIMEDOUT: { category: CATEGORY.TIMEOUT, msg: 'phase deadline exceeded' }
 } as const)
 
 export type ErrorCode = keyof typeof CODES
@@ -107,7 +107,12 @@ function wrap(err: unknown, fallbackCode: ErrorCode | string = 'EPROTO'): Helloj
 		return new HellojsError(e.message || CODE_TABLE[nodeCode].msg, nodeCode, err)
 	}
 	// Node socket codes we want to surface as-is.
-	if (nodeCode === 'ECONNREFUSED' || nodeCode === 'ECONNRESET' || nodeCode === 'ENOTFOUND' || nodeCode === 'ETIMEDOUT') {
+	if (
+		nodeCode === 'ECONNREFUSED' ||
+		nodeCode === 'ECONNRESET' ||
+		nodeCode === 'ENOTFOUND' ||
+		nodeCode === 'ETIMEDOUT'
+	) {
 		return new HellojsError(e.message || nodeCode, nodeCode, err)
 	}
 	return new HellojsError(e.message || String(err), fallbackCode, err)

@@ -38,7 +38,10 @@ it('setUdpProvider(null) passiveizes the transport', async () => {
 it('a custom provider replaces dgram without touching connection.ts', async () => {
 	const udp = await freshSeam()
 	const stub = { on() {}, bind() {}, send() {}, close() {}, destroyed: false, type: '' }
-	udp.setUdpProvider((type) => { stub.type = type; return stub })
+	udp.setUdpProvider((type) => {
+		stub.type = type
+		return stub
+	})
 	expect(udp.udpAvailable()).toBe(true)
 	expect(udp.createSocket()).toBe(stub)
 	expect(stub.type).toBe('udp4')

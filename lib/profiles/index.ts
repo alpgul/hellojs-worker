@@ -6,7 +6,7 @@
 //
 //   import { profiles } from '@unreleased/hellojs'
 //   profiles.register('chrome148-mac', { name: 'chrome148-mac', ... })
-//   request({ url, profile: 'chrome148-mac' })
+//   request(url, { profile: 'chrome148-mac' })
 //
 // A profile is a plain object with the shape that lib/tls/tls.ts, lib/headers.ts, and
 // lib/h3/transport-params.ts consume. See ./chrome147-mac.ts for the canonical shape.
@@ -20,7 +20,7 @@ import type { Profile } from './types.ts'
 
 const profiles: Record<string, Profile> = {
 	'chrome147-mac': chrome147,
-	firefox147,
+	firefox147
 }
 
 function get(name?: string | null): Profile {
@@ -36,7 +36,9 @@ function register(name: string, profile: Profile): void {
 	profiles[name] = profile
 }
 
-function list(): string[] { return Object.keys(profiles) }
+function list(): string[] {
+	return Object.keys(profiles)
+}
 
 // Parse a peet.ws response and register the resulting profile under `name`.
 // Returns the registered profile so callers can inspect `profile.expected.ja4` etc.

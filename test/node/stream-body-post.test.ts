@@ -1,6 +1,7 @@
-// POST with a Readable (Stream API) request body.
+// POST with a streamed request body.
 //
-// `body` accepts a Node Readable (see RequestBodyValue / prepareBody). The client sends it as a
+// `body` accepts a web ReadableStream; a Node Readable is adapted with Readable.toWeb(). The
+// client sends it as a
 // run of h2 DATA frames (or h1 `transfer-encoding: chunked`), not as one buffered payload. These
 // checks pin that contract against a loopback server that reassembles what actually arrived:
 //   - a multi-chunk Readable is delivered, in order, with no truncation/duplication,
@@ -23,6 +24,7 @@ import { Readable } from 'node:stream'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import request from '../../index.ts'
+import type { FetchInit } from '../../index.ts'
 import { listenOnLoopback } from '../helpers/tcp.ts'
 
 function genServerCert(): { key: Buffer; cert: Buffer } {
@@ -31,7 +33,7 @@ function genServerCert(): { key: Buffer; cert: Buffer } {
 	const c = path.join(dir, 'c.pem')
 	try {
 		execSync(
-			`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days 1 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null`,
+			`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days 1 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null`
 		)
 		return { key: fs.readFileSync(k), cert: fs.readFileSync(c) }
 	} finally {
@@ -77,7 +79,9 @@ beforeAll(async () => {
 	// HTTP/2 server: /echo streams the request body back.
 	h2 = http2.createSecureServer({ key: c.key, cert: c.cert, allowHTTP1: false })
 	h2.on('stream', (stream: http2.ServerHttp2Stream, headers) => {
-		stream.on('error', () => { /* client may RST mid-upload */ })
+		stream.on('error', () => {
+			/* client may RST mid-upload */
+		})
 		const p = String(headers[':path'] ?? '')
 		if (p === '/echo') {
 			echoBody(stream, (r) => {
@@ -102,7 +106,13 @@ beforeAll(async () => {
 		if (req.url === '/echo') {
 			echoBody(req, (r) => {
 				res.writeHead(200, { 'content-type': 'application/json' })
-				res.end(JSON.stringify({ ...r, method: req.method, chunked: req.headers['transfer-encoding'] === 'chunked' }))
+				res.end(
+					JSON.stringify({
+						...r,
+						method: req.method,
+						chunked: req.headers['transfer-encoding'] === 'chunked'
+					})
+				)
 			})
 			return
 		}
@@ -120,9 +130,13 @@ afterAll(async () => {
 	h1 = null
 })
 
-const base = () => ({ verifyTLS: false, timeout: 15_000 })
-const echo = async (body: Readable, extra: Record<string, unknown> = {}) =>
-	(await request({ ...base(), ...extra, url: `${h2Base}/echo`, method: 'POST', body })).json() as Promise<Received>
+const base = () => ({ verifyTLS: false })
+// The only streaming BodyInit is a web ReadableStream; Node sources are adapted explicitly.
+const web = (body: Readable) => Readable.toWeb(body) as unknown as ReadableStream<Uint8Array>
+const echo = async (body: Readable, extra: FetchInit = {}) =>
+	(
+		await request(`${h2Base}/echo`, { ...base(), ...extra, method: 'POST', body: web(body) })
+	).json() as Promise<Received>
 
 describe('POST with a Readable body — HTTP/2', () => {
 	it('streams multiple string chunks, reassembled in order', async () => {
@@ -148,14 +162,14 @@ describe('POST with a Readable body — HTTP/2', () => {
 		// HTTP/1.1 chunked below, which has no such cap).
 		const TOTAL = 48 * 1024
 		const CH = 8 * 1024
-		const gen = (async function* (): AsyncGenerator<Buffer> {
+		const gen = async function* (): AsyncGenerator<Buffer> {
 			let sent = 0
 			while (sent < TOTAL) {
 				const n = Math.min(CH, TOTAL - sent)
 				sent += n
 				yield Buffer.alloc(n, 0x41) // 'A'
 			}
-		})
+		}
 		const body = Readable.from(gen())
 		const res = await echo(body)
 		expect(res.length).toBe(TOTAL)
@@ -166,18 +180,18 @@ describe('POST with a Readable body — HTTP/2', () => {
 		// _pump holds the backlog and flushes as the server's WINDOW_UPDATE refills the window.
 		const TOTAL = 3 * 1024 * 1024
 		const CH = 64 * 1024
-		const gen = (async function* (): AsyncGenerator<Buffer> {
+		const gen = async function* (): AsyncGenerator<Buffer> {
 			let sent = 0
 			while (sent < TOTAL) {
 				const n = Math.min(CH, TOTAL - sent)
 				sent += n
 				yield Buffer.alloc(n, 0x43) // 'C'
 			}
-		})
+		}
 		const body = Readable.from(gen())
-		const res = await echo(body, { timeout: 30_000 })
+		const res = await echo(body)
 		expect(res.length).toBe(TOTAL)
-	})
+	}, 60_000)
 
 	it('uploads via a real fs read-stream', async () => {
 		const body = fs.createReadStream(tmpFile)
@@ -191,7 +205,7 @@ describe('POST with a Readable body — HTTP/2', () => {
 			(function* (): Generator<Buffer> {
 				yield Buffer.from('partial')
 				throw new Error('source failed')
-			})(),
+			})()
 		)
 		await expect(echo(body)).rejects.toMatchObject({ code: 'EBODYSTREAM' })
 	})
@@ -200,12 +214,13 @@ describe('POST with a Readable body — HTTP/2', () => {
 describe('POST with a Readable body — HTTP/1.1 chunked', () => {
 	it('streams a body over HTTP/1.1 using transfer-encoding: chunked', async () => {
 		const body = Readable.from(['h1:', 'streamed:', 'body'])
-		const res = (await (await request({
-			...base(),
-			url: `${h1Base}/echo`,
-			method: 'POST',
-			body,
-		})).json()) as { method?: string; text?: string; chunked?: boolean }
+		const res = (await (
+			await request(`${h1Base}/echo`, {
+				...base(),
+				method: 'POST',
+				body: web(body)
+			})
+		).json()) as { method?: string; text?: string; chunked?: boolean }
 		expect(res.method).toBe('POST')
 		expect(res.text).toBe('h1:streamed:body')
 		// The client must frame a bodyless-length stream as chunked on HTTP/1.1.
@@ -217,23 +232,23 @@ describe('POST with a Readable body — HTTP/1.1 chunked', () => {
 		// multi-MB upload is reassembled intact here.
 		const TOTAL = 3 * 1024 * 1024
 		const CH = 64 * 1024
-		const gen = (async function* (): AsyncGenerator<Buffer> {
+		const gen = async function* (): AsyncGenerator<Buffer> {
 			let sent = 0
 			while (sent < TOTAL) {
 				const n = Math.min(CH, TOTAL - sent)
 				sent += n
 				yield Buffer.alloc(n, 0x42) // 'B'
 			}
-		})
-		const res = (await (await request({
-			...base(),
-			url: `${h1Base}/echo`,
-			method: 'POST',
-			body: Readable.from(gen()),
-			timeout: 30_000,
-		})).json()) as { method?: string; length?: number; chunked?: boolean }
+		}
+		const res = (await (
+			await request(`${h1Base}/echo`, {
+				...base(),
+				method: 'POST',
+				body: web(Readable.from(gen()))
+			})
+		).json()) as { method?: string; length?: number; chunked?: boolean }
 		expect(res.method).toBe('POST')
 		expect(res.length).toBe(TOTAL)
 		expect(res.chunked).toBe(true)
-	})
+	}, 60_000)
 })

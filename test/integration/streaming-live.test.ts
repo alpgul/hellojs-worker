@@ -17,8 +17,17 @@ const MP4 = 'https://cdn.truefilesize.com/mp4/sample-100mb.mp4'
 const DECLARED_BYTES = 104_857_600 // 100 MiB, matches the server's content-length
 
 it('Stream API reads a 100MB MP4 incrementally, without buffering it whole', async () => {
-	// The promise settles at header time, before the body has arrived.
-	const res = await request({ url: MP4, timeout: 30_000 })
+	// The old `timeout` bounded the wait for headers. There is no header/idle watchdog in the
+	// library now: keep that deadline caller-side, then drop it so the long body read can run.
+	const headerDeadline = new AbortController()
+	const timer = setTimeout(() => headerDeadline.abort(new Error('no response headers within 30s')), 30_000)
+	let res: Response
+	try {
+		// The promise settles at header time, before the body has arrived.
+		res = await request(MP4, { signal: headerDeadline.signal })
+	} finally {
+		clearTimeout(timer)
+	}
 
 	// (1) Header-time resolution: metadata available immediately, body is a live stream.
 	expect(res.status).toBe(200)
@@ -53,4 +62,4 @@ it('Stream API reads a 100MB MP4 incrementally, without buffering it whole', asy
 
 	// MP4 framing: offset 4..8 is the 'ftyp' box type (size field precedes it).
 	expect(head.subarray(4, 8).toString('latin1')).toBe('ftyp')
-})
+}, 180_000)

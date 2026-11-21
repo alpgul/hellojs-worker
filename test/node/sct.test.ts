@@ -15,9 +15,12 @@ import type { CertificateTimestamp } from '../../lib/tls/sct.ts'
 
 it('extractScts on a cert with no SCT extension returns []', () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sct-'))
-	const k = path.join(dir, 'k'), c = path.join(dir, 'c')
+	const k = path.join(dir, 'k'),
+		c = path.join(dir, 'c')
 	try {
-		execSync(`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days 1 -subj "/CN=localhost" 2>/dev/null`)
+		execSync(
+			`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days 1 -subj "/CN=localhost" 2>/dev/null`
+		)
 		const cert = new crypto.X509Certificate(fs.readFileSync(c))
 		expect(extractScts(cert.raw)).toStrictEqual([])
 	} finally {
@@ -32,11 +35,15 @@ it('parseSctList handles a synthetic 2-SCT list', () => {
 		const buf = Buffer.alloc(1 + 32 + 8 + 2 + 2 + 2 + 16)
 		let o = 0
 		buf[o++] = 0
-		Buffer.alloc(32, logSeed).copy(buf, o); o += 32
-		buf.writeBigUInt64BE(BigInt(ts), o); o += 8
-		buf.writeUInt16BE(0, o); o += 2   // extensions empty
-		buf[o++] = 4; buf[o++] = 1        // sha256, RSA
-		buf.writeUInt16BE(16, o)          // signature length
+		Buffer.alloc(32, logSeed).copy(buf, o)
+		o += 32
+		buf.writeBigUInt64BE(BigInt(ts), o)
+		o += 8
+		buf.writeUInt16BE(0, o)
+		o += 2 // extensions empty
+		buf[o++] = 4
+		buf[o++] = 1 // sha256, RSA
+		buf.writeUInt16BE(16, o) // signature length
 		// 16 zero bytes
 		return buf
 	}
@@ -44,13 +51,12 @@ it('parseSctList handles a synthetic 2-SCT list', () => {
 	const sct2 = makeSct(0xbb, 1700000001000)
 	// Wrap each in 2-byte length, then the whole in 2-byte length.
 	const inner = Buffer.concat([
-		Buffer.from([(sct1.length >> 8) & 0xff, sct1.length & 0xff]), sct1,
-		Buffer.from([(sct2.length >> 8) & 0xff, sct2.length & 0xff]), sct2,
+		Buffer.from([(sct1.length >> 8) & 0xff, sct1.length & 0xff]),
+		sct1,
+		Buffer.from([(sct2.length >> 8) & 0xff, sct2.length & 0xff]),
+		sct2
 	])
-	const list = Buffer.concat([
-		Buffer.from([(inner.length >> 8) & 0xff, inner.length & 0xff]),
-		inner,
-	])
+	const list = Buffer.concat([Buffer.from([(inner.length >> 8) & 0xff, inner.length & 0xff]), inner])
 	const out: CertificateTimestamp[] = parseSctList(list)
 	expect(out.length).toBe(2)
 	expect(out[0].timestamp).toBe(1700000000000)

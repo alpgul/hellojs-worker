@@ -1,10 +1,10 @@
-// Public fetch-compatible API with request.js-style request options.
+// Public fetch-compatible API: request(input, init) with a real fetch Response.
 //
 //   import request from 'hellojs'
-//   request({ url, method, headers, body, json, qs, jar, gzip, redirect, timeout, proxy })
-//   const res = await request({...})          // fetch Response, streamed body
+//   request('https://example.com', { method, headers, body, redirect, proxy })
+//   const res = await request(url, { ... })   // fetch Response, streamed body
 //   request.get/post/put/del/patch/head/options
-//   request.defaults(opts)
+//   request.defaults(init)
 //   request.jar()
 //
 // Notes:
@@ -15,13 +15,13 @@
 //   Content-Encoding header — no opt-in needed. To receive raw compressed bytes, override
 //   Accept-Encoding to `identity` in headers; servers will then respond uncompressed.
 
-import * as querystring from 'node:querystring'
 import { URL } from 'node:url'
 import * as zlib from 'node:zlib'
 
-import { connect, connectPreferred } from './connect.ts'
+import { forgetAltSvc, markAltSvcBroken, originKey, rememberAltSvc, selectAltSvc } from './alt-svc.ts'
 import { Jar } from './cookies.ts'
 import { HellojsError, wrap as wrapError } from './errors.ts'
+import { udpAvailable } from './h3/udp.ts'
 import { assertProxyConnectHeaders, buildH2Headers, buildH1Headers, mergeProfileHeaders } from './headers.ts'
 import { observability, nextRequestId } from './observability.ts'
 import * as pool from './pool.ts'
@@ -29,36 +29,44 @@ import * as profileRegistry from './profiles/index.ts'
 import { startProgressiveResponse, type ProgressiveStream } from './response-stream.ts'
 import { statusTextFor } from './status-text.ts'
 import { summarizeConn } from './tls-summary.ts'
+import { canUseQuic, connectWithTransport, type TransportHint } from './transport-race.ts'
 import { buildResponse, isWebReadableStream, webToNodeStream } from './web-response.ts'
 
-import type { Connection, PerPhaseTimeouts } from './connect.ts'
+import type { Alpn, Connection } from './connect.ts'
 import type { ErrorCode } from './errors.ts'
-import type { H2Stream } from './h2/session.ts'
+import type { H2Session, H2Stream } from './h2/session.ts'
 import type { HeaderMap } from './headers.ts'
 import type { Profile } from './profiles/types.ts'
 import type { Readable } from 'node:stream'
 
 // RFC 6265-compliant cookie jar lives in lib/cookies.ts.
 
-// Default response-phase timeout applied when neither `opts.timeouts.response` nor the
-// legacy `opts.timeout` is provided. 60s is generous enough for slow APIs but ends the
-// old "hang forever" default. Callers can opt OUT by passing 0 or null explicitly:
-//   { timeouts: { response: 0 } }         — no timer, request runs until conn closes
-// Any positive number overrides the default.
-const DEFAULT_RESPONSE_TIMEOUT_MS = 60_000
+/** Request bodies are exactly fetch's `BodyInit` — serialize JSON/forms before calling. */
+export type RequestBodyValue = BodyInit
 
-// H3 does not implement QUIC receive flow control yet, so a consumer that stops reading
-// cannot make the peer pause. Bound the in-process buffer and fail the body instead of
-// growing without limit.
-const MAX_H3_BUFFERED_BODY = 16 * 1024 * 1024
+/** Methods registered with IANA (RFC 9110 §9, RFC 5789). */
+export type RegisteredHttpMethod =
+	| 'GET'
+	| 'HEAD'
+	| 'POST'
+	| 'PUT'
+	| 'DELETE'
+	| 'CONNECT'
+	| 'OPTIONS'
+	| 'TRACE'
+	| 'PATCH'
 
-export type RequestBodyValue = BodyInit | Buffer | Readable | Record<string, unknown> | unknown[]
+/**
+ * The method may be given in either case; `request()` uppercases it before use. The type
+ * is deliberately closed to the registered set; the runtime still accepts any HTTP token.
+ */
+export type HttpMethod = RegisteredHttpMethod | Lowercase<RegisteredHttpMethod>
 
 export type RedirectMode = 'follow' | 'manual' | 'error'
 
 export interface RetryPolicy {
 	limit?: number
-	methods?: string[]
+	methods?: HttpMethod[]
 	statusCodes?: number[]
 	baseDelayMs?: number
 }
@@ -86,55 +94,44 @@ export interface ProxyOptions {
 }
 
 /**
- * Fetch's `RequestInit` supplies `method`, `headers`, `body`, `redirect`, `keepalive`, `signal`,
- * etc.; only hellojs-specific options are added here.
+ * Options accepted as the second argument of `request(input, init)`. Deliberately not an
+ * extension of `RequestInit`: inherited fields such as `cache`, `integrity`, `mode`,
+ * `credentials` and `priority` are never consulted by the transports, so accepting them
+ * would promise behavior that does not exist. The URL always comes from `input`.
  */
-export interface RequestOptions extends RequestInit {
-	url?: string
-	uri?: string
-	/** Object values are serialized as the JSON request body; `true` does the same for an object `body`. */
-	json?: boolean | unknown
-	form?: Record<string, string | number>
-	qs?: Record<string, string | number | (string | number)[]>
+export interface RequestOptions {
+	method?: HttpMethod
+	/** `Headers`, tuple lists and plain records are normalized to a lowercase record internally. */
+	headers?: HeadersInit | Record<string, string | string[]> | null
+	body?: RequestBodyValue | null
+	redirect?: RedirectMode
+	signal?: AbortSignal | null
 	jar?: Jar | null
-	gzip?: boolean
-	maxRedirects?: number
-	timeout?: number
-	timeouts?: PerPhaseTimeouts | null
 	proxy?: ProxyOptions | null
-	retry?: RetryPolicy
-
 	/** TLS-only: turn on cert chain validation (default `true`). */
 	verifyTLS?: boolean
-	/**
-	 * TLS-only: reuse a TLS 1.3 session ticket from an earlier request to the same host
-	 * (default `true`; pass `false` to keep a fresh-handshake fingerprint). Resumed handshakes
-	 * skip the certificate flight and its validation, but add `pre_shared_key` to the ClientHello.
-	 */
-	resume?: boolean
-	/** Opt in to HTTP/3 (QUIC) for this request. Off unless explicitly `true`. */
-	h3?: boolean
-	/** Reuse a pooled h2 socket (default `true`); pass `false` for a one-shot connection. */
+	/** Hellojs-specific: reuse a pooled h2 socket (default `true`); `false` forces a fresh connection. Unrelated to fetch's same-named flag. */
 	keepalive?: boolean
+	retry?: RetryPolicy
 	/** Profile name, or an inline profile object. */
 	profile?: string | Profile
-
-	// Carried across redirects so every attempt shares one observability id.
-	_reqId?: number
-	// Internal: set once a redirect has been followed, so `Response.redirected` is accurate.
-	_redirected?: boolean
 }
 
 /**
- * Internal: what the transports actually receive. `headers` is always a lowercase map.
+ * Internal: what the transports actually receive. `headers` is always a lowercase map,
+ * the URL comes from `input`, and redirect/observability bookkeeping stays private.
  */
 type NormalizedRequestOptions = Omit<RequestOptions, 'headers'> & {
 	headers: HeaderMap
+	url: string
+	_reqId?: number
+	_redirected?: boolean
+	_redirectCount?: number
 }
 
 // `HeaderMap` is intentionally richer than the cross-runtime `HeadersInit`. Only the internals
-// consume it; casting back at the public boundary keeps `RequestOptions` a plain `RequestInit`
-// extension in both the Workers and DOM type worlds.
+// consume it; casting back at the public boundary keeps the declared option shape independent
+// of which runtime's ambient types are in scope.
 function toPublicOptions(opts: NormalizedRequestOptions): RequestOptions {
 	return opts as unknown as RequestOptions
 }
@@ -145,10 +142,10 @@ function toPublicOptions(opts: NormalizedRequestOptions): RequestOptions {
  */
 export type Response = globalThis.Response
 
-/** Fetch-style init accepted as the second argument; request.js options may be mixed in. */
+/** Fetch-style init accepted as the second argument. */
 export type FetchInit = RequestOptions
 
-type MethodFn = (input: string | URL | Request | RequestOptions, init?: FetchInit) => Promise<Response>
+type MethodFn = (input: string | URL | Request, init?: FetchInit) => Promise<Response>
 
 /**
  * The public call shape, mirrored by index.d.ts: every call resolves the fetch-compatible
@@ -156,7 +153,6 @@ type MethodFn = (input: string | URL | Request | RequestOptions, init?: FetchIni
  */
 export interface Invokable {
 	(input: string | URL | Request, init?: FetchInit): Promise<Response>
-	(opts: RequestOptions): Promise<Response>
 }
 
 interface Shortcuts {
@@ -189,6 +185,8 @@ interface RequestContext {
 	userHeaders: HeaderMap
 	opts: NormalizedRequestOptions
 	profileObj: Profile | null
+	/** h1 sockets are registered only after a reusable response, so the key travels with the request. */
+	h1PoolKey: string | null
 }
 
 type HeadMode = 'none' | 'chunked' | 'length' | 'eof'
@@ -224,7 +222,12 @@ function headersToRecord(input?: HeadersInit | HeaderMap | null): Record<string,
 		for (const [name, value] of input) {
 			const key = String(name).toLowerCase()
 			const prev = out[key]
-			out[key] = prev === undefined ? String(value) : Array.isArray(prev) ? [...prev, String(value)] : [String(prev), String(value)]
+			out[key] =
+				prev === undefined
+					? String(value)
+					: Array.isArray(prev)
+						? [...prev, String(value)]
+						: [String(prev), String(value)]
 		}
 		return out
 	}
@@ -271,7 +274,10 @@ function throwIfAborted(signal?: AbortSignal | null): void {
 // explicit removal keeps a long-lived signal from retaining closed requests.
 function onAbort(signal: AbortSignal | null | undefined, handler: () => void): () => void {
 	if (!signal) return () => {}
-	if (signal.aborted) { handler(); return () => {} }
+	if (signal.aborted) {
+		handler()
+		return () => {}
+	}
 	signal.addEventListener('abort', handler, { once: true })
 	return () => signal.removeEventListener('abort', handler)
 }
@@ -285,7 +291,11 @@ function decompressIfNeeded(buf: Buffer, encoding: string): Buffer {
 	if (e.includes('gzip')) return zlib.gunzipSync(buf)
 	if (e.includes('br')) return zlib.brotliDecompressSync(buf)
 	if (e.includes('deflate')) {
-		try { return zlib.inflateSync(buf) } catch { return zlib.inflateRawSync(buf) }
+		try {
+			return zlib.inflateSync(buf)
+		} catch {
+			return zlib.inflateRawSync(buf)
+		}
 	}
 	if (e.includes('zstd')) return zlib.zstdDecompressSync(buf)
 	return buf
@@ -295,13 +305,8 @@ function decompressIfNeeded(buf: Buffer, encoding: string): Buffer {
 // `null` means "no decoding needed — caller can read the body as-is."
 
 function buildUrl(opts: NormalizedRequestOptions): URL {
-	const url = opts.url || opts.uri
-	if (!url) throw new HellojsError('missing url', 'EBADOPTS')
-	if (opts.qs) {
-		const qs = querystring.stringify(opts.qs)
-		return new URL(url + (url.includes('?') ? '&' : '?') + qs)
-	}
-	return new URL(url)
+	// The query string is part of `input`; there is no `qs` option to append.
+	return new URL(opts.url)
 }
 
 interface PreparedBody {
@@ -312,38 +317,83 @@ interface PreparedBody {
 
 async function prepareBody(opts: NormalizedRequestOptions): Promise<PreparedBody> {
 	const raw = opts.body
-	if (raw !== undefined && raw !== null) {
-		// Streaming bodies: pass the Readable through; we'll send it as h2 DATA frames or h1 chunked.
-		if (isReadable(raw)) return { body: raw, contentType: null }
-		if (isWebReadableStream(raw)) return { body: webToNodeStream(raw), contentType: null }
-		if (typeof raw === 'string') return { body: Buffer.from(raw), contentType: null }
-		if (Buffer.isBuffer(raw)) return { body: raw, contentType: null }
-		if (raw instanceof ArrayBuffer) return { body: Buffer.from(raw), contentType: null }
-		if (ArrayBuffer.isView(raw)) return { body: Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength), contentType: null }
-		// BodyInit types that need serialization rules (multipart boundary, form encoding).
-		// A real Response performs exactly the encoding fetch would, so reuse it.
-		if (isBlob(raw) || isFormData(raw) || isUrlSearchParams(raw)) {
-			const wrapped = new Response(raw as BodyInit)
-			return {
-				body: Buffer.from(await wrapped.arrayBuffer()),
-				contentType: wrapped.headers.get('content-type'),
-			}
+	if (raw === undefined || raw === null) return { body: null, contentType: null }
+	// A web ReadableStream is the only streaming BodyInit; convert it to the Node stream the
+	// transports already use for h2 DATA frames / h1 chunked encoding.
+	if (isWebReadableStream(raw)) return { body: webToNodeStream(raw), contentType: null }
+	if (typeof raw === 'string') return { body: Buffer.from(raw), contentType: null }
+	// Buffer is a Uint8Array, so it arrives here as an ArrayBufferView like any other typed array.
+	if (raw instanceof ArrayBuffer) return { body: Buffer.from(raw), contentType: null }
+	if (ArrayBuffer.isView(raw))
+		return { body: Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength), contentType: null }
+	// BodyInit types with their own serialization rules (multipart boundary, form encoding).
+	// A real Response performs exactly the encoding fetch would, so reuse it.
+	if (isBlob(raw) || isFormData(raw) || isUrlSearchParams(raw)) {
+		const wrapped = new Response(raw as BodyInit)
+		return {
+			body: Buffer.from(await wrapped.arrayBuffer()),
+			contentType: wrapped.headers.get('content-type')
 		}
-		if (typeof raw === 'object') return { body: Buffer.from(JSON.stringify(raw)), contentType: null }
-	}
-	if (opts.json && typeof opts.json !== 'boolean') {
-		return { body: Buffer.from(JSON.stringify(opts.json)), contentType: null }
-	}
-	if (opts.form) {
-		return { body: Buffer.from(querystring.stringify(opts.form)), contentType: null }
 	}
 	return { body: null, contentType: null }
 }
 
-function shouldDoJsonContentType(opts: NormalizedRequestOptions, body: Buffer | Readable | null): boolean {
-	if (!body) return false
-	if (opts.json && (typeof opts.json === 'object' || (opts.json === true && typeof opts.body === 'object'))) return true
-	return false
+/** Learn Alt-Svc from final response headers; HTTP 421 invalidates the cached origin. */
+function observeAltSvc(headers: H1Headers, opts: NormalizedRequestOptions, status: number): void {
+	if (opts.proxy) return
+	if (status === 421) {
+		forgetAltSvc(opts.url)
+		return
+	}
+	rememberAltSvc(headers['alt-svc'], opts.url)
+}
+
+interface PoolIdentity {
+	originHost: string
+	originPort: number
+	dialHost: string
+	dialPort: number
+	profile: string | Profile | undefined
+	proxy: ProxyOptions | null | undefined
+	verifyTLS: boolean
+}
+
+/** The full bucket identity: origin, actual dial target and negotiated protocol. */
+function keyFor(identity: PoolIdentity, kind: Alpn): string {
+	return pool.poolKey(
+		identity.originHost,
+		identity.originPort,
+		identity.profile,
+		identity.proxy,
+		identity.verifyTLS,
+		{ host: identity.dialHost, port: identity.dialPort },
+		kind
+	)
+}
+
+/**
+ * Buckets to try, best first. An h3 Alt-Svc hint only matches a QUIC session; with no hint a
+ * pooled h3 session wins over h2, and an h1 socket is the last resort (it cannot multiplex).
+ */
+function candidatePoolKeys(identity: PoolIdentity, hint: TransportHint): string[] {
+	let kinds: Alpn[]
+	if (hint === 'h3') kinds = ['h3']
+	else if (hint === 'h1') kinds = ['http/1.1']
+	else if (hint === 'h2') kinds = ['h2', 'http/1.1']
+	else kinds = canUseQuic(identity.proxy) ? ['h3', 'h2', 'http/1.1'] : ['h2', 'http/1.1']
+	return kinds.map((kind) => keyFor(identity, kind))
+}
+
+const altsvcWired = new WeakSet<H2Session>()
+
+/** Listen for RFC 7838 ALTSVC frames once per h2 session. */
+function wireAltSvcFrame(conn: Connection, origin: string): void {
+	const session = conn.h2Session
+	if (!session || altsvcWired.has(session)) return
+	altsvcWired.add(session)
+	session.on?.('altsvc', (frameOrigin: string, value: string) => {
+		rememberAltSvc(value, frameOrigin || origin)
+	})
 }
 
 async function performRequest(opts: NormalizedRequestOptions): Promise<Response> {
@@ -355,13 +405,19 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 	const _reqId = opts._reqId || (opts._reqId = nextRequestId())
 	const _t0 = Date.now()
 	observability.safeEmit('request:start', {
-		id: _reqId, method, url: url.toString(), headers: opts.headers,
+		id: _reqId,
+		method,
+		url: url.toString(),
+		headers: opts.headers,
 		// The request body (if any) as a Buffer, for observability / mitm-style capture.
 		// Streams aren't captured here — they'd force us to tee/replay. Callers who need
 		// the body for streamed uploads should buffer it themselves upstream.
-		requestBody: (opts.body != null && typeof opts.body !== 'object')
-			? Buffer.from(String(opts.body))
-			: (Buffer.isBuffer(opts.body) ? opts.body : null),
+		requestBody:
+			opts.body != null && typeof opts.body !== 'object'
+				? Buffer.from(String(opts.body))
+				: Buffer.isBuffer(opts.body)
+					? opts.body
+					: null
 	})
 	const profile = opts.profile || 'chrome147-mac'
 	// Resolve to the actual profile object for header / pseudo-header / priority building.
@@ -369,37 +425,79 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 	// layer will throw a clearer error if the name truly isn't valid.
 	let profileObj: Profile | null = null
 	if (typeof profile === 'string') {
-		try { profileObj = profileRegistry.get(profile) } catch {}
+		try {
+			profileObj = profileRegistry.get(profile)
+		} catch {}
 	}
 
-	// Transport: HTTP/3 is opt-in per request (`h3: true`). Every other request uses
-	// TCP + TLS, regardless of any `alt-svc` response headers. An h3 request tries QUIC
-	// first and falls back to TCP when the handshake cannot complete, so an origin without
-	// a QUIC endpoint answers over TCP instead of sitting in QUIC Initial retransmits.
-	// `keepalive` is on by default: a live pooled h2 socket for this origin+profile is taken
-	// first; `keepalive: false` and h3 always handshake a fresh one. Whenever the pool has no
-	// capacity the fresh connection is registered for reuse on a healthy h2 session.
-	const usePool = opts.keepalive !== false && opts.h3 !== true
-	const poolKey = usePool ? pool.poolKey(host, port, opts.profile, opts.proxy, opts.verifyTLS !== false) : null
-	let conn: Connection | null = poolKey ? pool.take(poolKey) : null
-	if (!conn) {
-		// h3 has no proxy path: it falls back to CONNECT over TCP, but that fallback must not
-		// silently start pooling the proxy hop.
-		const connectProxy = opts.h3 === true && opts.proxy ? { ...opts.proxy, keepAlive: false } : opts.proxy
-		const connectOpts = {
-			host, port, profile, proxy: connectProxy,
-			verifyTLS: opts.verifyTLS !== false,
-			resume: opts.resume !== false,
-			timeouts: opts.timeouts,
-		}
-		conn = opts.h3 === true
-			? await connectPreferred(connectOpts)
-			: await connect({ ...connectOpts, transport: 'tcp' })
-		if (poolKey) pool.register(conn, poolKey)
+	// Transport is selected automatically, like a browser. A cached h3 Alt-Svc skips the race;
+	// otherwise a live pooled session wins first, then lib/transport-race.ts races QUIC against a
+	// 300ms-delayed TCP handshake (or goes straight to TCP when UDP is unavailable or a proxy is
+	// configured). h2, h3 and reusable h1 connections all enter the bounded pool.
+	const origin = originKey(url)
+	let alt = opts.proxy ? null : selectAltSvc(origin, host, port)
+	// An h3 alternative is useless without a datagram socket; fall back to the normal race.
+	if (alt?.hint === 'h3' && !udpAvailable()) alt = null
+	const dialHost = alt?.host ?? host
+	const dialPort = alt?.port ?? port
+	const identity: PoolIdentity = {
+		originHost: host,
+		originPort: port,
+		dialHost,
+		dialPort,
+		profile: opts.profile,
+		proxy: opts.proxy,
+		verifyTLS: opts.verifyTLS !== false
 	}
+	let conn: Connection | null = null
+	let h1PoolKey: string | null = null
+	if (opts.keepalive !== false) {
+		for (const key of candidatePoolKeys(identity, alt?.hint ?? null)) {
+			conn = pool.take(key)
+			if (conn) break
+		}
+	}
+	if (!conn) {
+		try {
+			conn = await connectWithTransport(
+				{
+					host: dialHost,
+					port: dialPort,
+					sniHost: host,
+					profile,
+					proxy: opts.proxy,
+					verifyTLS: opts.verifyTLS !== false,
+					signal: opts.signal
+				},
+				alt?.hint ?? null,
+				origin
+			)
+		} catch (e) {
+			// A cached alternative may have gone away: mark it broken and let the retry use TCP.
+			// An explicit abort says nothing about the endpoint's health.
+			if (alt?.hint === 'h3' && !opts.signal?.aborted) markAltSvcBroken(origin, 'h3')
+			throw e
+		}
+		if (opts.keepalive !== false && conn.alpn && conn.alpn !== 'http/1.1') {
+			pool.register(conn, keyFor(identity, conn.alpn))
+		}
+	}
+	// h1 cannot multiplex: register only once a reusable response proves the socket can serve
+	// another request (no `Connection: close`, no eof-delimited body). A freshly dialed h1
+	// socket has no slot yet; one taken from the pool already does.
+	if (opts.keepalive !== false && conn.alpn === 'http/1.1') h1PoolKey = keyFor(identity, 'http/1.1')
+
+	// h2 ALTSVC frames (RFC 7838 §4) carry the same information as the response header. Wire
+	// once per session; stream-level frames with an empty Origin use this connection's origin
+	// (the h2 pool is per-origin).
+	if (conn.alpn === 'h2' && conn.h2Session && !opts.proxy) wireAltSvcFrame(conn, origin)
 
 	// Build headers
 	const userHeaders: HeaderMap = headersToRecord(opts.headers)
+	// RFC 7838 §5: any request actually sent to an alternative service names the authority.
+	if (alt?.altUsed && !Object.keys(userHeaders).some((k) => k.toLowerCase() === 'alt-used')) {
+		userHeaders['Alt-Used'] = alt.altUsed
+	}
 	// Case-insensitive header presence check. Callers may Title-Case headers (e.g.
 	// `Content-Length`, `Content-Type`) to match Chrome's HTTP/1.1 casing, which is a
 	// DataDome fingerprint. The auto-adds below must NOT inject a lowercase DUPLICATE
@@ -430,10 +528,10 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 	}
 	const prepared = await prepareBody(opts)
 	const body = prepared.body
-	if (body && !_hasHeader('content-type')) {
-		if (prepared.contentType) userHeaders['content-type'] = prepared.contentType
-		else if (shouldDoJsonContentType(opts, body)) userHeaders['content-type'] = 'application/json'
-		else if (opts.form) userHeaders['content-type'] = 'application/x-www-form-urlencoded'
+	// Only BodyInit values that carry their own media type (FormData, URLSearchParams, typed
+	// Blobs) get an automatic content-type. Strings/buffers are opaque; the caller labels them.
+	if (body && prepared.contentType && !_hasHeader('content-type')) {
+		userHeaders['content-type'] = prepared.contentType
 	}
 	const isStream = isReadable(body)
 	if (body && !isStream) {
@@ -447,9 +545,19 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 		else userHeaders['content-length'] = String(body.length)
 	}
 	// h2 doesn't need either header (frame length is implicit); for h1 we'll use chunked.
-	if (isStream && !_hasHeader('content-length') && !_hasHeader('transfer-encoding') && conn.alpn === 'http/1.1') userHeaders['transfer-encoding'] = 'chunked'
+	if (isStream && !_hasHeader('content-length') && !_hasHeader('transfer-encoding') && conn.alpn === 'http/1.1')
+		userHeaders['transfer-encoding'] = 'chunked'
 
-	const ctx: RequestContext = { method, url, host, body, userHeaders, opts, profileObj }
+	const ctx: RequestContext = {
+		method,
+		url,
+		host,
+		body,
+		userHeaders,
+		opts,
+		profileObj,
+		h1PoolKey
+	}
 	const transport = (async () => {
 		if (conn.alpn === 'h3') return performH3(conn, ctx)
 		if (conn.alpn === 'h2') return performH2(conn, ctx)
@@ -459,9 +567,13 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 	try {
 		if (opts.signal) {
 			let rejectAbort: (reason: unknown) => void = () => {}
-			const aborted = new Promise<never>((_, reject) => { rejectAbort = reject })
+			const aborted = new Promise<never>((_, reject) => {
+				rejectAbort = reject
+			})
 			removeAbort = onAbort(opts.signal, () => {
-				try { conn.close('abort') } catch {}
+				try {
+					conn.close('abort')
+				} catch {}
 				rejectAbort(abortReason(opts.signal))
 			})
 			return await Promise.race([transport, aborted])
@@ -478,12 +590,24 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 	}
 }
 
-function performH3(conn: Connection, { method, url, host, body, userHeaders, opts, profileObj }: RequestContext): Promise<Response> {
+function performH3(
+	conn: Connection,
+	{ method, url, host, body, userHeaders, opts, profileObj }: RequestContext
+): Promise<Response> {
 	const headers = mergeProfileHeaders(userHeaders, profileObj)
 	const path = url.pathname + url.search
 	const reqId = opts._reqId
 	const reqT0 = Date.now()
-	const close = () => { try { conn.close('h3-response-complete') } catch { /* already closed */ } }
+	const close = () => {
+		// A healthy QUIC session stays pooled; unpooled or poisoned sessions close as before.
+		if (!pool.release(conn)) {
+			try {
+				conn.close('h3-response-complete')
+			} catch {
+				/* already closed */
+			}
+		}
+	}
 
 	// Resolve at HEADERS and stream DATA frames as they arrive. Redirects are buffered so the
 	// normal handleResponse policy still applies to them.
@@ -495,89 +619,135 @@ function performH3(conn: Connection, { method, url, host, body, userHeaders, opt
 		let resHeaders: Record<string, string> = {}
 		let resolved = false
 
-		conn.h3Client!.requestStream({ method, path, host, headers, body }, {
-			onHeaders: (s, h) => {
-				// 1xx informational responses are not final; wait for the real HEADERS.
-				if (s >= 100 && s < 200) return
-				status = s
-				resHeaders = h
-				if (opts.jar && h['set-cookie']) opts.jar.setCookie(h['set-cookie'], url.toString())
-				const isRedirect = opts.redirect !== 'manual' && s >= 300 && s < 400 && !!h.location
-				if (isRedirect) {
-					buffering = true
-					return
-				}
-				stream = startProgressiveResponse({
-					status: s,
-					headers: h,
-					...responseMeta(opts),
-					signal: opts.signal,
-					idleTimeoutMs: opts.timeouts?.bodyIdle ?? 0,
-					errorCode: 'EH3STREAM',
-					onCancel: () => { try { conn.close('h3-stream-cancel') } catch { /* already closed */ } },
-					onFirstByte: () => observability.safeEmit('request:firstByte', { id: reqId, durationMs: Date.now() - reqT0 }),
-					onEnd: (bytes) => {
-						observability.safeEmit('request:end', {
-							id: reqId, status: s, headers: h, totalBytes: bytes,
-							durationMs: Date.now() - reqT0, tls: summarizeConn(conn),
-						})
-						close()
-					},
-					onError: (error, bytes) => {
-						observability.safeEmit('request:error', {
-							id: reqId, code: errorCodeOf(error, 'EH3STREAM'),
-							message: messageOf(error), durationMs: Date.now() - reqT0,
-						})
-						void bytes
-						close()
-					},
-				})
-				resolved = true
-				resolve(stream.result)
-			},
-			onData: (chunk) => {
-				if (buffering) { buffered.push(chunk); return }
-				if (!stream) return
-				stream.write(chunk)
-				// QUIC receive flow control is not wired yet, so a consumer that stops
-				// reading would otherwise let the peer fill memory without bound.
-				if (stream.bufferedBytes() > MAX_H3_BUFFERED_BODY) {
-					stream.fail(new HellojsError(
-						`h3 response body exceeded ${MAX_H3_BUFFERED_BODY} buffered bytes`,
-						'EBODYBACKPRESSURE',
-					))
-				}
-			},
-			onEnd: () => {
-				if (buffering) {
-					close()
-					let raw: Buffer = Buffer.concat(buffered)
-					try { raw = decompressIfNeeded(raw, resHeaders['content-encoding']) }
-					catch (e) { reject(new HellojsError((e as Error).message, 'EDECOMPRESS', e)); return }
-					observability.safeEmit('request:end', {
-						id: reqId, status, headers: resHeaders, totalBytes: raw.length,
-						durationMs: Date.now() - reqT0, responseBody: raw, tls: summarizeConn(conn),
+		conn.h3Client!.requestStream(
+			{ method, path, host, headers, body },
+			{
+				onHeaders: (s, h) => {
+					// 1xx informational responses are not final; wait for the real HEADERS.
+					if (s >= 100 && s < 200) return
+					status = s
+					resHeaders = h
+					observeAltSvc(h, opts, s)
+					if (opts.jar && h['set-cookie']) opts.jar.setCookie(h['set-cookie'], url.toString())
+					const isRedirect = opts.redirect !== 'manual' && s >= 300 && s < 400 && !!h.location
+					if (isRedirect) {
+						buffering = true
+						return
+					}
+					stream = startProgressiveResponse({
+						status: s,
+						headers: h,
+						...responseMeta(opts),
+						signal: opts.signal,
+						errorCode: 'EH3STREAM',
+						onCancel: () => {
+							try {
+								conn.close('h3-stream-cancel')
+							} catch {
+								/* already closed */
+							}
+						},
+						onFirstByte: () =>
+							observability.safeEmit('request:firstByte', { id: reqId, durationMs: Date.now() - reqT0 }),
+						onEnd: (bytes) => {
+							observability.safeEmit('request:end', {
+								id: reqId,
+								status: s,
+								headers: h,
+								totalBytes: bytes,
+								durationMs: Date.now() - reqT0,
+								tls: summarizeConn(conn)
+							})
+							close()
+						},
+						onError: (error, bytes) => {
+							observability.safeEmit('request:error', {
+								id: reqId,
+								code: errorCodeOf(error, 'EH3STREAM'),
+								message: messageOf(error),
+								durationMs: Date.now() - reqT0
+							})
+							void bytes
+							close()
+						}
 					})
-					handleResponse({ status, statusText: statusTextFor(status), headers: resHeaders, raw, opts, resolve, reject })
-					return
+					resolved = true
+					resolve(stream.result)
+				},
+				onData: (chunk) => {
+					if (buffering) {
+						buffered.push(chunk)
+						return true
+					}
+					// false pauses QuicStream delivery and withholds MAX_DATA/MAX_STREAM_DATA
+					// until response-stream signals drain through onBackpressure.
+					return stream ? stream.write(chunk) : true
+				},
+				onBackpressure: (paused) => {
+					observability.safeEmit('request:backpressure', { id: reqId, paused })
+				},
+				onEnd: () => {
+					if (buffering) {
+						close()
+						let raw: Buffer = Buffer.concat(buffered)
+						try {
+							raw = decompressIfNeeded(raw, resHeaders['content-encoding'])
+						} catch (e) {
+							reject(new HellojsError((e as Error).message, 'EDECOMPRESS', e))
+							return
+						}
+						observability.safeEmit('request:end', {
+							id: reqId,
+							status,
+							headers: resHeaders,
+							totalBytes: raw.length,
+							durationMs: Date.now() - reqT0,
+							responseBody: raw,
+							tls: summarizeConn(conn)
+						})
+						handleResponse({
+							status,
+							statusText: statusTextFor(status),
+							headers: resHeaders,
+							raw,
+							opts,
+							resolve,
+							reject
+						})
+						return
+					}
+					stream?.end()
+				},
+				onError: (e) => {
+					if (stream) {
+						stream.fail(new HellojsError(e.message, 'EH3STREAM', e))
+						return
+					}
+					// No response was resolved: the QUIC session's state is untrustworthy.
+					try {
+						conn.close('h3-stream-error')
+					} catch {
+						/* already closed */
+					}
+					if (!resolved) reject(new HellojsError(e.message, 'EH3STREAM', e))
 				}
-				stream?.end()
-			},
-			onError: (e) => {
-				if (stream) {
-					stream.fail(new HellojsError(e.message, 'EH3STREAM', e))
-					return
-				}
-				close()
-				if (!resolved) reject(new HellojsError(e.message, 'EH3STREAM', e))
-			},
-		})
+			}
+		)
 	})
 }
 
-function performH2(conn: Connection, { method, url, host, body, userHeaders, opts, profileObj }: RequestContext): Promise<Response> {
+function performH2(
+	conn: Connection,
+	{ method, url, host, body, userHeaders, opts, profileObj }: RequestContext
+): Promise<Response> {
 	return new Promise((resolve, reject) => {
-		const headers = buildH2Headers({ method, host, path: url.pathname + url.search, userHeaders, profile: profileObj })
+		const headers = buildH2Headers({
+			method,
+			host,
+			path: url.pathname + url.search,
+			userHeaders,
+			profile: profileObj
+		})
 		const streamingBody = isReadable(body) ? body : null
 		// A non-stream body is the only thing that can go into a DATA frame directly.
 		const bufferedBody = streamingBody ? null : (body as Buffer | null)
@@ -588,14 +758,8 @@ function performH2(conn: Connection, { method, url, host, body, userHeaders, opt
 		const reqOpts = { endStream: !body }
 		const req: H2Stream = conn.h2Session!.request(headers, reqOpts)
 		observability.safeEmit('request:headersSent', { id: reqId, method, path: url.pathname + url.search })
-		const respMs = opts.timeouts?.response ?? opts.timeout ?? DEFAULT_RESPONSE_TIMEOUT_MS
-		const timer = respMs ? setTimeout(() => {
-			req.close(0x8 /*CANCEL*/)
-			conn.close('h2-timeout')
-			const e = new HellojsError(`request timed out after ${respMs}ms`, 'ETIMEDOUT')
-			observability.safeEmit('request:error', { id: reqId, code: 'ETIMEDOUT', message: e.message, durationMs: Date.now() - reqT0 })
-			reject(e)
-		}, respMs) : null
+		// Browsers impose no response-header timeout; the caller's `signal` is the only
+		// deadline here. A stalled server is bounded by transport-level TCP/QUIC budgets.
 		let firstByteEmitted = false
 
 		// Resolve as soon as headers arrive and expose the rest as a web ReadableStream.
@@ -615,7 +779,7 @@ function performH2(conn: Connection, { method, url, host, body, userHeaders, opt
 			if (status >= 100 && status < 200) return
 			if (settled) return
 			settled = true
-			if (timer) clearTimeout(timer)
+			observeAltSvc(h, opts, status)
 			if (opts.jar && h['set-cookie']) opts.jar.setCookie(h['set-cookie'], url.toString())
 			const isRedirect = opts.redirect !== 'manual' && status >= 300 && status < 400 && !!h.location
 			if (isRedirect) {
@@ -629,10 +793,13 @@ function performH2(conn: Connection, { method, url, host, body, userHeaders, opt
 				headers: h,
 				...responseMeta(opts),
 				signal: opts.signal,
-				idleTimeoutMs: opts.timeouts?.bodyIdle ?? 0,
 				errorCode: 'EH2STREAM',
 				onCancel: () => {
-					try { req.close(0x8) } catch { /* already closed */ }
+					try {
+						req.close(0x8)
+					} catch {
+						/* already closed */
+					}
 					if (!pool.release(conn)) conn.close('h2-stream-cancel')
 				},
 				onBackpressure: (paused) => {
@@ -645,17 +812,23 @@ function performH2(conn: Connection, { method, url, host, body, userHeaders, opt
 				},
 				onEnd: (bytes) => {
 					observability.safeEmit('request:end', {
-						id: reqId, status, headers: h, totalBytes: bytes,
-						durationMs: Date.now() - reqT0, tls: summarizeConn(conn),
+						id: reqId,
+						status,
+						headers: h,
+						totalBytes: bytes,
+						durationMs: Date.now() - reqT0,
+						tls: summarizeConn(conn)
 					})
 					if (!pool.release(conn)) conn.close('h2-stream-end')
 				},
 				onError: (error) => {
 					observability.safeEmit('request:error', {
-						id: reqId, code: errorCodeOf(error, 'EH2STREAM'),
-						message: messageOf(error), durationMs: Date.now() - reqT0,
+						id: reqId,
+						code: errorCodeOf(error, 'EH2STREAM'),
+						message: messageOf(error),
+						durationMs: Date.now() - reqT0
 					})
-				},
+				}
 			})
 			resolve(stream.result)
 		})
@@ -675,18 +848,30 @@ function performH2(conn: Connection, { method, url, host, body, userHeaders, opt
 				stream?.end()
 				return
 			}
-			if (timer) clearTimeout(timer)
 			if (!pool.release(conn)) conn.close('h2-response-complete')
 			let raw: Buffer = Buffer.concat(buffered)
-			try { raw = decompressIfNeeded(raw, bufferedHeaders?.['content-encoding'] as string) }
-			catch (e) { return reject(new HellojsError((e as Error).message, 'EDECOMPRESS', e)) }
+			try {
+				raw = decompressIfNeeded(raw, bufferedHeaders?.['content-encoding'] as string)
+			} catch (e) {
+				return reject(new HellojsError((e as Error).message, 'EDECOMPRESS', e))
+			}
 			observability.safeEmit('request:end', {
-				id: reqId, status: bufferedStatus, headers: bufferedHeaders ?? {}, totalBytes: raw.length,
-				durationMs: Date.now() - reqT0, responseBody: raw, tls: summarizeConn(conn),
+				id: reqId,
+				status: bufferedStatus,
+				headers: bufferedHeaders ?? {},
+				totalBytes: raw.length,
+				durationMs: Date.now() - reqT0,
+				responseBody: raw,
+				tls: summarizeConn(conn)
 			})
 			handleResponse({
-				status: bufferedStatus, statusText: statusTextFor(bufferedStatus),
-				headers: bufferedHeaders ?? {}, raw, opts, resolve, reject,
+				status: bufferedStatus,
+				statusText: statusTextFor(bufferedStatus),
+				headers: bufferedHeaders ?? {},
+				raw,
+				opts,
+				resolve,
+				reject
 			})
 		})
 		req.on('error', (e: Error) => {
@@ -697,7 +882,6 @@ function performH2(conn: Connection, { method, url, host, body, userHeaders, opt
 			}
 			if (settled && !buffering) return
 			settled = true
-			if (timer) clearTimeout(timer)
 			conn.close('h2-stream-error')
 			reject(new HellojsError(e.message, 'EH2STREAM', e))
 		})
@@ -705,10 +889,19 @@ function performH2(conn: Connection, { method, url, host, body, userHeaders, opt
 			// req.write returns false when the peer's flow-control window is full and the chunk
 			// is queued; pause the source until the session drains it (emits 'drain').
 			streamingBody.on('data', (c: Buffer) => {
-				if (!req.write(Buffer.isBuffer(c) ? c : Buffer.from(c))) { streamingBody.pause(); req.once('drain', () => streamingBody.resume()) }
+				if (!req.write(Buffer.isBuffer(c) ? c : Buffer.from(c))) {
+					streamingBody.pause()
+					req.once('drain', () => streamingBody.resume())
+				}
 			})
 			streamingBody.on('end', () => req.end())
-			streamingBody.on('error', (e: Error) => { try { req.close(0x8) } catch {}; conn.close('h2-body-error'); reject(new HellojsError(e.message, 'EBODYSTREAM', e)) })
+			streamingBody.on('error', (e: Error) => {
+				try {
+					req.close(0x8)
+				} catch {}
+				conn.close('h2-body-error')
+				reject(new HellojsError(e.message, 'EBODYSTREAM', e))
+			})
 		} else if (bufferedBody) req.end(bufferedBody)
 		else req.end()
 	})
@@ -726,8 +919,11 @@ const CRLFCRLF = Buffer.from('\r\n\r\n')
 // 'close' handler). HTTP/1.1 defaults to keep-alive (we send no Connection header), so the server
 // holds the socket open and 'end' never fired -> every keep-alive request hung until the timeout.
 // The only mode that legitimately waits for 'end' is a connection-close-delimited body.
-function performH1(conn: Connection, { method, url, host, body, userHeaders, opts, profileObj }: RequestContext): Promise<Response> {
-	const transport = conn.h2Transport!  // misnomer: this is the raw TLS Duplex
+function performH1(
+	conn: Connection,
+	{ method, url, host, body, userHeaders, opts, profileObj, h1PoolKey }: RequestContext
+): Promise<Response> {
+	const transport = conn.h2Transport! // misnomer: this is the raw TLS Duplex
 	const requestLine = `${method} ${url.pathname + url.search} HTTP/1.1\r\n`
 	const headerBlock = buildH1Headers({ host, userHeaders, profile: profileObj })
 	const head = Buffer.from(requestLine + headerBlock + '\r\n\r\n', 'utf8')
@@ -738,9 +934,14 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 		// The connection is fresh and dedicated to this request, so no leftover bytes
 		// from a prior response exist.
 		let buf: Buffer = Buffer.alloc(0)
-		let settled = false, headersParsed = false
+		let settled = false,
+			headersParsed = false
 		let status = 0
 		let statusText = ''
+		let httpVersion = '1.1'
+		// A socket may only be pooled when the peer agreed to keep it alive and the body was
+		// framed (length/chunked/none) — an eof-delimited body means the peer already closed it.
+		let reusable = false
 		let headers: H1Headers = {}
 		let mode: HeadMode | null = null
 		let contentLength = 0
@@ -758,17 +959,13 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 		let chunkState: 'size' | 'data' | 'data-crlf' | 'trailers' = 'size'
 		let received = 0
 
-		const respMs = opts.timeouts?.response ?? opts.timeout ?? DEFAULT_RESPONSE_TIMEOUT_MS
-		let timer: ReturnType<typeof setTimeout> | null = respMs ? setTimeout(() => {
-			done(() => { try { conn.close('h1-timeout') } catch {}; reject(new HellojsError(`request timed out after ${respMs}ms`, 'ETIMEDOUT')) })
-		}, respMs) : null
+		// No response-header watchdog (browsers have none here); `signal` is the sole deadline.
 
-		const coerce = (v: string | string[] | undefined) => Array.isArray(v) ? v.join(', ') : v
+		const coerce = (v: string | string[] | undefined) => (Array.isArray(v) ? v.join(', ') : v)
 
 		function cleanup() {
 			transport.removeListener('data', onData)
 			transport.removeListener('end', onEnd)
-			if (timer) { clearTimeout(timer); timer = null }
 		}
 		function done(fn: () => void) {
 			if (settled) return
@@ -777,7 +974,29 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 			fn()
 		}
 		function fail(msg: string, code: ErrorCode | string) {
-			done(() => { try { conn.close('h1-error') } catch {}; reject(new HellojsError(msg, code)) })
+			done(() => {
+				try {
+					conn.close('h1-error')
+				} catch {}
+				reject(new HellojsError(msg, code))
+			})
+		}
+
+		// Successful completion: park a reusable socket in the pool, otherwise tear it down.
+		function finishH1(reason: string) {
+			if (!h1PoolKey || !reusable) {
+				conn.close(reason)
+				return
+			}
+			if (pool.isPooled(conn)) {
+				pool.release(conn) // return this request's exclusive slot and start the idle timer
+				return
+			}
+			if (pool.register(conn, h1PoolKey)) {
+				pool.release(conn) // the creating request's slot becomes the idle reservation
+				return
+			}
+			conn.close('h1-pool-full')
 		}
 
 		// Send the request body. A Readable streams as HTTP/1.1 chunks when the header layer
@@ -786,7 +1005,8 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 		const streamBody = isReadable(body) ? body : null
 		if (streamBody) {
 			const chunked = Object.keys(userHeaders).some(
-				(k) => k.toLowerCase() === 'transfer-encoding' && String(userHeaders[k]).toLowerCase().includes('chunked'),
+				(k) =>
+					k.toLowerCase() === 'transfer-encoding' && String(userHeaders[k]).toLowerCase().includes('chunked')
 			)
 			const CRLF = Buffer.from('\r\n', 'utf8')
 			streamBody.on('data', (c: Buffer | string) => {
@@ -794,10 +1014,22 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 				const frame = chunked
 					? Buffer.concat([Buffer.from(data.length.toString(16), 'utf8'), CRLF, data, CRLF])
 					: data
-				if (!transport.write(frame)) { streamBody.pause(); transport.once('drain', () => streamBody.resume()) }
+				if (!transport.write(frame)) {
+					streamBody.pause()
+					transport.once('drain', () => streamBody.resume())
+				}
 			})
-			streamBody.on('end', () => { if (chunked) transport.write('0\r\n\r\n', 'utf8') })
-			streamBody.on('error', (e: Error) => done(() => { try { conn.close('h1-body-error') } catch {}; reject(new HellojsError(e.message, 'EBODYSTREAM', e)) }))
+			streamBody.on('end', () => {
+				if (chunked) transport.write('0\r\n\r\n', 'utf8')
+			})
+			streamBody.on('error', (e: Error) =>
+				done(() => {
+					try {
+						conn.close('h1-body-error')
+					} catch {}
+					reject(new HellojsError(e.message, 'EBODYSTREAM', e))
+				})
+			)
 		} else if (body) {
 			transport.write(body)
 		}
@@ -805,25 +1037,34 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 		// Parse one response head (status line + headers) at the front of buf.
 		function parseHead(): HeadResult {
 			const he = buf.indexOf(CRLFCRLF)
-			if (he < 0) return 'need-more'  // a partial head is NOT an error — wait for more bytes
+			if (he < 0) return 'need-more' // a partial head is NOT an error — wait for more bytes
 			const lines = buf.subarray(0, he).toString('latin1').split('\r\n')
 			const m = lines.shift()!.match(/^HTTP\/1\.(\d) (\d{3})(?: (.*))?$/)
-			if (!m) { fail('bad status line', 'EBADRESP'); return 'error' }
+			if (!m) {
+				fail('bad status line', 'EBADRESP')
+				return 'error'
+			}
 			const st = parseInt(m[2], 10)
 			// 1xx informational responses carry no body; discard the interim head and parse the
 			// next one from the stream (RFC 7230 3.3.3 rule 1 — e.g. 100 Continue, 103 Early Hints).
-			if (st >= 100 && st < 200) { buf = buf.subarray(he + 4); return 'interim' }
+			if (st >= 100 && st < 200) {
+				buf = buf.subarray(he + 4)
+				return 'interim'
+			}
 			status = st
 			statusText = m[3] ?? ''
+			httpVersion = m[1] === '1' ? '1.1' : '1.0'
 			headers = {}
 			for (const ln of lines) {
 				const idx = ln.indexOf(':')
 				if (idx < 0) continue
 				const k = ln.slice(0, idx).trim().toLowerCase()
 				const v = ln.slice(idx + 1).trim()
-				if (headers[k] !== undefined) headers[k] = ([] as string[]).concat(headers[k], v); else headers[k] = v
+				if (headers[k] !== undefined) headers[k] = ([] as string[]).concat(headers[k], v)
+				else headers[k] = v
 			}
 			bodyStart = he + 4
+			observeAltSvc(headers, opts, status)
 			const te = (coerce(headers['transfer-encoding']) || '').trim()
 			const cl = coerce(headers['content-length'])
 			// RFC 7230 3.3.3: HEAD responses and 204/304 never have a body, regardless of CL/TE.
@@ -835,11 +1076,25 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 				mode = 'chunked'
 			} else if (cl !== undefined && cl !== '') {
 				const s = String(cl).trim()
-				if (!/^\d+$/.test(s)) { fail('invalid content-length', 'EBADRESP'); return 'error' }
-				mode = 'length'; contentLength = parseInt(s, 10)
+				if (!/^\d+$/.test(s)) {
+					fail('invalid content-length', 'EBADRESP')
+					return 'error'
+				}
+				mode = 'length'
+				contentLength = parseInt(s, 10)
 			} else {
-				mode = 'eof'  // body delimited by connection close
+				mode = 'eof' // body delimited by connection close
 			}
+			const connectionTokens = new Set(
+				`${coerce(headers['connection']) ?? ''},${coerce(headers['proxy-connection']) ?? ''}`
+					.toLowerCase()
+					.split(',')
+					.map((t) => t.trim())
+			)
+			reusable =
+				mode !== 'eof' &&
+				!connectionTokens.has('close') &&
+				(httpVersion !== '1.0' || connectionTokens.has('keep-alive'))
 			headersParsed = true
 			return 'ok'
 		}
@@ -849,7 +1104,10 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 		function writeOut(data: Buffer): void {
 			if (data.length === 0) return
 			received += data.length
-			if (buffering) { buffered.push(data); return }
+			if (buffering) {
+				buffered.push(data)
+				return
+			}
 			if (!stream) return
 			stream.write(data)
 		}
@@ -862,10 +1120,16 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 					const nl = frameBuf.indexOf(CRLF)
 					if (nl < 0) return
 					const token = frameBuf.subarray(0, nl).toString('ascii').split(';')[0].trim()
-					if (!/^[0-9a-fA-F]+$/.test(token)) { failStream('bad chunk size', 'EBADRESP'); return }
+					if (!/^[0-9a-fA-F]+$/.test(token)) {
+						failStream('bad chunk size', 'EBADRESP')
+						return
+					}
 					const size = Number.parseInt(token, 16)
 					frameBuf = frameBuf.subarray(nl + 2)
-					if (size === 0) { chunkState = 'trailers'; continue }
+					if (size === 0) {
+						chunkState = 'trailers'
+						continue
+					}
 					chunkRemaining = size
 					chunkState = 'data'
 				}
@@ -901,7 +1165,10 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 				if (received >= contentLength) completeStream()
 				return
 			}
-			if (mode === 'eof') { writeOut(chunk); return }
+			if (mode === 'eof') {
+				writeOut(chunk)
+				return
+			}
 			if (mode === 'chunked') feedChunked(chunk)
 		}
 
@@ -910,9 +1177,16 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 			streamDone = true
 			settled = true
 			cleanup()
-			try { conn.close('h1-stream-error') } catch { /* closed */ }
+			try {
+				conn.close('h1-stream-error')
+			} catch {
+				/* closed */
+			}
 			// A buffered response has not resolved yet, so the failure belongs on the promise.
-			if (buffering) { reject(new HellojsError(message, code)); return }
+			if (buffering) {
+				reject(new HellojsError(message, code))
+				return
+			}
 			stream?.fail(new HellojsError(message, code))
 		}
 
@@ -922,16 +1196,29 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 			settled = true
 			cleanup()
 			if (buffering) {
-				try { conn.close('h1-response-complete') } catch { /* closed */ }
+				try {
+					finishH1('h1-response-complete')
+				} catch {
+					/* closed */
+				}
 				let raw: Buffer = Buffer.concat(buffered)
 				if (raw.length) {
-					try { raw = decompressIfNeeded(raw, coerce(headers['content-encoding']) || '') }
-					catch (e) { reject(new HellojsError((e as Error).message, 'EDECOMPRESS', e)); return }
+					try {
+						raw = decompressIfNeeded(raw, coerce(headers['content-encoding']) || '')
+					} catch (e) {
+						reject(new HellojsError((e as Error).message, 'EDECOMPRESS', e))
+						return
+					}
 				}
 				if (opts.jar && headers['set-cookie']) opts.jar.setCookie(headers['set-cookie'], url.toString())
 				observability.safeEmit('request:end', {
-					id: opts._reqId, status, headers, totalBytes: raw.length,
-					durationMs: Date.now() - h1T0, responseBody: raw, tls: summarizeConn(conn),
+					id: opts._reqId,
+					status,
+					headers,
+					totalBytes: raw.length,
+					durationMs: Date.now() - h1T0,
+					responseBody: raw,
+					tls: summarizeConn(conn)
 				})
 				handleResponse({ status, statusText, headers, raw, opts, resolve, reject })
 				return
@@ -945,43 +1232,61 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 		function startStreaming(): void {
 			streamingStarted = true
 			const isRedirect = opts.redirect !== 'manual' && status >= 300 && status < 400 && !!headers.location
-			if (isRedirect) { buffering = true; return }
+			if (isRedirect) {
+				buffering = true
+				return
+			}
 			stream = startProgressiveResponse({
 				status,
 				statusText,
 				headers,
 				...responseMeta(opts),
 				signal: opts.signal,
-				idleTimeoutMs: opts.timeouts?.bodyIdle ?? 0,
 				errorCode: 'EBADRESP',
 				onCancel: () => {
 					streamDone = true
 					settled = true
 					cleanup()
-					try { conn.close('h1-stream-cancel') } catch { /* closed */ }
+					try {
+						conn.close('h1-stream-cancel')
+					} catch {
+						/* closed */
+					}
 				},
 				onBackpressure: (paused) => {
 					try {
 						if (paused) transport.pause()
 						else transport.resume()
-					} catch { /* not a Node stream */ }
+					} catch {
+						/* not a Node stream */
+					}
 				},
-				onFirstByte: () => observability.safeEmit('request:firstByte', { id: opts._reqId, durationMs: Date.now() - h1T0 }),
+				onFirstByte: () =>
+					observability.safeEmit('request:firstByte', { id: opts._reqId, durationMs: Date.now() - h1T0 }),
 				onEnd: (bytes) => {
 					observability.safeEmit('request:end', {
-						id: opts._reqId, status, headers, totalBytes: bytes,
-						durationMs: Date.now() - h1T0, tls: summarizeConn(conn),
+						id: opts._reqId,
+						status,
+						headers,
+						totalBytes: bytes,
+						durationMs: Date.now() - h1T0,
+						tls: summarizeConn(conn)
 					})
-					try { conn.close('h1-response-complete') } catch { /* closed */ }
+					try {
+						finishH1('h1-response-complete')
+					} catch {
+						/* closed */
+					}
 				},
 				onError: (error) => {
 					observability.safeEmit('request:error', {
-						id: opts._reqId, code: errorCodeOf(error, 'EBADRESP'),
-						message: messageOf(error), durationMs: Date.now() - h1T0,
+						id: opts._reqId,
+						code: errorCodeOf(error, 'EBADRESP'),
+						message: messageOf(error),
+						durationMs: Date.now() - h1T0
 					})
-				},
+				}
 			})
-			if (timer) { clearTimeout(timer); timer = null }
 			resolve(stream.result)
 		}
 
@@ -989,16 +1294,22 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 			if (settled) return
 			// After the header hand-off every chunk is body bytes; `buf` only ever holds the
 			// unparsed head, so the two paths never compete for the same offset.
-			if (streamingStarted) { if (c.length) feedStream(c); return }
+			if (streamingStarted) {
+				if (c.length) feedStream(c)
+				return
+			}
 			if (c.length) buf = buf.length ? Buffer.concat([buf, c]) : c
 			while (!settled) {
 				if (!headersParsed) {
 					const r = parseHead()
 					if (r === 'need-more' || r === 'error') return
-					if (r === 'interim') continue  // 1xx consumed; parse the next head
+					if (r === 'interim') continue // 1xx consumed; parse the next head
 				}
 				startStreaming()
-				if (mode === 'none' || (mode === 'length' && contentLength === 0)) { completeStream(); return }
+				if (mode === 'none' || (mode === 'length' && contentLength === 0)) {
+					completeStream()
+					return
+				}
 				const leftover = buf.subarray(bodyStart)
 				buf = Buffer.alloc(0)
 				if (leftover.length) feedStream(leftover)
@@ -1010,13 +1321,18 @@ function performH1(conn: Connection, { method, url, host, body, userHeaders, opt
 			if (!headersParsed) return fail('incomplete h1 response', 'EBADRESP')
 			// Close-delimited bodies complete on EOF. A length/chunked close before its frame
 			// (streaming or buffered) is truncation.
-			if (mode === 'eof') { completeStream(); return }
+			if (mode === 'eof') {
+				completeStream()
+				return
+			}
 			failStream('connection closed before response complete', 'EBADRESP')
 		}
 
 		transport.on('data', onData)
 		transport.once('end', onEnd)
-		try { transport.resume() } catch {}
+		try {
+			transport.resume()
+		} catch {}
 	})
 }
 
@@ -1027,7 +1343,7 @@ function findTrailerEnd(b: Buffer, start: number): number {
 	for (;;) {
 		const nl = b.indexOf(CRLF, off)
 		if (nl < 0) return -1
-		if (nl === off) return off + 2  // empty line terminates the trailers
+		if (nl === off) return off + 2 // empty line terminates the trailers
 		off = nl + 2
 	}
 }
@@ -1059,9 +1375,9 @@ interface HandleResponseInput {
 
 function responseMeta(opts: NormalizedRequestOptions): { url: string; redirected: boolean; method: string } {
 	return {
-		url: opts.url ?? opts.uri ?? '',
+		url: opts.url,
 		redirected: opts._redirected === true,
-		method: (opts.method || 'GET').toUpperCase(),
+		method: (opts.method || 'GET').toUpperCase()
 	}
 }
 
@@ -1071,23 +1387,32 @@ function handleResponse({ status, statusText, headers, raw, opts, resolve, rejec
 	if (opts.redirect === 'error' && status >= 300 && status < 400 && headers.location) {
 		return reject(new HellojsError(`redirect not allowed with redirect: 'error' (HTTP ${status})`, 'EHTTP'))
 	}
-	if (opts.redirect !== 'manual' && status >= 300 && status < 400 && headers.location && (opts.maxRedirects ?? 10) > 0) {
+	if (opts.redirect !== 'manual' && status >= 300 && status < 400 && headers.location) {
+		const count = opts._redirectCount ?? 0
+		// Fetch's HTTP-redirect-fetch: if the redirect count is 20, return a network error,
+		// then increment. So 20 hops are followed and the 21st is rejected.
+		if (count >= 20) {
+			return reject(new HellojsError('redirect count exceeded the 20-hop browser limit', 'ETOOMANYREDIRECTS'))
+		}
 		const location = Array.isArray(headers.location) ? headers.location[0] : headers.location
-		const currentUrl = new URL(opts.url ?? opts.uri ?? '')
+		const currentUrl = new URL(opts.url)
 		const target = new URL(location, currentUrl)
-		// `_redirected` survives the recursive call so the final Response reports it.
-		let newOpts: NormalizedRequestOptions = { ...opts, headers: opts.headers, url: target.toString(), maxRedirects: (opts.maxRedirects ?? 10) - 1, _redirected: true }
-		// The Location URL carries its own query string; don't re-append opts.qs to it.
-		delete newOpts.qs
+		// Internal bookkeeping survives the recursive call: `_redirected` makes the final
+		// Response redirect-aware, `_redirectCount` enforces the fixed 20-hop browser limit.
+		let newOpts: NormalizedRequestOptions = {
+			...opts,
+			headers: opts.headers,
+			url: target.toString(),
+			_redirectCount: count + 1,
+			_redirected: true
+		}
 		const method = (opts.method || 'GET').toUpperCase()
-		// RFC 9110 §15.4: 303 → GET. Browsers (and the request library) also downgrade a POST to GET
-		// on 301/302. 307/308 preserve method and body. On downgrade, drop the request body and its
-		// framing headers so the redirected GET is bodyless.
+		// RFC 9110 §15.4: 303 → GET. Browsers also downgrade a POST to GET on 301/302.
+		// 307/308 preserve method and body. On downgrade, drop the body and its framing headers
+		// so the redirected GET is bodyless.
 		if (status === 303 || ((status === 301 || status === 302) && method === 'POST')) {
 			newOpts.method = 'GET'
 			delete newOpts.body
-			delete newOpts.form
-			if (newOpts.json && typeof newOpts.json !== 'boolean') delete newOpts.json
 			newOpts = withoutHeaders(newOpts, ['content-type', 'content-length', 'transfer-encoding'])
 		}
 		// Never carry credentials across an origin boundary (scheme://host:port). Mirrors browser /
@@ -1105,7 +1430,10 @@ function handleResponse({ status, statusText, headers, raw, opts, resolve, rejec
 
 function retryDelay(ms: number, signal?: AbortSignal | null): Promise<void> {
 	return new Promise((resolve, reject) => {
-		if (signal?.aborted) { reject(abortReason(signal)); return }
+		if (signal?.aborted) {
+			reject(abortReason(signal))
+			return
+		}
 		let timer: ReturnType<typeof setTimeout> | null = null
 		const onAbort = () => {
 			if (timer) clearTimeout(timer)
@@ -1150,7 +1478,9 @@ async function performWithRetry(opts: NormalizedRequestOptions): Promise<Respons
 	const methods = policy.methods ?? ['GET', 'HEAD', 'OPTIONS']
 	const statusCodes = policy.statusCodes ?? [408, 429, 500, 502, 503, 504]
 	const baseDelay = policy.baseDelayMs ?? 200
-	const upper = (opts.method || 'GET').toUpperCase()
+	// The public type is closed to registered methods, but the runtime still accepts any
+	// HTTP token, so compare case-insensitively on the raw string.
+	const upper = (opts.method || 'GET').toUpperCase() as HttpMethod
 	const retriable = methods.includes(upper)
 	let lastErr: HellojsError | undefined
 	for (let attempt = 0; attempt <= limit; attempt++) {
@@ -1159,7 +1489,13 @@ async function performWithRetry(opts: NormalizedRequestOptions): Promise<Respons
 			// A retryable status is already visible at the header stage. Cancel the unread
 			// body to release the stream/socket before the next attempt.
 			if (retriable && attempt < limit && statusCodes.includes(res.status)) {
-				if (res.body) { try { await res.body.cancel() } catch { /* already closed */ } }
+				if (res.body) {
+					try {
+						await res.body.cancel()
+					} catch {
+						/* already closed */
+					}
+				}
 				await retryDelay(baseDelay * Math.pow(2, attempt), opts.signal)
 				continue
 			}
@@ -1179,27 +1515,48 @@ async function performWithRetry(opts: NormalizedRequestOptions): Promise<Respons
 	throw lastErr
 }
 
-function inputToOptions(input: RequestOptions | string | URL | Request, init?: FetchInit): NormalizedRequestOptions {
+// Removed request.js knobs get a precise error instead of being silently ignored by JS callers.
+const REMOVED_INIT_OPTIONS: Record<string, string> = {
+	url: 'pass the URL as request(input, init)',
+	uri: 'pass the URL as request(input, init)',
+	json: 'serialize with JSON.stringify and pass it as body',
+	form: 'use URLSearchParams as body',
+	qs: 'put the query string in the input URL',
+	gzip: 'response decoding is automatic',
+	maxRedirects: 'browsers follow up to 20 redirects',
+	timeout: 'use signal (AbortSignal.timeout())',
+	timeouts: 'use signal (AbortSignal.timeout())',
+	resume: 'TLS session resumption is managed internally',
+	h3: 'transport is selected automatically'
+}
+
+function assertNoRemovedInitOptions(init?: FetchInit | Partial<RequestOptions>): void {
+	if (!init) return
+	for (const [key, hint] of Object.entries(REMOVED_INIT_OPTIONS)) {
+		if (key in init) throw new HellojsError(`${key} was removed; ${hint}`, 'EBADOPTS')
+	}
+}
+
+function inputToOptions(input: string | URL | Request, init?: FetchInit): NormalizedRequestOptions {
 	if (typeof init === 'function') {
 		throw new HellojsError('callbacks were removed; use await request(...) instead', 'EBADOPTS')
 	}
+	assertNoRemovedInitOptions(init)
 	let opts: NormalizedRequestOptions
 	if (typeof input === 'string' || input instanceof URL) {
 		opts = { ...(init ?? {}), url: input.toString() } as unknown as NormalizedRequestOptions
-	} else if (typeof Request !== 'undefined' && input instanceof Request) {
+	} else {
 		const headers = headersToRecord(input.headers)
 		opts = {
 			...inputToRequestOptions(input),
 			...(init ?? {}),
-			url: init?.url ?? input.url,
+			url: input.url,
 			method: init?.method ?? input.method,
 			headers: init?.headers ? headersToRecord(init.headers) : headers,
 			body: init?.body !== undefined ? init.body : (input.body as ReadableStream<Uint8Array> | null),
 			redirect: (init?.redirect ?? input.redirect) as RedirectMode,
-			signal: init?.signal ?? input.signal,
+			signal: init?.signal ?? input.signal
 		} as unknown as NormalizedRequestOptions
-	} else {
-		opts = { ...(input as RequestOptions), ...(init ?? {}) } as unknown as NormalizedRequestOptions
 	}
 	opts.headers = headersToRecord(opts.headers)
 	return opts
@@ -1208,35 +1565,39 @@ function inputToOptions(input: RequestOptions | string | URL | Request, init?: F
 // Pull the fetch fields off a `Request` without copying its (already consumed) body twice.
 function inputToRequestOptions(input: Request): Partial<RequestOptions> {
 	return {
-		method: input.method,
+		method: input.method as HttpMethod,
 		redirect: input.redirect as RedirectMode,
-		signal: input.signal,
+		signal: input.signal
 	}
 }
 
-async function requestImpl(input: RequestOptions | string | URL | Request, init?: FetchInit): Promise<Response> {
-	return performWithRetry(inputToOptions(input, init))
-}
+// Internal entry point: everything below this line receives normalized options.
+type InternalDispatch = (opts: NormalizedRequestOptions) => Promise<Response>
 
-function method(m: string, dispatch: MethodFn = requestImpl): MethodFn {
+const requestImpl: MethodFn = (input, init) => performWithRetry(inputToOptions(input, init))
+
+function method(m: HttpMethod, dispatch: InternalDispatch = performWithRetry): MethodFn {
 	return async (input, init) => {
 		const opts = inputToOptions(input, init)
 		opts.method = m
-		return dispatch(toPublicOptions(opts))
+		return dispatch(opts)
 	}
 }
 
 // Deep-merge defaults + per-call opts: `headers` is lowercased and merged (later wins), and
 // `proxy` is merged field by field so a per-call override need not repeat authorization/headers.
 // An explicit `proxy: null` clears the default entirely.
-function mergeProxy(base: ProxyOptions | null | undefined, over: ProxyOptions | null | undefined): ProxyOptions | null | undefined {
+function mergeProxy(
+	base: ProxyOptions | null | undefined,
+	over: ProxyOptions | null | undefined
+): ProxyOptions | null | undefined {
 	if (over === null) return null
 	if (over === undefined) return base ?? undefined
 	if (base == null) return over
 	return { ...base, ...over }
 }
 
-function mergeOpts(base: Partial<RequestOptions>, over: RequestOptions): NormalizedRequestOptions {
+function mergeOpts(base: Partial<RequestOptions>, over: Partial<NormalizedRequestOptions>): NormalizedRequestOptions {
 	const out = { ...base, ...over } as unknown as NormalizedRequestOptions
 	out.headers = { ...headersToRecord(base.headers), ...headersToRecord(over.headers) }
 	const proxy = mergeProxy(base.proxy, over.proxy)
@@ -1253,12 +1614,12 @@ const SHORTCUTS = {
 	delete: 'DELETE',
 	patch: 'PATCH',
 	head: 'HEAD',
-	options: 'OPTIONS',
+	options: 'OPTIONS'
 } as const
 
 // Shortcuts dispatch through `dispatch`, so a defaults-derived entry point keeps merging
 // its defaults when called as `.get(...)` / `.post(...)`.
-function withShortcuts<T extends object>(fn: T, dispatch: MethodFn): T {
+function withShortcuts<T extends object>(fn: T, dispatch: InternalDispatch): T {
 	const shortcuts: Record<string, MethodFn> = {}
 	for (const [name, verb] of Object.entries(SHORTCUTS)) shortcuts[name] = method(verb, dispatch)
 	return Object.assign(fn, shortcuts)
@@ -1267,20 +1628,24 @@ function withShortcuts<T extends object>(fn: T, dispatch: MethodFn): T {
 const request = withShortcuts(
 	Object.assign(requestImpl, {
 		defaults: (defaults: Partial<RequestOptions> = {}) => {
-			const wrapped: MethodFn = async (input, init) =>
-				requestImpl(toPublicOptions(mergeOpts(defaults, toPublicOptions(inputToOptions(input, init)))))
+			assertNoRemovedInitOptions(defaults)
+			const dispatch: InternalDispatch = (opts) => performWithRetry(mergeOpts(defaults, opts))
+			const wrapped: MethodFn = (input, init) => dispatch(inputToOptions(input, init))
 			return withShortcuts(
 				Object.assign(wrapped, {
-					defaults: (more?: Partial<RequestOptions>) => request.defaults(toPublicOptions(mergeOpts(defaults, more || {}))),
-					jar: request.jar,
+					defaults: (more?: Partial<RequestOptions>) =>
+						request.defaults(
+							toPublicOptions(mergeOpts(defaults, (more || {}) as Partial<NormalizedRequestOptions>))
+						),
+					jar: request.jar
 				}),
-				wrapped
+				dispatch
 			)
 		},
 		jar: () => new Jar(),
-		HellojsError,
+		HellojsError
 	}),
-	requestImpl
+	performWithRetry
 ) as unknown as RequestFn
 
 export default request

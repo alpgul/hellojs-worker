@@ -1,4 +1,7 @@
-// Benchmark h3 vs h2 (cold + warm steady-state) against a real host.
+// Benchmark hellojs (cold + warm steady-state) against a real host, next to got's h2 client.
+// hellojs selects its transport automatically (QUIC when a UDP provider exists, otherwise
+// TCP + TLS); there is no public h3/h2 option to pin it. The trace body shows which protocol
+// actually answered.
 //
 //   npm run bench:h3
 
@@ -23,7 +26,7 @@ function stats(arr: number[]): Stats {
 		p50: sorted[Math.floor(arr.length * 0.5)]!,
 		p95: sorted[Math.floor(arr.length * 0.95)] ?? sorted[arr.length - 1]!,
 		mean: sum / arr.length,
-		total: sum,
+		total: sum
 	}
 }
 
@@ -40,24 +43,21 @@ async function timeOne(fn: () => Promise<unknown>): Promise<number> {
 const { default: got } = await import('got')
 const gotH2 = got.extend({ http2: true, throwHttpErrors: false })
 
-const helloH2 = () => request({ url: URL, h3: false })
-const helloH3 = () => request({ url: URL, h3: true })
+const hellojs = () => request(URL)
 const goth2 = () => gotH2(URL)
 
 console.log('Target:', URL, 'N =', N)
 console.log()
 
 console.log('--- COLD (1 req including handshake) ---')
-console.log(`  hellojs h2           cold = ${await timeOne(helloH2)}ms`)
-console.log(`  hellojs h3           cold = ${await timeOne(helloH3)}ms`)
+console.log(`  hellojs (auto)       cold = ${await timeOne(hellojs)}ms`)
 console.log(`  got h2               cold = ${await timeOne(goth2)}ms`)
 
 console.log()
 console.log(`--- SERIAL ${N} (warm reuse) ---`)
 const runners: [string, () => Promise<unknown>][] = [
-	['hellojs h2', helloH2],
-	['hellojs h3', helloH3],
-	['got h2', goth2],
+	['hellojs (auto)', hellojs],
+	['got h2', goth2]
 ]
 for (const [label, fn] of runners) {
 	const times: number[] = []

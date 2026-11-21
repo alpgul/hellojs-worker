@@ -13,32 +13,40 @@ import type { H2Session } from './h2/session.ts'
 import type { Profile } from './profiles/types.ts'
 import type { ProxyHop, TLSOptions, TLSTransport } from './tls/tls.ts'
 
-// Per-phase timeouts, all optional. `response` is applied by lib/client.ts; the connect and
-// handshake phases are armed here.
-export interface PerPhaseTimeouts {
-	connect?: number
-	tlsHandshake?: number
-	/**
-	 * Deadline for the response headers. Responses always stream, so this no longer covers
-	 * the body; use `bodyIdle` for long-running progressive responses.
-	 */
-	response?: number
-	/**
-	 * Cancel a progressive response body when no bytes move for this many milliseconds.
-	 * `0` / unset disables the watchdog (fetch-like behavior).
-	 */
-	bodyIdle?: number
+// Browser-like transport budgets. These are internal policy — there is no public timeout
+// option; the only caller-controlled deadline is `signal` (AbortSignal.timeout() etc.).
+// Values follow Chromium: a single connect attempt (DNS + TCP, or a proxy CONNECT) is capped
+// at 30s, the TLS handshake gets 30s, and the whole connect job has a 30s ceiling. QUIC gets a
+// shorter 2s budget so the TCP fallback is not held hostage by Initial retransmits.
+const TCP_CONNECT_ATTEMPT_MS = 30_000
+const CONNECT_JOB_TOTAL_MS = 30_000
+const TLS_HANDSHAKE_MS = 30_000
+const QUIC_HANDSHAKE_MS = 2_000
+
+/** Forward an external abort signal into an internal controller. */
+function linkAbort(source: AbortSignal | null | undefined, target: AbortController): () => void {
+	if (!source) return () => {}
+	if (source.aborted) {
+		target.abort(source.reason)
+		return () => {}
+	}
+	const onAbort = () => target.abort(source.reason)
+	source.addEventListener('abort', onAbort, { once: true })
+	return () => source.removeEventListener('abort', onAbort)
 }
 
 export interface ConnectOptions {
+	/** Dial target. With Alt-Svc this can differ from the origin authority. */
 	host: string
 	port?: number
+	/** SNI / certificate identity. Defaults to `host`; always the origin for Alt-Svc. */
+	sniHost?: string
 	profile?: Profile | string | null
 	proxy?: ProxyOptions | null
 	transport?: 'tcp' | 'quic'
 	verifyTLS?: boolean
-	resume?: boolean
-	timeouts?: PerPhaseTimeouts | null
+	/** Caller deadline; the internal 30s connect ceiling applies on top of it. */
+	signal?: AbortSignal | null
 }
 
 export type Alpn = 'h2' | 'http/1.1' | 'h3'
@@ -107,9 +115,9 @@ class Connection {
 	}
 }
 
-function createH3(host: string, port: number, timeouts: PerPhaseTimeouts | null = null): Promise<Connection> {
+function createH3(host: string, port: number, signal?: AbortSignal | null, sniHost?: string): Promise<Connection> {
 	return new Promise((resolve, reject) => {
-		const qc = new QuicConnection(host, port)
+		const qc = new QuicConnection(host, port, sniHost)
 		const conn = new Connection(null)
 		conn.quicConn = qc
 		let settled = false
@@ -119,14 +127,16 @@ function createH3(host: string, port: number, timeouts: PerPhaseTimeouts | null 
 				clearTimeout(handshakeTimer)
 				handshakeTimer = null
 			}
+			signal?.removeEventListener?.('abort', onAbort)
 		}
-		const fail = (err: Error) => {
+		const fail = (err: unknown) => {
 			if (settled) return
 			settled = true
 			clearTimer()
 			conn.close('error')
-			reject(err)
+			reject(err instanceof Error ? err : new Error(String(err)))
 		}
+		const onAbort = () => fail(abortReason(signal))
 		qc.on('ready', () => {
 			if (settled) return
 			settled = true
@@ -141,16 +151,21 @@ function createH3(host: string, port: number, timeouts: PerPhaseTimeouts | null 
 		qc.on('error', (e: Error) => fail(e))
 		qc.connect().catch((e: Error) => fail(e))
 
-		// QUIC has no TCP connect phase to bound, so the caller's `connect` budget covers the
-		// whole handshake: Initial packets retransmit until the idle timeout (~55s) against a
-		// server that ignores UDP, and `h3: true` would wait that long before falling back.
-		if (timeouts?.connect) {
-			handshakeTimer = setTimeout(() => {
-				fail(new HellojsError(`QUIC handshake timed out after ${timeouts.connect}ms`, 'ETIMEDOUT'))
-			}, timeouts.connect)
-			handshakeTimer.unref?.()
-		}
+		// QUIC has no TCP connect phase to bound, so a fixed handshake budget covers the whole
+		// exchange: Initial packets retransmit until the idle timeout (~55s) against a server
+		// that ignores UDP, and the browser-like TCP fallback must not wait that long.
+		handshakeTimer = setTimeout(() => {
+			fail(new HellojsError(`QUIC handshake timed out after ${QUIC_HANDSHAKE_MS}ms`, 'ETIMEDOUT'))
+		}, QUIC_HANDSHAKE_MS)
+		handshakeTimer.unref?.()
+		if (signal?.aborted) onAbort()
+		else signal?.addEventListener?.('abort', onAbort, { once: true })
 	})
+}
+
+function abortReason(signal?: AbortSignal | null): unknown {
+	if (signal?.reason !== undefined) return signal.reason
+	return new DOMException('The operation was aborted.', 'AbortError')
 }
 
 function createTLS(
@@ -160,16 +175,19 @@ function createTLS(
 	proxy: ProxyOptions | null | undefined,
 	opts: {
 		verifyTLS?: boolean
-		resume?: boolean
-		timeouts?: PerPhaseTimeouts | null
+		signal?: AbortSignal | null
 		proxyHop?: ProxyHop | null
 		proxyPoolKey?: string | null
+		/** Alt-Svc: dial `host` but keep SNI / certificate identity on the origin. */
+		sniHost?: string
 	} = {}
 ): Promise<Connection> {
 	return new Promise((resolve, reject) => {
 		const tlsOpts: TLSOptions = {}
+		if (opts.sniHost) tlsOpts.sniHost = opts.sniHost
 		tlsOpts.verifyTLS = opts.verifyTLS !== false
-		if (opts.resume) tlsOpts.resume = true
+		// Resumption is always driven by the internal session-ticket store, like a browser.
+		tlsOpts.resume = true
 		if (profile) tlsOpts.profile = profile
 		if (proxy?.authorization != null) tlsOpts.proxyAuthorization = proxy.authorization
 		if (proxy?.headers != null) tlsOpts.proxyHeaders = proxy.headers
@@ -179,6 +197,7 @@ function createTLS(
 		let settled = false
 		let connectTimer: ReturnType<typeof setTimeout> | null = null
 		let handshakeTimer: ReturnType<typeof setTimeout> | null = null
+		const removeAbort = () => opts.signal?.removeEventListener?.('abort', onAbort)
 		const clearAllTimers = () => {
 			if (connectTimer) {
 				clearTimeout(connectTimer)
@@ -188,16 +207,18 @@ function createTLS(
 				clearTimeout(handshakeTimer)
 				handshakeTimer = null
 			}
+			removeAbort()
 		}
-		const fail = (err: Error) => {
+		const fail = (err: unknown) => {
 			if (settled) return
 			settled = true
 			clearAllTimers()
 			try {
 				tls.socket?.destroy()
 			} catch {}
-			reject(err)
+			reject(err instanceof Error ? err : new Error(String(err)))
 		}
+		const onAbort = () => fail(abortReason(opts.signal))
 		const onReady = (alpn: Alpn) => {
 			if (settled) return
 			settled = true
@@ -205,6 +226,14 @@ function createTLS(
 			conn.alpn = alpn
 			conn.h2Session = tls.h2Session ?? null
 			conn.h2Transport = tls.h2Transport ?? null
+			if (alpn === 'http/1.1') {
+				// Unlike h2/h3, h1 has no session object to notify us when the peer closes a
+				// pooled socket. Evict on EOF so the pool never hands out a dead transport.
+				const peerGone = () => conn.close('h1-peer-closed')
+				tls.socket?.once('end', peerGone)
+				tls.socket?.once('close', peerGone)
+				tls.h2Transport?.once('end', peerGone)
+			}
 			if (opts.proxyPoolKey && tls.proxyHop) {
 				conn.proxyHop = tls.proxyHop
 				conn.proxyPoolKey = opts.proxyPoolKey
@@ -216,41 +245,36 @@ function createTLS(
 		tls.on('error', (e: Error) => fail(e))
 		tls.connect().catch((e: Error) => fail(e))
 
-		// Per-phase timeouts. Each is optional; without one the connection inherits
-		// only Node's default socket and TLS behavior.
-		const timeouts = opts.timeouts || {}
-		if (timeouts.connect) {
-			connectTimer = setTimeout(() => {
-				// `transportEstablished` covers every establishment path — plain TCP, SOCKS5,
-				// cleartext CONNECT and CONNECT-over-TLS. The old `socket.connecting` probe only
-				// exists on a TCP socket, and a session tunneled through an HTTPS proxy has the
-				// proxy session's Duplex as its socket.
-				if (!tls.transportEstablished) {
-					fail(new HellojsError(`TCP connect timed out after ${timeouts.connect}ms`, 'ETIMEDOUT'))
-				}
-			}, timeouts.connect)
-			connectTimer.unref?.()
-			// Once the transport is established, cancel the connect timer.
-			const onTransportReady = () => {
-				if (connectTimer) {
-					clearTimeout(connectTimer)
-					connectTimer = null
-				}
+		// `transportEstablished` covers every establishment path — plain TCP, SOCKS5,
+		// cleartext CONNECT and CONNECT-over-TLS. Fixed 30s budget, like Chromium's per-attempt
+		// TCP connect timeout; the proxy CONNECT hop has its own matching budget in tls.ts.
+		connectTimer = setTimeout(() => {
+			if (!tls.transportEstablished) {
+				fail(new HellojsError(`TCP connect timed out after ${TCP_CONNECT_ATTEMPT_MS}ms`, 'ETIMEDOUT'))
 			}
-			tls.once('transport-ready', onTransportReady)
+		}, TCP_CONNECT_ATTEMPT_MS)
+		connectTimer.unref?.()
+		const onTransportReady = () => {
+			if (connectTimer) {
+				clearTimeout(connectTimer)
+				connectTimer = null
+			}
 		}
-		if (timeouts.tlsHandshake) {
-			// Start the TLS-handshake stopwatch ONLY when ClientHello actually goes on the
-			// wire, so it doesn't count MLKEM-keypair acquisition + TCP connect + proxy
-			// CONNECT tunnel time. startClientHello re-fires on HRR; arm the timer once.
-			tls.once('handshake-start', () => {
-				if (settled) return
-				handshakeTimer = setTimeout(() => {
-					fail(new HellojsError(`TLS handshake timed out after ${timeouts.tlsHandshake}ms`, 'ETIMEDOUT'))
-				}, timeouts.tlsHandshake)
-				handshakeTimer.unref?.()
-			})
-		}
+		tls.once('transport-ready', onTransportReady)
+
+		// Start the TLS-handshake stopwatch ONLY when ClientHello actually goes on the wire,
+		// so it doesn't count MLKEM-keypair acquisition + TCP connect + proxy CONNECT time.
+		// startClientHello re-fires on HRR; arm the timer once.
+		tls.once('handshake-start', () => {
+			if (settled) return
+			handshakeTimer = setTimeout(() => {
+				fail(new HellojsError(`TLS handshake timed out after ${TLS_HANDSHAKE_MS}ms`, 'ETIMEDOUT'))
+			}, TLS_HANDSHAKE_MS)
+			handshakeTimer.unref?.()
+		})
+
+		if (opts.signal?.aborted) onAbort()
+		else opts.signal?.addEventListener?.('abort', onAbort, { once: true })
 	})
 }
 
@@ -266,24 +290,25 @@ function poolableProxy(proxy: ProxyOptions | null | undefined): proxy is ProxyOp
 	}
 }
 
-async function connect({
+// One connection attempt, bounded internally by the per-phase timers in createTLS/createH3.
+async function connectOnce({
 	host,
 	port = 443,
+	sniHost,
 	profile,
 	proxy,
 	transport = 'tcp',
 	verifyTLS = true,
-	resume = true,
-	timeouts = null
+	signal
 }: ConnectOptions): Promise<Connection> {
 	if (transport === 'quic') {
 		// QUIC/HTTP/3 has no proxy path. Rejecting instead of silently dropping `proxy` is what
-		// makes connectPreferred fall through to TCP, so an `h3: true` request through a proxy
-		// still goes through the proxy rather than straight to the origin.
+		// makes connectPreferred fall through to TCP, so a request through a proxy still goes
+		// through the proxy rather than straight to the origin.
 		if (proxy) {
 			throw new HellojsError('HTTP/3 is not supported through a proxy', 'EBADOPTS')
 		}
-		return createH3(host, port, timeouts)
+		return createH3(host, port, signal, sniHost)
 	}
 
 	let key: string | null = null
@@ -294,10 +319,10 @@ async function connect({
 	}
 	const opts = {
 		verifyTLS,
-		resume,
-		timeouts,
+		signal,
 		proxyHop: hop,
-		proxyPoolKey: key
+		proxyPoolKey: key,
+		sniHost
 	}
 	try {
 		return await createTLS(host, port, profile, proxy, opts)
@@ -310,22 +335,39 @@ async function connect({
 	}
 }
 
-// h3 is opt-in per request and takes priority: start QUIC, and only fall back to TCP + TLS
-// when the handshake cannot complete (an origin with no QUIC endpoint ignores our Initial
-// packets). The budget keeps that fallback bounded — without it the QUIC layer would spend
-// ~55s in Initial retransmits before the TCP attempt begins.
-const DEFAULT_H3_HANDSHAKE_BUDGET_MS = 2_000
-
-async function connectPreferred(opts: ConnectOptions): Promise<Connection> {
-	const quicTimeouts: PerPhaseTimeouts = {
-		...opts.timeouts,
-		connect: opts.timeouts?.connect ?? DEFAULT_H3_HANDSHAKE_BUDGET_MS
-	}
+// Whole-job ceiling: DNS + all establishment phases must finish inside 30s. A caller signal
+// (including AbortSignal.timeout()) can shorten it; it can never lengthen it.
+async function connect(opts: ConnectOptions): Promise<Connection> {
+	const job = new AbortController()
+	const unlink = linkAbort(opts.signal, job)
+	const budget = setTimeout(() => {
+		job.abort(new HellojsError(`connect timed out after ${CONNECT_JOB_TOTAL_MS}ms`, 'ETIMEDOUT'))
+	}, CONNECT_JOB_TOTAL_MS)
+	budget.unref?.()
 	try {
-		return await connect({ ...opts, transport: 'quic', timeouts: quicTimeouts })
+		return await connectOnce({ ...opts, signal: job.signal })
+	} finally {
+		clearTimeout(budget)
+		unlink()
+	}
+}
+
+// Sequential QUIC-then-TCP fallback, kept for low-level/bench callers. The public HTTP path
+// uses lib/transport-race.ts instead, which races both with TCP delayed like Chromium.
+async function connectPreferred(opts: ConnectOptions): Promise<Connection> {
+	try {
+		return await connect({ ...opts, transport: 'quic' })
 	} catch {
 		return connect({ ...opts, transport: 'tcp' })
 	}
 }
 
-export { connect, connectPreferred, Connection }
+export {
+	connect,
+	connectPreferred,
+	Connection,
+	TCP_CONNECT_ATTEMPT_MS,
+	CONNECT_JOB_TOTAL_MS,
+	TLS_HANDSHAKE_MS,
+	QUIC_HANDSHAKE_MS
+}

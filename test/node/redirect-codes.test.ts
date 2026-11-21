@@ -23,7 +23,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import request from '../../index.ts'
 import { listenOnLoopback } from '../helpers/tcp.ts'
 
-import type { RequestOptions } from '../../index.ts'
+import type { FetchInit } from '../../index.ts'
 import type { IncomingHttpHeaders } from 'node:http2'
 
 function genServerCert(): { key: Buffer; cert: Buffer } {
@@ -32,7 +32,7 @@ function genServerCert(): { key: Buffer; cert: Buffer } {
 	const c = path.join(dir, 'c.pem')
 	try {
 		execSync(
-			`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days 1 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null`,
+			`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days 1 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null`
 		)
 		return { key: fs.readFileSync(k), cert: fs.readFileSync(c) }
 	} finally {
@@ -49,7 +49,7 @@ interface Seen {
 // The redirect server routes three families of path:
 //   /from/<status>   -> respond with <status> and, when the code carries a Location, point at /target
 //   /target          -> record method + body, echo them back as 200 JSON
-//   /loop/<n>        -> redirect to itself n more times (for maxRedirects exhaustion)
+//   /loop/<n>        -> redirect to itself n more times (for the 20-hop limit)
 let lastSeen: Seen = {}
 
 let server: http2.Http2SecureServer | null = null
@@ -119,53 +119,53 @@ afterAll(async () => {
 	}
 })
 
-const call = (extra: Record<string, unknown>): RequestOptions => ({
-	verifyTLS: false,
-	timeout: 5000,
-	...extra,
-})
+const req = (url: string, init: FetchInit = {}) => request(url, { verifyTLS: false, ...init })
 
 describe('3xx redirect codes — method/body semantics', () => {
 	it('300 Multiple Choices: no Location → returned as-is, not followed', async () => {
-		const res = await request(call({ url: `${base}/from/300` }))
+		const res = await req(`${base}/from/300`)
 		expect(res.status).toBe(300)
 		expect(res.headers.get('location')).toBeNull()
 		expect(await res.text()).toContain('choices')
 	})
 
 	it('301: GET stays GET and is followed', async () => {
-		await request(call({ url: `${base}/from/301` }))
+		await req(`${base}/from/301`)
 		expect(lastSeen.method).toBe('GET')
 		expect(lastSeen.body).toBe('')
 	})
 
 	it('301: POST downgrades to a bodyless GET', async () => {
-		await request(call({ url: `${base}/from/301`, method: 'POST', body: 'x=1', headers: { 'content-type': 'application/x-www-form-urlencoded' } }))
+		await req(`${base}/from/301`, {
+			method: 'POST',
+			body: 'x=1',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' }
+		})
 		expect(lastSeen.method).toBe('GET')
 		expect(lastSeen.body).toBe('')
 	})
 
 	it('302: GET stays GET and is followed', async () => {
-		await request(call({ url: `${base}/from/302` }))
+		await req(`${base}/from/302`)
 		expect(lastSeen.method).toBe('GET')
 	})
 
 	it('302: POST downgrades to a bodyless GET', async () => {
-		await request(call({ url: `${base}/from/302`, method: 'POST', body: 'x=1' }))
+		await req(`${base}/from/302`, { method: 'POST', body: 'x=1' })
 		expect(lastSeen.method).toBe('GET')
 		expect(lastSeen.body).toBe('')
 	})
 
 	it('303: POST, PUT and PATCH all become a bodyless GET', async () => {
-		for (const verb of ['POST', 'PUT', 'PATCH']) {
-			await request(call({ url: `${base}/from/303`, method: verb, body: 'keep=me' }))
+		for (const verb of ['POST', 'PUT', 'PATCH'] as const) {
+			await req(`${base}/from/303`, { method: verb, body: 'keep=me' })
 			expect(lastSeen.method).toBe('GET')
 			expect(lastSeen.body).toBe('')
 		}
 	})
 
 	it('304 Not Modified: no Location, no body → returned as-is, not followed', async () => {
-		const res = await request(call({ url: `${base}/from/304` }))
+		const res = await req(`${base}/from/304`)
 		expect(res.status).toBe(304)
 		expect(res.headers.get('location')).toBeNull()
 		expect(res.headers.get('etag')).toBe('"v1"')
@@ -173,19 +173,19 @@ describe('3xx redirect codes — method/body semantics', () => {
 	})
 
 	it('307: POST method AND body preserved', async () => {
-		await request(call({ url: `${base}/from/307`, method: 'POST', body: 'preserved=1' }))
+		await req(`${base}/from/307`, { method: 'POST', body: 'preserved=1' })
 		expect(lastSeen.method).toBe('POST')
 		expect(lastSeen.body).toBe('preserved=1')
 	})
 
 	it('307: non-GET verb PUT preserved with body', async () => {
-		await request(call({ url: `${base}/from/307`, method: 'PUT', body: 'put=1' }))
+		await req(`${base}/from/307`, { method: 'PUT', body: 'put=1' })
 		expect(lastSeen.method).toBe('PUT')
 		expect(lastSeen.body).toBe('put=1')
 	})
 
 	it('308: POST method AND body preserved', async () => {
-		await request(call({ url: `${base}/from/308`, method: 'POST', body: 'still=here' }))
+		await req(`${base}/from/308`, { method: 'POST', body: 'still=here' })
 		expect(lastSeen.method).toBe('POST')
 		expect(lastSeen.body).toBe('still=here')
 	})
@@ -193,26 +193,31 @@ describe('3xx redirect codes — method/body semantics', () => {
 
 describe('redirect controls', () => {
 	it("redirect:'manual' stops at the 3xx and surfaces Location", async () => {
-		const res = await request(call({ url: `${base}/from/302`, redirect: 'manual' }))
+		const res = await req(`${base}/from/302`, { redirect: 'manual' })
 		expect(res.status).toBe(302)
 		expect(res.headers.get('location')).toBe('/target')
 	})
 
 	it("redirect:'follow' explicitly follows the 3xx to the target", async () => {
-		const res = await request(call({ url: `${base}/from/302`, redirect: 'follow' }))
+		const res = await req(`${base}/from/302`, { redirect: 'follow' })
 		expect(res.status).toBe(200)
 		expect(lastSeen.method).toBe('GET')
 	})
 
 	it('default (no redirect option) follows', async () => {
-		const res = await request(call({ url: `${base}/from/302` }))
+		const res = await req(`${base}/from/302`)
 		expect(res.status).toBe(200)
 	})
 
-	it('maxRedirects bounds a redirect chain', async () => {
-		// /loop/5 needs 5 hops; a budget of 2 must stop before reaching /target.
-		const res = await request(call({ url: `${base}/loop/5`, maxRedirects: 2 }))
-		expect(res.status).toBe(302)
-		expect(String(res.body)).not.toBe('exhausted')
+	it('follows a short redirect chain to completion', async () => {
+		// /loop/5 needs 5 hops, well under the fixed 20-hop browser limit.
+		const res = await req(`${base}/loop/5`)
+		expect(res.status).toBe(200)
+		expect(await res.text()).toBe('exhausted')
+	})
+
+	it('stops at the fixed 20-hop redirect limit', async () => {
+		// /loop/25 would need 25 hops; browsers follow 20 and reject the 21st.
+		await expect(req(`${base}/loop/25`)).rejects.toMatchObject({ code: 'ETOOMANYREDIRECTS' })
 	})
 })

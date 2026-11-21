@@ -14,7 +14,11 @@ import { TLS } from '../../lib/tls/tls.ts'
 
 import type net from 'node:net'
 
-interface EmittedFingerprint { ja3: string; ja3_str: string; ja4: string }
+interface EmittedFingerprint {
+	ja3: string
+	ja3_str: string
+	ja4: string
+}
 type PeetSample = Parameters<typeof profiles.registerFromPeet>[1]
 
 const SAMPLE_PATH = path.join(import.meta.dirname, '../fixtures/middlebox-tls12-peet.json')
@@ -25,7 +29,12 @@ function emitCh(profileName: string): { tls: TLS; rec: Buffer; parsed: ReturnTyp
 	const tls = new TLS('tls.peet.ws', 443, null, { profile: profileName })
 	const chunks: Buffer[] = []
 	// The test writes into a capturing sink instead of a TCP socket.
-	tls.socket = new Writable({ write(chunk, _enc, cb) { chunks.push(chunk as Buffer); cb() } }) as unknown as net.Socket
+	tls.socket = new Writable({
+		write(chunk, _enc, cb) {
+			chunks.push(chunk as Buffer)
+			cb()
+		}
+	}) as unknown as net.Socket
 	tls.mlkemPk = Buffer.alloc(1184)
 	tls.startClientHello()
 	const rec = Buffer.concat(chunks)
@@ -50,7 +59,8 @@ it('ja3 over chrome147 CH excludes GREASE codepoints in version, ciphers, exts, 
 	expect(verStr).toBe('771')
 	// No GREASE values anywhere in the string parts.
 	const allCodes = [...ciphersStr!.split('-'), ...extsStr!.split('-'), ...groupsStr!.split('-')]
-		.filter(Boolean).map(Number)
+		.filter(Boolean)
+		.map(Number)
 	for (const c of allCodes) expect(isGrease(c), `JA3 contains GREASE ${c.toString(16)}`).toBe(false)
 })
 
@@ -72,7 +82,7 @@ it('ja3 over the middlebox parrot reproduces the fixture hash', () => {
 })
 
 it('ja4 over the middlebox parrot reproduces the JA4_a prefix from the fixture', () => {
-	const expectedPrefix = SAMPLE.tls!.ja4!.split('_')[0]   // e.g. "t12d1310h2"
+	const expectedPrefix = SAMPLE.tls!.ja4!.split('_')[0] // e.g. "t12d1310h2"
 	const { tls } = emitCh('middlebox-tls12-fp')
 	const actualPrefix = tls.actualFingerprint.ja4.split('_')[0]
 	expect(actualPrefix).toBe(expectedPrefix)
@@ -80,10 +90,16 @@ it('ja4 over the middlebox parrot reproduces the JA4_a prefix from the fixture',
 
 it('"fingerprint" event fires synchronously during startClientHello', () => {
 	const tls = new TLS('tls.peet.ws', 443, null, { profile: 'chrome147-mac' })
-	tls.socket = new Writable({ write(_c, _e, cb) { cb() } }) as unknown as net.Socket
+	tls.socket = new Writable({
+		write(_c, _e, cb) {
+			cb()
+		}
+	}) as unknown as net.Socket
 	tls.mlkemPk = Buffer.alloc(1184)
 	const emitted: EmittedFingerprint[] = []
-	tls.on('fingerprint', (fp: EmittedFingerprint) => { emitted.push(fp) })
+	tls.on('fingerprint', (fp: EmittedFingerprint) => {
+		emitted.push(fp)
+	})
 	tls.startClientHello()
 	expect(emitted.length, 'fingerprint event was emitted').toBe(1)
 	expect(emitted[0].ja3).toMatch(/^[0-9a-f]{32}$/)

@@ -36,18 +36,22 @@ function idFrom(m: RegExpExecArray | null): number | null {
 }
 
 const unknownIds = (body: PeetJson): number[] =>
-	(body.tls?.extensions ?? []).map((e) => idFrom(UNKNOWN.exec(String(e.name)))).filter((id): id is number => id !== null)
+	(body.tls?.extensions ?? [])
+		.map((e) => idFrom(UNKNOWN.exec(String(e.name))))
+		.filter((id): id is number => id !== null)
 
 // Every id peet.ws named on the wire, known or not — the superset the unknown ones must appear in.
 const sentIds = (body: PeetJson): Set<number> =>
-	new Set((body.tls?.extensions ?? [])
-		.map((e) => idFrom(TRAILING_ID.exec(String(e.name))) ?? idFrom(UNKNOWN.exec(String(e.name))))
-		.filter((id): id is number => id !== null))
+	new Set(
+		(body.tls?.extensions ?? [])
+			.map((e) => idFrom(TRAILING_ID.exec(String(e.name))) ?? idFrom(UNKNOWN.exec(String(e.name))))
+			.filter((id): id is number => id !== null)
+	)
 
 const known = {
 	ja4: undefined as string | undefined,
 	peetprint: undefined as string | undefined,
-	akamai: undefined as string | undefined,
+	akamai: undefined as string | undefined
 }
 let live: PeetJson = {}
 let fixture: PeetJson = {}
@@ -68,12 +72,14 @@ beforeAll(async () => {
 	// profile object and pass it as opts.headers so their HTTP layer matches Chrome too.
 	const profile = profiles.registerFromPeet('parrot-fixture', fixture)
 
-	live = (await (await request({
-		url: `https://${PEET_HOST}/api/all`,
-		profile: 'parrot-fixture',
-		headers: profile.headers ? { ...profile.headers } : undefined,
-		timeouts: { tlsHandshake: 15_000, response: 15_000 },
-	})).json()) as PeetJson
+	// The old per-phase timeouts collapse into one caller deadline on the signal.
+	live = (await (
+		await request(`https://${PEET_HOST}/api/all`, {
+			profile: 'parrot-fixture',
+			headers: profile.headers ? { ...profile.headers } : undefined,
+			signal: AbortSignal.timeout(30_000)
+		})
+	).json()) as PeetJson
 })
 
 describe.skipIf(!FIXTURE_PATH)('parrot fixture round-trip', () => {

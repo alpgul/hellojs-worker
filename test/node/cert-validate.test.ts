@@ -14,14 +14,21 @@ import { validateChain, hostnameMatches, trustedRoots, setTrustedRoots } from '.
 // openssl is fed paths we generated ourselves under os.tmpdir(); nothing user-controlled reaches it.
 function withCertDir(fn: (dir: string) => void): void {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hjcert-'))
-	try { fn(dir) } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+	try {
+		fn(dir)
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true })
+	}
 }
 
 function genSelfSigned(cn: string, san = `DNS:${cn}`, validity = 1): Buffer {
 	let der!: Buffer
 	withCertDir((dir) => {
-		const k = path.join(dir, 'k.pem'), c = path.join(dir, 'c.pem')
-		execSync(`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days ${validity} -subj "/CN=${cn}" -addext "subjectAltName=${san}" 2>/dev/null`)
+		const k = path.join(dir, 'k.pem'),
+			c = path.join(dir, 'c.pem')
+		execSync(
+			`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days ${validity} -subj "/CN=${cn}" -addext "subjectAltName=${san}" 2>/dev/null`
+		)
 		der = Buffer.from(new crypto.X509Certificate(fs.readFileSync(c)).raw)
 	})
 	return der
@@ -30,8 +37,11 @@ function genSelfSigned(cn: string, san = `DNS:${cn}`, validity = 1): Buffer {
 function genCertPem(cn: string, san: string): string {
 	let pem!: string
 	withCertDir((dir) => {
-		const k = path.join(dir, 'k.pem'), c = path.join(dir, 'c.pem')
-		execSync(`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days 1 -subj "/CN=${cn}" -addext "subjectAltName=${san}" 2>/dev/null`)
+		const k = path.join(dir, 'k.pem'),
+			c = path.join(dir, 'c.pem')
+		execSync(
+			`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days 1 -subj "/CN=${cn}" -addext "subjectAltName=${san}" 2>/dev/null`
+		)
 		pem = fs.readFileSync(c, 'utf8')
 	})
 	return pem
@@ -56,21 +66,27 @@ it('hostnameMatches: case-insensitive', () => {
 })
 
 it('validateChain rejects self-signed not in trust store', () => {
-	expect(validateChain([genSelfSigned('localhost')], 'localhost'))
-		.toEqual({ ok: false, reason: expect.stringMatching(/chain does not terminate in a trusted root/) })
+	expect(validateChain([genSelfSigned('localhost')], 'localhost')).toEqual({
+		ok: false,
+		reason: expect.stringMatching(/chain does not terminate in a trusted root/)
+	})
 })
 
 it('validateChain rejects hostname mismatch', () => {
-	expect(validateChain([genSelfSigned('legit.com')], 'evil.com'))
-		.toEqual({ ok: false, reason: expect.stringMatching(/does not match hostname/) })
+	expect(validateChain([genSelfSigned('legit.com')], 'evil.com')).toEqual({
+		ok: false,
+		reason: expect.stringMatching(/does not match hostname/)
+	})
 })
 
 it('validateChain rejects expired cert (notAfter in past)', () => {
 	// Generate a cert valid for 1 day, then evaluate it 2 days from "now".
 	const der = genSelfSigned('localhost')
 	const future = Date.now() + 2 * 24 * 60 * 60 * 1000
-	expect(validateChain([der], 'localhost', { now: future }))
-		.toEqual({ ok: false, reason: expect.stringMatching(/expired/) })
+	expect(validateChain([der], 'localhost', { now: future })).toEqual({
+		ok: false,
+		reason: expect.stringMatching(/expired/)
+	})
 })
 
 it('validateChain rejects empty chain', () => {

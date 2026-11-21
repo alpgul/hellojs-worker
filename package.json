@@ -1,7 +1,7 @@
 {
   "name": "@unreleased/hellojs",
   "version": "0.6.0",
-  "description": "Custom TLS 1.3 + HTTP/2 + HTTP/3 client mimicking the Chrome 147 fingerprint, with a fetch-compatible API and request.js-style helpers.",
+  "description": "Custom TLS 1.3 + HTTP/2 + HTTP/3 client mimicking the Chrome 147 fingerprint, with a fetch-shaped request(input, init) API and automatic transport selection.",
   "main": "index.ts",
   "type": "module",
   "types": "index.d.ts",

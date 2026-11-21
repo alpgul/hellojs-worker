@@ -3,7 +3,7 @@
 //   import { profiles } from '@unreleased/hellojs'
 //   const json = JSON.parse(fs.readFileSync('./captured.json', 'utf8'))
 //   profiles.register('chrome148-mac', profiles.fromPeet(json))
-//   request({ url: '...', profile: 'chrome148-mac' })
+//   request(url, { profile: 'chrome148-mac' })
 //
 // What gets mirrored (the structural fingerprint — JA3, JA4, akamai_fingerprint):
 //   - Cipher list (order + GREASE placement)
@@ -90,7 +90,7 @@ type IdResult = { id: number; grease?: undefined } | { id?: undefined; grease: t
 // "TLS_AES_128_GCM_SHA256" and hex like "(0x1a1a)".
 const CIPHER_BY_NAME: Record<string, number> = Object.fromEntries(Object.entries(CIPHERS))
 // peet.ws prints the RFC 5746 SCSV without the trailing _SCSV; accept the alias.
-CIPHER_BY_NAME['TLS_EMPTY_RENEGOTIATION_INFO'] = 0x00FF
+CIPHER_BY_NAME['TLS_EMPTY_RENEGOTIATION_INFO'] = 0x00ff
 
 // IANA TLS extension name → ID (https://www.iana.org/assignments/tls-extensiontype-values/).
 // peet.ws annotates them like "supported_groups (10)" — we use the trailing number when present.
@@ -110,58 +110,58 @@ const EXTENSION_NAME_TO_ID: Record<string, number> = {
 	supported_versions: 43,
 	psk_key_exchange_modes: 45,
 	key_share: 51,
-	application_settings: 17613,         // 0x44cd (ALPS v1)
-	application_settings_v2: 17517,      // 0x446d (ALPS v2; if ever seen)
+	application_settings: 17613, // 0x44cd (ALPS v1)
+	application_settings_v2: 17517, // 0x446d (ALPS v2; if ever seen)
 	extensionEncryptedClientHello: 65037, // 0xfe0d
-	extensionRenegotiationInfo: 65281,   // 0xff01
+	extensionRenegotiationInfo: 65281 // 0xff01
 }
 
 // signature_algorithms (RFC 8446 §4.2.3.1) — IANA TLS SignatureScheme registry.
 const SIGALG_BY_NAME: Record<string, number> = {
 	// SHA-1 legacy
-	rsa_pkcs1_sha1:         0x0201,
-	ecdsa_sha1:             0x0203,
+	rsa_pkcs1_sha1: 0x0201,
+	ecdsa_sha1: 0x0203,
 	// PKCS#1 v1.5
-	rsa_pkcs1_sha256:       0x0401,
-	rsa_pkcs1_sha384:       0x0501,
-	rsa_pkcs1_sha512:       0x0601,
+	rsa_pkcs1_sha256: 0x0401,
+	rsa_pkcs1_sha384: 0x0501,
+	rsa_pkcs1_sha512: 0x0601,
 	// ECDSA
 	ecdsa_secp256r1_sha256: 0x0403,
 	ecdsa_secp384r1_sha384: 0x0503,
 	ecdsa_secp521r1_sha512: 0x0603,
 	// RSASSA-PSS w/ RSAE OID
-	rsa_pss_rsae_sha256:    0x0804,
-	rsa_pss_rsae_sha384:    0x0805,
-	rsa_pss_rsae_sha512:    0x0806,
+	rsa_pss_rsae_sha256: 0x0804,
+	rsa_pss_rsae_sha384: 0x0805,
+	rsa_pss_rsae_sha512: 0x0806,
 	// EdDSA
-	ed25519:                0x0807,
-	ed448:                  0x0808,
+	ed25519: 0x0807,
+	ed448: 0x0808,
 	// RSASSA-PSS w/ PSS OID (RFC 8446 — OpenJDK, some middleboxes emit these)
-	rsa_pss_pss_sha256:     0x0809,
-	rsa_pss_pss_sha384:     0x080a,
-	rsa_pss_pss_sha512:     0x080b,
+	rsa_pss_pss_sha256: 0x0809,
+	rsa_pss_pss_sha384: 0x080a,
+	rsa_pss_pss_sha512: 0x080b
 }
 
 // supported_groups (RFC 8446)
 const GROUP_BY_NAME: Record<string, number> = {
-	'P-256':                 0x0017,
-	'P-384':                 0x0018,
-	'P-521':                 0x0019,
-	'X25519':                0x001d,
-	'X448':                  0x001e,
-	'X25519MLKEM768':        0x11ec,
-	'X25519Kyber768':        0x6399,    // legacy hybrid
-	'ffdhe2048':             0x0100,
-	'secp256r1':             0x0017,
-	'secp384r1':             0x0018,
-	'secp521r1':             0x0019,
+	'P-256': 0x0017,
+	'P-384': 0x0018,
+	'P-521': 0x0019,
+	X25519: 0x001d,
+	X448: 0x001e,
+	X25519MLKEM768: 0x11ec,
+	X25519Kyber768: 0x6399, // legacy hybrid
+	ffdhe2048: 0x0100,
+	secp256r1: 0x0017,
+	secp384r1: 0x0018,
+	secp521r1: 0x0019
 }
 
 // cert-compression algorithm names per RFC 8879
 const CERT_COMPRESS_BY_NAME: Record<string, number> = {
-	zlib:   1,
+	zlib: 1,
 	brotli: 2,
-	zstd:   3,
+	zstd: 3
 }
 
 // Helpers for parsing peet.ws's annotated strings:
@@ -277,7 +277,10 @@ function fromPeet(json: PeetJson, opts: { name?: string } = {}): Profile {
 	const cipherCodes: number[] = []
 	for (const c of json.tls.ciphers || []) {
 		const r = cipherFromLabel(c)
-		if (r.grease) { useGrease = true; continue }
+		if (r.grease) {
+			useGrease = true
+			continue
+		}
 		cipherCodes.push(r.code)
 	}
 
@@ -293,7 +296,7 @@ function fromPeet(json: PeetJson, opts: { name?: string } = {}): Profile {
 	// hashes (JA4 / peetprint) that encode 18 extensions will come out as 17 instead on a
 	// cold handshake — this is expected and matches what a cold Chrome does on first contact.
 	const INTERACTIVE_EXT_IDS = new Set([41, 42])
-	const extensionOrder: IdResult[] = []      // [{id} | {grease:true}] preserving the wire order seen
+	const extensionOrder: IdResult[] = [] // [{id} | {grease:true}] preserving the wire order seen
 	// Captured verbatim bodies for extensions that have no first-class builder. Keyed by
 	// numeric extension ID. tls.js registers a CreateRawExtension-based builder for each
 	// entry so the CH emits the exact bytes peet observed. Passive fingerprint extensions
@@ -303,7 +306,7 @@ function fromPeet(json: PeetJson, opts: { name?: string } = {}): Profile {
 	for (const ext of extensions) {
 		const r = extensionIdFromLabel(ext.name)
 		if (r.grease) useGrease = true
-		if (!r.grease && INTERACTIVE_EXT_IDS.has(r.id)) continue   // drop PSK / early_data
+		if (!r.grease && INTERACTIVE_EXT_IDS.has(r.id)) continue // drop PSK / early_data
 		extensionOrder.push(r)
 		// Stash the raw `data` hex blob if peet emitted one. Only meaningful for extensions
 		// that lack a semantic builder — the tls.js merge prefers explicit builders.
@@ -314,7 +317,7 @@ function fromPeet(json: PeetJson, opts: { name?: string } = {}): Profile {
 
 	// Lookup helpers for specific extensions:
 	const findExt = (idOrPredicate: number | ((id: number, e: PeetExtension) => boolean)): PeetExtension | undefined =>
-		extensions.find(e => {
+		extensions.find((e) => {
 			const r = extensionIdFromLabel(e.name)
 			if (r.grease) return false
 			return typeof idOrPredicate === 'function' ? idOrPredicate(r.id, e) : r.id === idOrPredicate
@@ -326,7 +329,10 @@ function fromPeet(json: PeetJson, opts: { name?: string } = {}): Profile {
 	const supportedGroups: number[] = []
 	for (const g of groupsExt.supported_groups || []) {
 		const r = groupFromLabel(g)
-		if (r.grease) { useGrease = true; continue }
+		if (r.grease) {
+			useGrease = true
+			continue
+		}
 		supportedGroups.push(r.code)
 	}
 
@@ -340,7 +346,10 @@ function fromPeet(json: PeetJson, opts: { name?: string } = {}): Profile {
 	if (versionsExt) {
 		for (const v of versionsExt.versions || []) {
 			const r = versionFromLabel(v)
-			if (r.grease) { useGrease = true; continue }
+			if (r.grease) {
+				useGrease = true
+				continue
+			}
 			supportedVersions.push(r.code)
 		}
 	}
@@ -365,7 +374,10 @@ function fromPeet(json: PeetJson, opts: { name?: string } = {}): Profile {
 		for (const entry of ksExt.shared_keys) {
 			const label = Object.keys(entry)[0]
 			const r = groupFromLabel(label)
-			if (r.grease) { useGrease = true; continue }
+			if (r.grease) {
+				useGrease = true
+				continue
+			}
 			keyShareGroups.push(r.code)
 		}
 	} else {
@@ -381,11 +393,12 @@ function fromPeet(json: PeetJson, opts: { name?: string } = {}): Profile {
 	// compress_certificate (27)
 	const ccExt = findExt(27)
 	const certCompressionAlgorithms: number[] = []
-	if (ccExt) for (const a of ccExt.algorithms || []) {
-		const aname = stripParenSuffix(a)
-		const code = CERT_COMPRESS_BY_NAME[aname] ?? extractNum(a) ?? extractHex(a)
-		if (code != null) certCompressionAlgorithms.push(code)
-	}
+	if (ccExt)
+		for (const a of ccExt.algorithms || []) {
+			const aname = stripParenSuffix(a)
+			const code = CERT_COMPRESS_BY_NAME[aname] ?? extractNum(a) ?? extractHex(a)
+			if (code != null) certCompressionAlgorithms.push(code)
+		}
 
 	// padding (21) — Safari emits this with a captured body length; Chrome 147 omits it.
 	const padExt = findExt(21)
@@ -418,30 +431,36 @@ function fromPeet(json: PeetJson, opts: { name?: string } = {}): Profile {
 	// status_request (5) — peet renders the responder_id_list_length / request_extensions_length
 	// fields (usually 0/0 in Chrome). Some non-Chrome clients send non-zero values.
 	const statusReqExt = findExt(5)
-	const statusRequest = statusReqExt ? {
-		certificateStatusType: toCode(statusReqExt.status_request?.certificate_status_type ?? 'OSCP (1)', null) ?? 1,
-		responderIdListLength: statusReqExt.status_request?.responder_id_list_length ?? 0,
-		requestExtensionsLength: statusReqExt.status_request?.request_extensions_length ?? 0,
-	} : null
+	const statusRequest = statusReqExt
+		? {
+				certificateStatusType:
+					toCode(statusReqExt.status_request?.certificate_status_type ?? 'OSCP (1)', null) ?? 1,
+				responderIdListLength: statusReqExt.status_request?.responder_id_list_length ?? 0,
+				requestExtensionsLength: statusReqExt.status_request?.request_extensions_length ?? 0
+			}
+		: null
 
 	// status_request_v2 (17) — RFC 6961; rare outside of OpenJDK / older middleboxes.
 	const statusReqV2Ext = findExt(17)
-	const statusRequestV2 = statusReqV2Ext ? {
-		certificateStatusType: toCode(statusReqV2Ext.status_request?.certificate_status_type ?? 'OSCP (2)', null) ?? 2,
-		responderIdListLength: statusReqV2Ext.status_request?.responder_id_list_length ?? 0,
-		requestExtensionsLength: statusReqV2Ext.status_request?.request_extensions_length ?? 0,
-	} : null
+	const statusRequestV2 = statusReqV2Ext
+		? {
+				certificateStatusType:
+					toCode(statusReqV2Ext.status_request?.certificate_status_type ?? 'OSCP (2)', null) ?? 2,
+				responderIdListLength: statusReqV2Ext.status_request?.responder_id_list_length ?? 0,
+				requestExtensionsLength: statusReqV2Ext.status_request?.request_extensions_length ?? 0
+			}
+		: null
 
 	// ---- HTTP/2 ----
 	const h2 = json.http2
 	// Some clients emit two SETTINGS frames in the preface — an empty one then a populated one.
 	// Pick the first SETTINGS frame that actually has settings; fall back to the first.
-	const settingsFrames = (h2.sent_frames || []).filter(f => f.frame_type === 'SETTINGS')
-	const sentSettings = settingsFrames.find(f => Array.isArray(f.settings) && f.settings.length) || settingsFrames[0]
+	const settingsFrames = (h2.sent_frames || []).filter((f) => f.frame_type === 'SETTINGS')
+	const sentSettings = settingsFrames.find((f) => Array.isArray(f.settings) && f.settings.length) || settingsFrames[0]
 	const settings: Http2Settings = {}
 	if (sentSettings) {
 		for (const s of sentSettings.settings || []) {
-			const [name, val] = s.split('=').map(x => x.trim())
+			const [name, val] = s.split('=').map((x) => x.trim())
 			const v = Number.parseInt(val, 10)
 			if (name === 'HEADER_TABLE_SIZE') settings.headerTableSize = v
 			else if (name === 'ENABLE_PUSH') settings.enablePush = v !== 0
@@ -452,14 +471,19 @@ function fromPeet(json: PeetJson, opts: { name?: string } = {}): Profile {
 			else if (name === 'NO_RFC7540_PRIORITIES') settings.noRfc7540Priorities = v
 		}
 	}
-	const winFrame = (h2.sent_frames || []).find(f => f.frame_type === 'WINDOW_UPDATE')
+	const winFrame = (h2.sent_frames || []).find((f) => f.frame_type === 'WINDOW_UPDATE')
 	const windowUpdateIncrement = winFrame ? winFrame.increment : 15663105
 
-	const headersFrame = (h2.sent_frames || []).find(f => f.frame_type === 'HEADERS')
-	const sendPriorityFrame = headersFrame ? (headersFrame.flags || []).some(f => f.includes('Priority')) : false
-	const priority = headersFrame && headersFrame.priority
-		? { weight: headersFrame.priority.weight, exclusive: !!headersFrame.priority.exclusive, parent: headersFrame.priority.depends_on || 0 }
-		: { weight: 256, exclusive: true, parent: 0 }
+	const headersFrame = (h2.sent_frames || []).find((f) => f.frame_type === 'HEADERS')
+	const sendPriorityFrame = headersFrame ? (headersFrame.flags || []).some((f) => f.includes('Priority')) : false
+	const priority =
+		headersFrame && headersFrame.priority
+			? {
+					weight: headersFrame.priority.weight,
+					exclusive: !!headersFrame.priority.exclusive,
+					parent: headersFrame.priority.depends_on || 0
+				}
+			: { weight: 256, exclusive: true, parent: 0 }
 
 	// Header order: pseudo-headers come first (peet preserves order). Build:
 	//   pseudoHeaderOrder = first run of ':*' headers
@@ -492,10 +516,10 @@ function fromPeet(json: PeetJson, opts: { name?: string } = {}): Profile {
 		source: 'peet',
 		// Reference hashes for self-verification — see the integration test:
 		expected: {
-			ja3:               json.tls.ja3_hash,
-			ja4:               json.tls.ja4,
+			ja3: json.tls.ja3_hash,
+			ja4: json.tls.ja4,
 			akamai_fingerprint: json.http2.akamai_fingerprint_hash,
-			peetprint:         json.tls.peetprint_hash,
+			peetprint: json.tls.peetprint_hash
 		},
 
 		tls: {
@@ -521,7 +545,7 @@ function fromPeet(json: PeetJson, opts: { name?: string } = {}): Profile {
 			paddingLength,
 			statusRequest,
 			statusRequestV2,
-			useGrease,
+			useGrease
 		},
 
 		http2: {
@@ -529,11 +553,13 @@ function fromPeet(json: PeetJson, opts: { name?: string } = {}): Profile {
 			windowUpdateIncrement,
 			sendPriorityFrame,
 			priority,
-			pseudoHeaderOrder: pseudoHeaderOrder.length ? pseudoHeaderOrder : [':method', ':authority', ':scheme', ':path'],
+			pseudoHeaderOrder: pseudoHeaderOrder.length
+				? pseudoHeaderOrder
+				: [':method', ':authority', ':scheme', ':path']
 		},
 
 		headers: Object.freeze(defaultHeaders),
-		userAgent: userAgent || 'Mozilla/5.0',
+		userAgent: userAgent || 'Mozilla/5.0'
 	}
 }
 

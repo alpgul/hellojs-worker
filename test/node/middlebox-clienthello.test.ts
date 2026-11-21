@@ -20,7 +20,11 @@ const SAMPLE = JSON.parse(fs.readFileSync(SAMPLE_PATH, 'utf8')) as PeetSample
 
 // Minimal ClientHello parser. Returns { ciphers, extensionIds, extensionMap } where
 // extensionMap[id] is the extension body Buffer (without the 4-byte header).
-interface ParsedCh { ciphers: number[]; extensionIds: number[]; extensionMap: Record<number, Buffer> }
+interface ParsedCh {
+	ciphers: number[]
+	extensionIds: number[]
+	extensionMap: Record<number, Buffer>
+}
 
 function parseClientHello(rec: Buffer): ParsedCh {
 	// Record header (5) + handshake header (4) → ClientHello body
@@ -32,21 +36,27 @@ function parseClientHello(rec: Buffer): ParsedCh {
 	const hsLen = (hs[1] << 16) | (hs[2] << 8) | hs[3]
 	expect(4 + hsLen, 'handshake length matches').toBe(hs.length)
 	let o = 4
-	o += 2          // legacy_version
-	o += 32         // random
-	const sidLen = hs[o]; o += 1 + sidLen
-	const csLen = hs.readUInt16BE(o); o += 2
+	o += 2 // legacy_version
+	o += 32 // random
+	const sidLen = hs[o]
+	o += 1 + sidLen
+	const csLen = hs.readUInt16BE(o)
+	o += 2
 	const ciphers: number[] = []
 	for (let i = 0; i < csLen; i += 2) ciphers.push(hs.readUInt16BE(o + i))
 	o += csLen
-	const cmLen = hs[o]; o += 1 + cmLen   // compression methods
-	const extsLen = hs.readUInt16BE(o); o += 2
+	const cmLen = hs[o]
+	o += 1 + cmLen // compression methods
+	const extsLen = hs.readUInt16BE(o)
+	o += 2
 	const extsEnd = o + extsLen
 	const extensionIds: number[] = []
 	const extensionMap: Record<number, Buffer> = {}
 	while (o < extsEnd) {
-		const id = hs.readUInt16BE(o); o += 2
-		const len = hs.readUInt16BE(o); o += 2
+		const id = hs.readUInt16BE(o)
+		o += 2
+		const len = hs.readUInt16BE(o)
+		o += 2
 		extensionIds.push(id)
 		extensionMap[id] = hs.subarray(o, o + len)
 		o += len
@@ -60,7 +70,10 @@ function makeTls(profileName: string): { tls: TLS; getCh: () => Buffer } {
 	// startClientHello writes to this.socket.write — install a buffer-capturing fake.
 	const chunks: Buffer[] = []
 	tls.socket = new Writable({
-		write(chunk, _enc, cb) { chunks.push(chunk as Buffer); cb() },
+		write(chunk, _enc, cb) {
+			chunks.push(chunk as Buffer)
+			cb()
+		}
 	}) as unknown as net.Socket
 	// In TLS 1.2-only mode startClientHello uses this.mlkemPk only when _profileNeedsMlkem();
 	// for TLS 1.3 profiles set a stub here so we don't have to call connect() (which opens TCP).
@@ -80,8 +93,10 @@ it('middlebox parrot composes a valid ClientHello with the right shape', () => {
 
 	// (Phase 1) Cipher list: SCSV (0x00ff) present, no GREASE codepoint.
 	expect(ciphers.includes(0x00ff), 'SCSV (0x00ff) in cipher list').toBe(true)
-	expect(ciphers.every((c) => (c & 0x0f0f) !== 0x0a0a),
-		'no GREASE codepoint in cipher list when useGrease=false').toBe(true)
+	expect(
+		ciphers.every((c) => (c & 0x0f0f) !== 0x0a0a),
+		'no GREASE codepoint in cipher list when useGrease=false'
+	).toBe(true)
 
 	// (Phase 2) Extensions 17 and 50 emitted (not silently dropped).
 	expect(extensionIds.includes(17), 'status_request_v2 (17) in ClientHello').toBe(true)
@@ -90,13 +105,17 @@ it('middlebox parrot composes a valid ClientHello with the right shape', () => {
 	// (Phase 2) signature_algorithms_cert body must equal the raw bytes captured from peet.
 	const expectedRaw = Buffer.from(
 		'00260403050306030804080508060809080a080b0401050106010402030303010302020302010202',
-		'hex')
-	expect(expectedRaw.equals(extensionMap[50]),
-		'signature_algorithms_cert body is byte-identical to fixture').toBe(true)
+		'hex'
+	)
+	expect(expectedRaw.equals(extensionMap[50]), 'signature_algorithms_cert body is byte-identical to fixture').toBe(
+		true
+	)
 
 	// (Phase 3) No GREASE extension bookends.
-	expect(extensionIds.every((id) => (id & 0x0f0f) !== 0x0a0a),
-		'no GREASE extension when useGrease=false').toBe(true)
+	expect(
+		extensionIds.every((id) => (id & 0x0f0f) !== 0x0a0a),
+		'no GREASE extension when useGrease=false'
+	).toBe(true)
 
 	// (Phase 4) No key_share (id 51) — the profile is TLS-1.2-only.
 	expect(extensionIds.includes(51), 'no key_share for TLS-1.2-only profile').toBe(false)
@@ -153,8 +172,8 @@ function registerTls12RuntimeProfile(sourceName: string, runtimeName: string) {
 				: source.tls.keyShareGroups,
 			extensionOrder: Array.isArray(source.tls.extensionOrder)
 				? source.tls.extensionOrder.filter((e) => e?.id !== 51)
-				: source.tls.extensionOrder,
-		},
+				: source.tls.extensionOrder
+		}
 	})
 }
 

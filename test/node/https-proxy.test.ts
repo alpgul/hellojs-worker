@@ -27,7 +27,7 @@ import { get as getProfile } from '../../lib/profiles/index.ts'
 import { ja3, parseClientHello } from '../../lib/tls/fingerprint.ts'
 import { TLS } from '../../lib/tls/tls.ts'
 
-import type { RequestOptions } from '../../index.ts'
+import type { FetchInit } from '../../index.ts'
 import type { Profile } from '../../lib/profiles/types.ts'
 
 // Self-signed pair for the proxy and the origin; both are trusted by nothing, so requests here run
@@ -38,7 +38,7 @@ function genServerCert(): { key: Buffer; cert: Buffer } {
 	const c = path.join(dir, 'c.pem')
 	try {
 		execSync(
-			`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days 1 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null`,
+			`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days 1 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null`
 		)
 		return { key: fs.readFileSync(k), cert: fs.readFileSync(c) }
 	} finally {
@@ -85,7 +85,9 @@ function startTlsProxy(
 	const targets = new Set<net.Socket>()
 	const server = tls.createServer({ key, cert, ALPNProtocols: ['http/1.1'] }, (sock) => {
 		clients.add(sock)
-		sock.on('error', () => { /* client tears down mid-test; assertions do not depend on it */ })
+		sock.on('error', () => {
+			/* client tears down mid-test; assertions do not depend on it */
+		})
 		let buf = Buffer.alloc(0)
 		sock.on('data', (chunk) => {
 			if (state.connectRequest) {
@@ -147,13 +149,21 @@ function startTlsProxy(
 
 // The origin: a TLS server that speaks one HTTP/1.1 response, so the inner handshake and the
 // tunnel both have to work for the request to come back.
-function startTlsOrigin(key: Buffer, cert: Buffer, body: string): Promise<{ port: number; close: () => Promise<void> }> {
+function startTlsOrigin(
+	key: Buffer,
+	cert: Buffer,
+	body: string
+): Promise<{ port: number; close: () => Promise<void> }> {
 	const clients = new Set<tls.TLSSocket>()
 	const server = tls.createServer({ key, cert, ALPNProtocols: ['http/1.1'] }, (sock) => {
 		clients.add(sock)
-		sock.on('error', () => { /* half-closed client */ })
+		sock.on('error', () => {
+			/* half-closed client */
+		})
 		sock.on('data', () => {
-			sock.end(`HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: ${body.length}\r\nconnection: close\r\n\r\n${body}`)
+			sock.end(
+				`HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: ${body.length}\r\nconnection: close\r\n\r\n${body}`
+			)
 		})
 	})
 	return new Promise((resolve) => {
@@ -162,10 +172,11 @@ function startTlsOrigin(key: Buffer, cert: Buffer, body: string): Promise<{ port
 			if (!addr || typeof addr === 'string') throw new Error('expected a bound TCP port')
 			resolve({
 				port: addr.port,
-				close: () => new Promise<void>((r) => {
-					for (const c of clients) c.destroy()
-					server.close(() => r())
-				})
+				close: () =>
+					new Promise<void>((r) => {
+						for (const c of clients) c.destroy()
+						server.close(() => r())
+					})
 			})
 		})
 	})
@@ -199,15 +210,17 @@ async function waitFor(cond: () => boolean, ms = 3000): Promise<void> {
 	}
 }
 
-const full = (extra: Record<string, unknown>): RequestOptions => ({
-	verifyTLS: false,
-	timeout: 8000,
-	...extra,
-})
+const full = (opts: { url: string } & FetchInit) => {
+	const { url, ...init } = opts
+	return request(url, { verifyTLS: false, ...init })
+}
 
 let key: Buffer
 let cert: Buffer
-interface Origin { port: number; close: () => Promise<void> }
+interface Origin {
+	port: number
+	close: () => Promise<void>
+}
 // A closed no-op stands in until a test starts one, so afterAll and every test can call close()
 // without a null check.
 let origin: Origin = { port: 0, close: async () => {} }
@@ -234,10 +247,10 @@ it('HTTPS proxy: the request round-trips through the tunnel', async () => {
 	const originPort = await withOrigins('proxied-ok')
 	proxy = await startTlsProxy(key, cert)
 
-	const res = await request(full({
+	const res = await full({
 		url: `https://127.0.0.1:${originPort}/`,
-		proxy: { url: `https://localhost:${proxy.port}` },
-	}))
+		proxy: { url: `https://localhost:${proxy.port}` }
+	})
 	expect(res.status).toBe(200)
 	expect(await res.text()).toBe('proxied-ok')
 	expect(proxy.connectRequest).toMatch(new RegExp(`^CONNECT 127\\.0\\.0\\.1:${originPort} HTTP/1\\.1`))
@@ -252,10 +265,10 @@ it('the CONNECT pre-tile travels encrypted, and the proxy sees the proxy hostnam
 	const originPort = await withOrigins('encrypted-ok')
 	proxy = await startTlsProxy(key, cert)
 
-	const res = await request(full({
+	const res = await full({
 		url: `https://127.0.0.1:${originPort}/`,
-		proxy: { url: `https://localhost:${proxy.port}` },
-	}))
+		proxy: { url: `https://localhost:${proxy.port}` }
+	})
 	expect(await res.text()).toBe('encrypted-ok')
 	// The pre-tile was decoded from a TLS session, so it cannot have been sent in the clear.
 	expect(proxy.alpn).toBe('http/1.1')
@@ -271,7 +284,7 @@ it('cleartext CONNECT to a TLS proxy port cannot work', async () => {
 	proxy = await startTlsProxy(key, cert)
 
 	await expect(
-		request(full({ url: `https://127.0.0.1:${originPort}/`, proxy: { url: `http://localhost:${proxy.port}` } }))
+		full({ url: `https://127.0.0.1:${originPort}/`, proxy: { url: `http://localhost:${proxy.port}` } })
 	).rejects.toThrow()
 	// The proxy never produced a CONNECT request line: the client's first bytes were a ClientHello,
 	// which is exactly what the https:// scheme is for.
@@ -287,26 +300,26 @@ it('Proxy-Authorization is sent from URL credentials and omitted without them', 
 	const expected = 'Basic ' + Buffer.from('alice:secret').toString('base64')
 	proxy = await startTlsProxy(key, cert)
 
-	const res = await request(full({
+	const res = await full({
 		url: `https://127.0.0.1:${originPort}/`,
-		proxy: { url: `https://alice:secret@localhost:${proxy.port}` },
-	}))
+		proxy: { url: `https://alice:secret@localhost:${proxy.port}` }
+	})
 	expect(await res.text()).toBe('auth-ok')
 	expect(proxy.connectRequest).toContain(`Proxy-Authorization: ${expected}`)
 	await proxy.close()
 
 	proxy = await startTlsProxy(key, cert)
-	await request(full({ url: `https://127.0.0.1:${originPort}/`, proxy: { url: `https://localhost:${proxy.port}` } }))
+	await full({ url: `https://127.0.0.1:${originPort}/`, proxy: { url: `https://localhost:${proxy.port}` } })
 	expect(proxy.connectRequest).not.toMatch(/Proxy-Authorization/i)
 	await proxy.close()
 
 	// Percent-encoded userinfo is decoded before it becomes Basic credentials.
 	proxy = await startTlsProxy(key, cert)
 	const encoded = 'Basic ' + Buffer.from('a<b:c/d').toString('base64')
-	await request(full({
+	await full({
 		url: `https://127.0.0.1:${originPort}/`,
-		proxy: { url: `https://a%3Cb:c%2Fd@localhost:${proxy.port}` },
-	}))
+		proxy: { url: `https://a%3Cb:c%2Fd@localhost:${proxy.port}` }
+	})
 	expect(proxy.connectRequest).toContain(`Proxy-Authorization: ${encoded}`)
 	await proxy.close()
 
@@ -319,10 +332,10 @@ it('a non-2xx CONNECT answer rejects as EPROXY, status line included', async () 
 
 	for (const status of ['407 Proxy Authentication Required', '502 Bad Gateway']) {
 		proxy = await startTlsProxy(key, cert, () => `HTTP/1.1 ${status}\r\n\r\n`)
-		const err = await request(full({
+		const err = (await full({
 			url: `https://127.0.0.1:${originPort}/`,
-			proxy: { url: `https://localhost:${proxy.port}` },
-		})).catch((e: Error) => e) as Error & { code?: string; category?: string }
+			proxy: { url: `https://localhost:${proxy.port}` }
+		}).catch((e: Error) => e)) as Error & { code?: string; category?: string }
 		expect(err).toBeInstanceOf(Error)
 		expect(err.code).toBe('EPROXY')
 		expect(err.category).toBe('transport')
@@ -338,11 +351,9 @@ it('an untrusted proxy certificate is rejected by default, as EPROXY', async () 
 	const originPort = await withOrigins('nope')
 	proxy = await startTlsProxy(key, cert)
 
-	const err = await request({
-		timeout: 8000,
-		url: `https://127.0.0.1:${originPort}/`,
-		proxy: { url: `https://localhost:${proxy.port}` },
-	} as RequestOptions).catch((e: Error) => e) as Error & { code?: string }
+	const err = (await request(`https://127.0.0.1:${originPort}/`, {
+		proxy: { url: `https://localhost:${proxy.port}` }
+	}).catch((e: Error) => e)) as Error & { code?: string }
 	expect(err.code).toBe('EPROXY')
 	expect(err.message).toMatch(/Proxy TLS handshake failed/)
 
@@ -390,15 +401,14 @@ it('the origin sees the same ClientHello as unproxied, and only that one is repo
 	proxy = null
 }, 25000)
 
-it('h3 through a proxy falls back to TCP+CONNECT instead of bypassing it', async () => {
+it('a proxy tunnel always uses CONNECT, whichever transport is selected', async () => {
 	const originPort = await withOrigins('h3-fallback')
 	proxy = await startTlsProxy(key, cert)
 
-	const res = await request(full({
+	const res = await full({
 		url: `https://127.0.0.1:${originPort}/`,
-		proxy: { url: `https://localhost:${proxy.port}` },
-		h3: true,
-	}))
+		proxy: { url: `https://localhost:${proxy.port}` }
+	})
 	expect(await res.text()).toBe('h3-fallback')
 	expect(proxy.connectRequest).toMatch(/^CONNECT /)
 
@@ -407,15 +417,15 @@ it('h3 through a proxy falls back to TCP+CONNECT instead of bypassing it', async
 	proxy = null
 }, 20000)
 
-it('timeouts.connect covers the proxy hop without a false timeout', async () => {
+it('a caller-supplied deadline bounds the proxy hop without a false timeout', async () => {
 	const originPort = await withOrigins('timed-ok')
 	proxy = await startTlsProxy(key, cert)
 
-	const res = await request(full({
+	const res = await full({
 		url: `https://127.0.0.1:${originPort}/`,
 		proxy: { url: `https://localhost:${proxy.port}` },
-		timeouts: { connect: 5000 },
-	}))
+		signal: AbortSignal.timeout(5000)
+	})
 	expect(await res.text()).toBe('timed-ok')
 
 	await proxy.close()
@@ -428,10 +438,10 @@ it('a proxy that dies right after opening the tunnel fails the request', async (
 	proxy = await startTlsProxy(key, cert, undefined, true)
 
 	const t0 = Date.now()
-	const err = await request(full({
+	const err = (await full({
 		url: `https://127.0.0.1:${originPort}/`,
-		proxy: { url: `https://localhost:${proxy.port}` },
-	})).catch((e: Error) => e) as Error & { code?: string }
+		proxy: { url: `https://localhost:${proxy.port}` }
+	}).catch((e: Error) => e)) as Error & { code?: string }
 	// Before the fix this hung: the outer session handed the tunnel a clean EOF and the destination
 	// handshake sat on it. The cleartext path fails the same way, from its TCP socket.
 	expect(err).toBeInstanceOf(Error)
@@ -443,20 +453,22 @@ it('a proxy that dies right after opening the tunnel fails the request', async (
 	proxy = null
 }, 20000)
 
-it('a proxy that accepts TCP and stalls the TLS handshake is bounded', async () => {
+it('a caller-supplied deadline bounds a proxy TLS handshake stall', async () => {
 	const originPort = await withOrigins('nope')
 	// Speaks no TLS at all: reads the ClientHello, never answers.
-	const sink = new net.Server((sock) => { sock.on('data', () => {}) })
+	const sink = new net.Server((sock) => {
+		sock.on('data', () => {})
+	})
 	await new Promise<void>((resolve) => sink.listen({ port: 0, host: '127.0.0.1' }, () => resolve()))
 	const sinkAddr = sink.address()
 	if (!sinkAddr || typeof sinkAddr === 'string') throw new Error('expected a bound TCP port')
 
-	const err = await request(full({
+	const err = (await full({
 		url: `https://127.0.0.1:${originPort}/`,
 		proxy: { url: `https://localhost:${sinkAddr.port}` },
-		timeouts: { connect: 1500 },
-	})).catch((e: Error) => e) as Error & { code?: string }
-	expect(err.code).toBe('ETIMEDOUT')
+		signal: AbortSignal.timeout(1500)
+	}).catch((e: Error) => e)) as Error & { name?: string }
+	expect(err.name).toBe('TimeoutError')
 
 	sink.close()
 	await origin.close()
@@ -487,16 +499,18 @@ it('regression: cleartext http:// CONNECT proxying still round-trips', async () 
 			targets.add(target)
 			target.on('error', () => sock.destroy())
 		})
-		sock.on('error', () => { /* half-closed client */ })
+		sock.on('error', () => {
+			/* half-closed client */
+		})
 	})
 	await new Promise<void>((resolve) => plainProxy.listen({ port: 0, host: '127.0.0.1' }, () => resolve()))
 	const proxyAddr = plainProxy.address()
 	if (!proxyAddr || typeof proxyAddr === 'string') throw new Error('expected a bound TCP port')
 
-	const res = await request(full({
+	const res = await full({
 		url: `https://127.0.0.1:${originPort}/`,
-		proxy: { url: `http://127.0.0.1:${proxyAddr.port}` },
-	}))
+		proxy: { url: `http://127.0.0.1:${proxyAddr.port}` }
+	})
 	expect(await res.text()).toBe('clear-ok')
 	expect(connectRequest).toMatch(new RegExp(`^CONNECT 127\\.0\\.0\\.1:${originPort} HTTP/1\\.1`))
 
@@ -506,25 +520,26 @@ it('regression: cleartext http:// CONNECT proxying still round-trips', async () 
 	await origin.close()
 }, 20000)
 
-
 // A proxy that answers 200 only for the exact token it issued. Without the hook the tunnel opens
 // for any Proxy-Authorization value, which proves ordering but not that the credential is real.
-const requireAuth = (token: string) => (req: string): string => {
-	const lines = req.split('\r\n').filter((line) => /^proxy-authorization:/i.test(line))
-	return lines.length === 1 && lines[0] === `Proxy-Authorization: ${token}`
-		? 'HTTP/1.1 200 Connection established\r\n\r\n'
-		: 'HTTP/1.1 407 Proxy Authentication Required\r\n\r\n'
-}
+const requireAuth =
+	(token: string) =>
+	(req: string): string => {
+		const lines = req.split('\r\n').filter((line) => /^proxy-authorization:/i.test(line))
+		return lines.length === 1 && lines[0] === `Proxy-Authorization: ${token}`
+			? 'HTTP/1.1 200 Connection established\r\n\r\n'
+			: 'HTTP/1.1 407 Proxy Authentication Required\r\n\r\n'
+	}
 
 it('proxy.authorization overrides URL Basic auth and the proxy accepts the bearer', async () => {
 	const originPort = await withOrigins('bearer-ok')
 	const bearer = 'Bearer eyJhbGciOiJIUzI1NiJ9.test.signature'
 	proxy = await startTlsProxy(key, cert, requireAuth(bearer))
 
-	const res = await request(full({
+	const res = await full({
 		url: `https://127.0.0.1:${originPort}/`,
-		proxy: { url: `https://ignored:creds@localhost:${proxy.port}`, authorization: bearer },
-	}))
+		proxy: { url: `https://ignored:creds@localhost:${proxy.port}`, authorization: bearer }
+	})
 	expect(await res.text()).toBe('bearer-ok')
 	expect(proxy.connectRequest).toContain(`Proxy-Authorization: ${bearer}`)
 	// Exactly one line: the URL credentials lose to the explicit value instead of joining it.
@@ -540,10 +555,10 @@ it('proxy.authorization authenticates a proxy URL that carries no credentials', 
 	const bearer = 'Bearer headerless-tunnel'
 	proxy = await startTlsProxy(key, cert, requireAuth(bearer))
 
-	const res = await request(full({
+	const res = await full({
 		url: `https://127.0.0.1:${originPort}/`,
-		proxy: { url: `https://localhost:${proxy.port}`, authorization: bearer },
-	}))
+		proxy: { url: `https://localhost:${proxy.port}`, authorization: bearer }
+	})
 	expect(await res.text()).toBe('bearer-ok')
 
 	await proxy.close()
@@ -555,10 +570,10 @@ it('a bearer the proxy refuses rejects as EPROXY with the 407 status line', asyn
 	const originPort = await withOrigins('nope')
 	proxy = await startTlsProxy(key, cert, requireAuth('Bearer expected-token'))
 
-	const err = await request(full({
+	const err = (await full({
 		url: `https://127.0.0.1:${originPort}/`,
-		proxy: { url: `https://localhost:${proxy.port}`, authorization: 'Bearer wrong-token' },
-	})).catch((e: Error) => e) as Error & { code?: string; category?: string }
+		proxy: { url: `https://localhost:${proxy.port}`, authorization: 'Bearer wrong-token' }
+	}).catch((e: Error) => e)) as Error & { code?: string; category?: string }
 	expect(err.code).toBe('EPROXY')
 	expect(err.category).toBe('transport')
 	expect(err.message).toContain('407')
@@ -579,10 +594,10 @@ it('a blank proxy.authorization sends no Proxy-Authorization, URL credentials in
 
 	for (const extra of [{ authorization: '' }, { headers: { 'proxy-authorization': '   ' } }]) {
 		proxy = await startTlsProxy(key, cert, anonymousOnly)
-		const res = await request(full({
+		const res = await full({
 			url: `https://127.0.0.1:${originPort}/`,
-			proxy: { url: `https://alice:secret@localhost:${proxy.port}`, ...extra },
-		}))
+			proxy: { url: `https://alice:secret@localhost:${proxy.port}`, ...extra }
+		})
 		expect(await res.text()).toBe('anon-ok')
 		expect(proxy.connectRequest, JSON.stringify(extra)).not.toMatch(/Proxy-Authorization/i)
 		await proxy.close()
@@ -597,13 +612,13 @@ it('proxy.headers adds CONNECT headers and its proxy-authorization outranks URL 
 	const bearer = 'Bearer from-proxy-headers'
 	proxy = await startTlsProxy(key, cert, requireAuth(bearer))
 
-	const res = await request(full({
+	const res = await full({
 		url: `https://127.0.0.1:${originPort}/`,
 		proxy: {
 			url: `https://ignored:creds@localhost:${proxy.port}`,
-			headers: { 'X-Jwt-Kid': 'a1', 'Proxy-Authorization': bearer },
-		},
-	}))
+			headers: { 'X-Jwt-Kid': 'a1', 'Proxy-Authorization': bearer }
+		}
+	})
 	expect(await res.text()).toBe('hdr-ok')
 	// CONNECT headers are emitted lowercased; the auth slot is filled from proxy.headers before the
 	// URL is consulted, so Basic never appears.
@@ -627,12 +642,14 @@ it('a CONNECT-reframing proxy.authorization/proxy.headers rejects as EBADOPTS, b
 		{ headers: { '': 'v' } },
 		{ headers: { host: 'evil.example' } },
 		{ headers: { 'Proxy-Connection': 'keep-alive' } },
-		{ headers: { connection: 'close' } },
+		{ headers: { connection: 'close' } }
 	]
 
 	for (const extra of cases) {
-		const err = (await request(full({ url: 'https://example.invalid/', proxy: { url: 'http://127.0.0.1:1', ...extra } }))
-			.catch((e: Error) => e)) as Error & { code?: string; category?: string }
+		const err = (await full({
+			url: 'https://example.invalid/',
+			proxy: { url: 'http://127.0.0.1:1', ...extra }
+		}).catch((e: Error) => e)) as Error & { code?: string; category?: string }
 		expect(err).toBeInstanceOf(Error)
 		expect(err.code, JSON.stringify(extra)).toBe('EBADOPTS')
 		expect(err.category, JSON.stringify(extra)).toBe('usage')

@@ -1,7 +1,7 @@
 import request from './lib/client.ts'
 import * as udp from './lib/h3/udp.ts'
 import { observability } from './lib/observability.ts'
-import { setPoolConfig } from './lib/pool.ts'
+import { clearPool, setPoolConfig } from './lib/pool.ts'
 import * as profiles from './lib/profiles/index.ts'
 import { setTrustedRoots } from './lib/tls/cert-validate.ts'
 import { clearSessionTickets } from './lib/tls/session-tickets.ts'
@@ -16,23 +16,25 @@ const api = Object.assign(request, {
 	udp,
 	setTrustedRoots,
 	clearSessionTickets,
-	setPoolConfig
+	setPoolConfig,
+	clearPool
 })
 
 export default api
 export { HellojsError } from './lib/errors.ts'
-export { TLS, observability, profiles, setPoolConfig, setTrustedRoots, clearSessionTickets, udp }
-export type { PerPhaseTimeouts } from './lib/connect.ts'
+export { TLS, observability, profiles, setPoolConfig, clearPool, setTrustedRoots, clearSessionTickets, udp }
 export type {
 	DefaultsFn,
 	FetchInit,
+	HttpMethod,
 	Invokable,
 	ProxyOptions,
 	RedirectMode,
+	RegisteredHttpMethod,
 	RequestBodyValue,
 	RequestFn,
 	RequestOptions,
 	Response,
-	RetryPolicy,
+	RetryPolicy
 } from './lib/client.ts'
 export type { ErrorCode as HellojsErrorCode, ErrorCategory as HellojsErrorCategory } from './lib/errors.ts'

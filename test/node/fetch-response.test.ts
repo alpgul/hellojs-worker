@@ -12,13 +12,17 @@ import * as path from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import request from '../../index.ts'
+import type { FetchInit } from '../../index.ts'
 import { listenOnLoopback } from '../helpers/tcp.ts'
 
 function genServerCert(): { key: Buffer; cert: Buffer } {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hjfr-'))
-	const k = path.join(dir, 'k.pem'), c = path.join(dir, 'c.pem')
+	const k = path.join(dir, 'k.pem'),
+		c = path.join(dir, 'c.pem')
 	try {
-		execSync(`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days 1 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null`)
+		execSync(
+			`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days 1 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null`
+		)
 		return { key: fs.readFileSync(k), cert: fs.readFileSync(c) }
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true })
@@ -33,15 +37,16 @@ async function startH2(handler: (s: http2.ServerHttp2Stream) => void) {
 	return { server, url: `https://127.0.0.1:${port}` }
 }
 
-async function startH1(handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void) {
+async function startH1(
+	handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void
+) {
 	const { key, cert } = genServerCert()
 	const server = https.createServer({ key, cert, ALPNProtocols: ['http/1.1'] }, handler)
 	const port = await listenOnLoopback(server as unknown as import('node:net').Server)
 	return { server, url: `https://127.0.0.1:${port}` }
 }
 
-const req = (url: string, extra: Record<string, unknown> = {}) =>
-	request({ url, verifyTLS: false, timeout: 5000, ...extra })
+const req = (url: string, extra: FetchInit = {}) => request(url, { verifyTLS: false, ...extra })
 
 describe('fetch-compatible Response shape', () => {
 	it('buffered H2 response is a real Response', async () => {
@@ -61,7 +66,9 @@ describe('fetch-compatible Response shape', () => {
 			expect(res.url).toContain('127.0.0.1')
 			expect(res.redirected).toBe(false)
 			expect(await res.text()).toBe('hello')
-		} finally { server.close() }
+		} finally {
+			server.close()
+		}
 	})
 
 	it('buffered H1 (ALPN http/1.1) response is a real Response', async () => {
@@ -76,17 +83,24 @@ describe('fetch-compatible Response shape', () => {
 			expect(res.status).toBe(200)
 			expect(res.headers.get('x-alpn')).toBe('h1')
 			expect(await res.json()).toEqual({ ok: true })
-		} finally { server.close() }
+		} finally {
+			server.close()
+		}
 	})
 
 	it('clone() yields an independent readable body', async () => {
-		const { server, url } = await startH2((s) => { s.respond({ ':status': 200 }); s.end('clone-me') })
+		const { server, url } = await startH2((s) => {
+			s.respond({ ':status': 200 })
+			s.end('clone-me')
+		})
 		try {
 			const res = await req(url)
 			const copy = res.clone()
 			expect(await copy.text()).toBe('clone-me')
 			expect(await res.text()).toBe('clone-me')
-		} finally { server.close() }
+		} finally {
+			server.close()
+		}
 	})
 })
 
@@ -102,9 +116,15 @@ describe('streaming (progressive web ReadableStream body)', () => {
 			expect(res.body).toBeInstanceOf(ReadableStream)
 			const reader = res.body!.getReader()
 			const chunks: Uint8Array[] = []
-			for (;;) { const { done, value } = await reader.read(); if (done) break; chunks.push(value) }
+			for (;;) {
+				const { done, value } = await reader.read()
+				if (done) break
+				chunks.push(value)
+			}
 			expect(Buffer.concat(chunks).toString()).toBe('ab')
-		} finally { server.close() }
+		} finally {
+			server.close()
+		}
 	})
 
 	it('H1 resolves at headers with a readable body', async () => {
@@ -117,48 +137,72 @@ describe('streaming (progressive web ReadableStream body)', () => {
 			const res = await req(url)
 			expect(res.body).toBeInstanceOf(ReadableStream)
 			expect(await res.text()).toBe('one-two')
-		} finally { server.close() }
+		} finally {
+			server.close()
+		}
 	})
 })
 
 describe('status and redirect semantics (fetch parity)', () => {
 	it('4xx/5xx resolve (no throw) by default; ok is false', async () => {
-		const { server, url } = await startH2((s) => { s.respond({ ':status': 404 }); s.end('nope') })
+		const { server, url } = await startH2((s) => {
+			s.respond({ ':status': 404 })
+			s.end('nope')
+		})
 		try {
 			const res = await req(url)
 			expect(res.ok).toBe(false)
 			expect(res.status).toBe(404)
 			expect(await res.text()).toBe('nope')
-		} finally { server.close() }
+		} finally {
+			server.close()
+		}
 	})
 
 	it('removed simple/bodyOnly options are rejected with EBADOPTS', async () => {
-		const { server, url } = await startH2((s) => { s.respond({ ':status': 200 }); s.end('ok') })
+		const { server, url } = await startH2((s) => {
+			s.respond({ ':status': 200 })
+			s.end('ok')
+		})
 		try {
-			await expect(req(url, { simple: true })).rejects.toMatchObject({ code: 'EBADOPTS' })
-			await expect(req(url, { bodyOnly: true })).rejects.toMatchObject({ code: 'EBADOPTS' })
+			await expect(req(url, { simple: true } as unknown as FetchInit)).rejects.toMatchObject({ code: 'EBADOPTS' })
+			await expect(req(url, { bodyOnly: true } as unknown as FetchInit)).rejects.toMatchObject({
+				code: 'EBADOPTS'
+			})
 			// Explicit false promises nothing legacy; it is tolerated.
-			const res = await req(url, { simple: false, bodyOnly: false })
+			const res = await req(url, { simple: false, bodyOnly: false } as unknown as FetchInit)
 			expect(await res.text()).toBe('ok')
-		} finally { server.close() }
+		} finally {
+			server.close()
+		}
 	})
 
 	it('204 has a null body', async () => {
-		const { server, url } = await startH2((s) => { s.respond({ ':status': 204 }); s.end() })
+		const { server, url } = await startH2((s) => {
+			s.respond({ ':status': 204 })
+			s.end()
+		})
 		try {
 			const res = await req(url)
 			expect(res.status).toBe(204)
 			expect(res.body).toBeNull()
 			expect(await res.text()).toBe('')
-		} finally { server.close() }
+		} finally {
+			server.close()
+		}
 	})
 
 	it('follows redirects and reports redirected + final url', async () => {
 		const { key, cert } = genServerCert()
 		const server = http2.createSecureServer({ key, cert })
 		server.on('stream', (s, h) => {
-			if (h[':path'] === '/start') { s.respond({ ':status': 302, location: '/end' }); s.end() }
-			else { s.respond({ ':status': 200 }); s.end('done') }
+			if (h[':path'] === '/start') {
+				s.respond({ ':status': 302, location: '/end' })
+				s.end()
+			} else {
+				s.respond({ ':status': 200 })
+				s.end('done')
+			}
 		})
 		const port = await listenOnLoopback(server)
 		try {
@@ -167,24 +211,36 @@ describe('status and redirect semantics (fetch parity)', () => {
 			expect(res.redirected).toBe(true)
 			expect(res.url).toContain('/end')
 			expect(await res.text()).toBe('done')
-		} finally { server.close() }
+		} finally {
+			server.close()
+		}
 	})
 
 	it("redirect: 'manual' returns the 3xx without following", async () => {
-		const { server, url } = await startH2((s) => { s.respond({ ':status': 302, location: '/next' }); s.end() })
+		const { server, url } = await startH2((s) => {
+			s.respond({ ':status': 302, location: '/next' })
+			s.end()
+		})
 		try {
 			const res = await req(url, { redirect: 'manual' })
 			expect(res.status).toBe(302)
 			expect(res.redirected).toBe(false)
 			expect(res.headers.get('location')).toBe('/next')
-		} finally { server.close() }
+		} finally {
+			server.close()
+		}
 	})
 
 	it("redirect: 'error' rejects on a redirect", async () => {
-		const { server, url } = await startH2((s) => { s.respond({ ':status': 302, location: '/next' }); s.end() })
+		const { server, url } = await startH2((s) => {
+			s.respond({ ':status': 302, location: '/next' })
+			s.end()
+		})
 		try {
 			await expect(req(url, { redirect: 'error' })).rejects.toThrow()
-		} finally { server.close() }
+		} finally {
+			server.close()
+		}
 	})
 })
 
@@ -197,8 +253,10 @@ describe('abort', () => {
 		const ac = new AbortController()
 		setTimeout(() => ac.abort(), 30)
 		try {
-			await expect(req(url, { signal: ac.signal, timeout: 5000 })).rejects.toThrow()
-		} finally { server.close() }
+			await expect(req(url, { signal: ac.signal })).rejects.toThrow()
+		} finally {
+			server.close()
+		}
 	})
 
 	it('resolves at headers, then errors the streamed body when the signal aborts', async () => {
@@ -217,6 +275,8 @@ describe('abort', () => {
 			expect(new TextDecoder().decode((await reader.read()).value)).toBe('first')
 			ac.abort()
 			await expect(reader.read()).rejects.toThrow()
-		} finally { server.close() }
+		} finally {
+			server.close()
+		}
 	})
 })

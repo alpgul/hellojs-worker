@@ -5,13 +5,16 @@
 // This is the round-trip proof that `profiles.fromPeet()` produces a structurally
 // faithful clone of the input. Live network: `network` project only.
 
-import { beforeAll, describe, expect, it } from 'vitest'
+import { createSocket } from 'node:dgram'
+
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import request from '../../index.ts'
 import * as profiles from '../../lib/profiles/index.ts'
 import { PEET_HOST } from '../helpers/hosts.ts'
 
 import type { PeetJson } from '../../lib/profiles/from-peet.ts'
+import type { UdpSocket } from '../../lib/h3/udp.ts'
 
 // The four hashes peet.ws reports for whatever it saw on the wire.
 function hashes(body: PeetJson): Record<string, string | undefined> {
@@ -19,7 +22,7 @@ function hashes(body: PeetJson): Record<string, string | undefined> {
 		ja4: body.tls?.ja4,
 		ja3: body.tls?.ja3_hash,
 		akamai: body.http2?.akamai_fingerprint_hash,
-		peetprint: body.tls?.peetprint_hash,
+		peetprint: body.tls?.peetprint_hash
 	}
 }
 
@@ -27,26 +30,36 @@ let expected: Record<string, string | undefined> = {}
 let got: Record<string, string | undefined> = {}
 
 beforeAll(async () => {
+	// Transport selection is automatic now, but a QUIC observation and a TCP observation of the
+	// same ClientHello legitimately differ. Pin this file to TCP so both hashes describe the
+	// same stack — the profile being cloned is a TCP fingerprint.
+	request.udp.setUdpProvider(null)
+
 	// This file is the only one that needs peet.ws (peetprint exists only there), and the host
 	// blackholes bursts of fresh connections. Two attempts of backoff keep a throttle from
 	// reading as a fingerprint regression; a real one fails every attempt.
 	const retry = { limit: 2, baseDelayMs: 5_000 }
 
 	// 1. Capture a fresh peet.ws fingerprint using the DEFAULT profile.
-	const baseline = (await (await request({
-		url: `https://${PEET_HOST}/api/all`,
-		retry,
-	})).json()) as PeetJson
+	request.clearSessionTickets()
+	const baseline = (await (await request(`https://${PEET_HOST}/api/all`, { retry })).json()) as PeetJson
 	expected = hashes(baseline)
 
 	// 2. Build a parrot profile from the same JSON, and re-request with it.
+	// Both observations must be initial handshakes: a resumed session would add a PSK
+	// extension to CH2 and legitimately change JA4 (extension count 16 → 17).
+	request.clearSessionTickets()
 	profiles.registerFromPeet('peet-parrot', baseline)
-	const after = (await (await request({
-		url: `https://${PEET_HOST}/api/all`,
-		profile: 'peet-parrot',
-		retry,
-	})).json()) as PeetJson
+	const after = (await (
+		await request(`https://${PEET_HOST}/api/all`, { profile: 'peet-parrot', retry })
+	).json()) as PeetJson
 	got = hashes(after)
+	// The hook timeout is the deadline here; there is no per-phase response watchdog any more.
+}, 60_000)
+
+afterAll(() => {
+	// Put Node's default datagram provider back for anything else in this worker.
+	request.udp.setUdpProvider((type) => createSocket(type) as unknown as UdpSocket)
 })
 
 describe('parrot round-trip', () => {
