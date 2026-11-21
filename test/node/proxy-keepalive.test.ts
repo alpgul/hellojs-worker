@@ -5,6 +5,7 @@
 import { execSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as net from 'node:net'
+import { createSocket } from 'node:dgram'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import * as tls from 'node:tls'
@@ -12,6 +13,7 @@ import * as tls from 'node:tls'
 import { afterEach, expect, it } from 'vitest'
 
 import request from '../../index.ts'
+import type { FetchInit } from '../../index.ts'
 import { clearProxyPool } from '../../lib/proxy-pool.ts'
 
 function genServerCert(): { key: Buffer; cert: Buffer } {
@@ -138,7 +140,10 @@ function startProxy(dropAfterTunnel = false, secure = false): Promise<ConnectPro
 	})
 }
 
-const full = (opts: Record<string, unknown>) => ({ verifyTLS: false, timeout: 8000, ...opts })
+const full = (opts: { url: string } & FetchInit): [string, FetchInit] => {
+	const { url, ...init } = opts
+	return [url, { verifyTLS: false, ...init }]
+}
 
 let origin: Awaited<ReturnType<typeof startOrigin>> | null = null
 let proxy: ConnectProxy | null = null
@@ -157,7 +162,7 @@ it('proxy.keepAlive defaults to on and reuses one proxy socket', async () => {
 	const opts = { url: `http://127.0.0.1:${proxy.port}` }
 
 	for (const path of ['/a', '/b']) {
-		const res = await request(full({ url: `https://127.0.0.1:${origin.port}${path}`, proxy: opts }))
+		const res = await request(...full({ url: `https://127.0.0.1:${origin.port}${path}`, proxy: opts }))
 		expect(await res.text()).toBe('ok')
 		// Give the fake proxy's tunnel teardown a tick before the next CONNECT.
 		await new Promise((r) => setTimeout(r, 30))
@@ -174,7 +179,7 @@ it('proxy.keepAlive: false dials a fresh proxy socket per request', async () => 
 	const opts = { url: `http://127.0.0.1:${proxy.port}`, keepAlive: false }
 
 	for (const p of ['/a', '/b']) {
-		const res = await request(full({ url: `https://127.0.0.1:${origin.port}${p}`, proxy: opts }))
+		const res = await request(...full({ url: `https://127.0.0.1:${origin.port}${p}`, proxy: opts }))
 		expect(await res.text()).toBe('ok')
 	}
 
@@ -187,12 +192,12 @@ it('a stale pooled hop is discarded and retried once with a fresh socket', async
 	proxy = await startProxy(true)
 	const opts = { url: `http://127.0.0.1:${proxy.port}`, keepAlive: true }
 
-	const first = await request(full({ url: `https://127.0.0.1:${origin.port}/a`, proxy: opts }))
+	const first = await request(...full({ url: `https://127.0.0.1:${origin.port}/a`, proxy: opts }))
 	expect(await first.text()).toBe('ok')
 	// Let the fake proxy tear the first socket down, leaving a dead entry in the hop pool.
 	await new Promise((r) => setTimeout(r, 60))
 
-	const second = await request(full({ url: `https://127.0.0.1:${origin.port}/b`, proxy: opts }))
+	const second = await request(...full({ url: `https://127.0.0.1:${origin.port}/b`, proxy: opts }))
 	expect(await second.text()).toBe('ok')
 	expect(proxy.connections).toBe(2)
 }, 20000)
@@ -202,8 +207,8 @@ it('different proxy authorization values never share a hop', async () => {
 	proxy = await startProxy()
 	const opts = { url: `http://127.0.0.1:${proxy.port}`, keepAlive: true }
 
-	await request(full({ url: `https://127.0.0.1:${origin.port}/a`, proxy: { ...opts, authorization: 'Bearer a' } }))
-	await request(full({ url: `https://127.0.0.1:${origin.port}/b`, proxy: { ...opts, authorization: 'Bearer b' } }))
+	await request(...full({ url: `https://127.0.0.1:${origin.port}/a`, proxy: { ...opts, authorization: 'Bearer a' } }))
+	await request(...full({ url: `https://127.0.0.1:${origin.port}/b`, proxy: { ...opts, authorization: 'Bearer b' } }))
 
 	expect(proxy.connections).toBe(2)
 	expect(proxy.tunnels[0]).toContain('Proxy-Authorization: Bearer a')
@@ -216,7 +221,7 @@ it('proxy.keepAlive reuses the outer TLS hop of an HTTPS proxy', async () => {
 	const opts = { url: `https://127.0.0.1:${proxy.port}`, keepAlive: true }
 
 	for (const p of ['/a', '/b']) {
-		const res = await request(full({ url: `https://127.0.0.1:${origin.port}${p}`, proxy: opts }))
+		const res = await request(...full({ url: `https://127.0.0.1:${origin.port}${p}`, proxy: opts }))
 		expect(await res.text()).toBe('ok')
 		await new Promise((r) => setTimeout(r, 30))
 	}
@@ -232,7 +237,7 @@ it('concurrent requests open separate proxy hops instead of sharing one', async 
 	const opts = { url: `http://127.0.0.1:${proxy.port}`, keepAlive: true }
 
 	const results = await Promise.all(
-		['/a', '/b'].map((p) => request(full({ url: `https://127.0.0.1:${originPort}${p}`, proxy: opts })))
+		['/a', '/b'].map((p) => request(...full({ url: `https://127.0.0.1:${originPort}${p}`, proxy: opts })))
 	)
 	for (const res of results) expect(await res.text()).toBe('ok')
 
@@ -248,34 +253,45 @@ it('request.defaults merges proxy fields, and proxy: null clears the default', a
 	})
 
 	const first = await withDefaults(
-		full({ url: `https://127.0.0.1:${origin.port}/a`, proxy: { headers: { 'x-tenant': 'acme' } } })
+		...full({
+			url: `https://127.0.0.1:${origin.port}/a`,
+			proxy: { headers: { 'x-tenant': 'acme' } } as unknown as FetchInit['proxy']
+		})
 	)
 	expect(await first.text()).toBe('ok')
 	expect(proxy.tunnels[0]).toContain('Proxy-Authorization: Bearer default')
 	expect(proxy.tunnels[0]).toContain('x-tenant: acme')
 
-	const second = await withDefaults(full({ url: `https://127.0.0.1:${origin.port}/b`, proxy: null }))
+	const second = await withDefaults(...full({ url: `https://127.0.0.1:${origin.port}/b`, proxy: null }))
 	expect(await second.text()).toBe('ok')
 	expect(proxy.connections).toBe(1)
 	expect(proxy.tunnels).toHaveLength(1)
 }, 20000)
 
-it('proxy.keepAlive is a no-op for h3 requests that fall back to CONNECT', async () => {
+it('a forced TCP fallback still reuses the CONNECT tunnel', async () => {
 	origin = await startOrigin()
 	proxy = await startProxy()
 	const opts = { url: `http://127.0.0.1:${proxy.port}`, keepAlive: true }
-
-	for (const p of ['/a', '/b']) {
-		const res = await request(full({ url: `https://127.0.0.1:${origin.port}${p}`, proxy: opts, h3: true }))
-		expect(await res.text()).toBe('ok')
+	// With QUIC out of reach, transport selection must fall back to TCP+CONNECT; the proxy
+	// hop is still pooled the same way.
+	request.udp.setUdpProvider(null)
+	try {
+		for (const p of ['/a', '/b']) {
+			const res = await request(...full({ url: `https://127.0.0.1:${origin.port}${p}`, proxy: opts }))
+			expect(await res.text()).toBe('ok')
+		}
+	} finally {
+		request.udp.setUdpProvider(
+			(type) => createSocket(type) as unknown as ReturnType<typeof request.udp.createSocket>
+		)
 	}
 
-	expect(proxy.connections).toBe(2)
+	expect(proxy.connections).toBe(1)
 }, 30000)
 
 it('a proxy object without a usable url rejects with EBADOPTS before dialling', async () => {
 	for (const proxyOpt of [{}, { url: null }, { url: '  ' }]) {
-		const err = (await request(full({ url: 'https://127.0.0.1:1/', proxy: proxyOpt as { url: string } })).catch(
+		const err = (await request(...full({ url: 'https://127.0.0.1:1/', proxy: proxyOpt as { url: string } })).catch(
 			(e: Error) => e
 		)) as Error & { code?: string; category?: string }
 		expect(err).toBeInstanceOf(Error)

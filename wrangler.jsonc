@@ -3,5 +3,12 @@
   "name": "hellojs-example",
   "main": "examples/worker.ts",
   "compatibility_date": "2026-10-01",
-  "compatibility_flags": ["nodejs_compat", "webcrypto_modern_algorithms"]
+  "compatibility_flags": ["nodejs_compat", "webcrypto_modern_algorithms"],
+  "durable_objects": {
+    "bindings": [{ "name": "HELLO_POOL", "class_name": "HelloConnectionDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_classes": ["HelloConnectionDO"] }],
+  "vars": {
+    "ALLOWED_HOSTS": "httpbingo.org,tls.peet.ws,api.github.com,example.com"
+  }
 }

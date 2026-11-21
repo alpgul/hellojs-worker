@@ -1,9 +1,10 @@
-// Bounded keep-alive pool for reused HTTP/2 connections.
+// Bounded keep-alive pool for reused h2, h3 and h1 connections.
 //
-// Every request otherwise opens a fresh TLS connection and closes it when the response
-// completes — tens of milliseconds of TCP + handshake re-paid per call. This pool keeps a
-// small number of live h2 sessions per origin and multiplexes later streams onto them, the
-// same shape Chrome uses (one connection per origin, many concurrent streams).
+// Every request otherwise opens a fresh TLS/QUIC connection and closes it when the response
+// completes — tens of milliseconds of handshake re-paid per call. This pool keeps a small number
+// of live connections per origin and reuses them for later requests, the same shape Chrome uses.
+// h2 multiplexes many streams on one socket; h3 reuses the QUIC session; h1 is exclusive — a
+// socket is handed to one request at a time and parked only when its response is complete.
 //
 // The pool is deliberately bounded and short-lived: runtimes like Cloudflare Workers cap the
 // sockets an isolate may hold open (single digits), so pooled sockets must never accumulate.
@@ -12,16 +13,17 @@
 // the pool by default and opt out with `keepalive: false`. A request that finds no capacity opens a
 // one-shot connection exactly as before — the pool never blocks or queues.
 //
-// Only healthy, non-GOAWAYed h2 sessions are ever handed out. Any stream-level teardown path
-// that closes the connection evicts its pool entry, so a poisoned socket cannot be reused.
+// Keys include both the request origin and the ACTUAL dial target (Alt-Svc can move the latter),
+// plus the negotiated protocol: an expired hint or a different ALPN must never pick up a socket
+// opened for another endpoint. Only healthy sessions are handed out; every teardown path that
+// closes a connection evicts its entry, so a poisoned socket cannot be reused.
 
 import { createHash } from 'node:crypto'
 
 import { HellojsError } from './errors.ts'
 import * as frame from './h2/frame.ts'
 
-import type { Connection } from './connect.ts'
-import type { H2Session } from './h2/session.ts'
+import type { Alpn, Connection } from './connect.ts'
 
 export interface PoolConfig {
 	maxSockets: number
@@ -98,23 +100,35 @@ function poolKey(
 	port: number,
 	profile: unknown,
 	proxy: ProxyLike | null | undefined,
-	verifyTLS: boolean
+	verifyTLS: boolean,
+	/** Alt-Svc can move the dial target away from the origin; both halves form the identity. */
+	dial?: { host: string; port: number } | null,
+	/** ALPN is part of the key now that h2, h3 and h1 sockets all enter the pool. */
+	kind?: Alpn | null
 ): string {
 	const profileName = typeof profile === 'string' ? profile : profile ? 'inline' : 'default'
-	return `${host}:${port}|${profileName}|${verifyTLS ? 1 : 0}|${proxySegment(proxy)}`
-}
-
-function sessionOf(conn: Connection): H2Session | null {
-	return conn.alpn === 'h2' ? conn.h2Session : null
+	const dialSegment = dial ? `${dial.host}:${dial.port}` : ''
+	return `${host}:${port}|${dialSegment}|${kind ?? ''}|${profileName}|${verifyTLS ? 1 : 0}|${proxySegment(proxy)}`
 }
 
 /** A pooled socket is hand-out-able while its session lives and has stream headroom. */
 function usable(entry: Entry): boolean {
 	if (entry.dead || entry.conn.closed) return false
-	const session = sessionOf(entry.conn)
-	if (!session || session.closed || session.destroyed) return false
-	const cap = session.peerSettings[frame.SETTING.MAX_CONCURRENT_STREAMS] ?? Infinity
-	return entry.active < cap
+	const conn = entry.conn
+	if (conn.alpn === 'h2') {
+		const session = conn.h2Session
+		if (!session || session.closed || session.destroyed) return false
+		const cap = session.peerSettings[frame.SETTING.MAX_CONCURRENT_STREAMS] ?? Infinity
+		return entry.active < cap
+	}
+	if (conn.alpn === 'h3') {
+		return !!conn.h3Client && !!conn.quicConn && !conn.quicConn._closed
+	}
+	if (conn.alpn === 'http/1.1') {
+		// No multiplexing: keep serving from this socket only while no other request holds it.
+		return entry.active === 0 && !!conn.h2Transport && !conn.h2Transport.destroyed
+	}
+	return false
 }
 
 function remove(entry: Entry): void {
@@ -165,7 +179,10 @@ function pooledCount(): number {
  * connection joined the pool; unregistered connections keep the historic one-shot behavior.
  */
 function register(conn: Connection, key: string): boolean {
-	if (conn.alpn !== 'h2' || !conn.h2Session) return false
+	if (conn.closed || (conn.alpn !== 'h2' && conn.alpn !== 'h3' && conn.alpn !== 'http/1.1')) return false
+	if (conn.alpn === 'h2' && !conn.h2Session) return false
+	if (conn.alpn === 'h3' && (!conn.h3Client || !conn.quicConn)) return false
+	if (conn.alpn === 'http/1.1' && !conn.h2Transport) return false
 	const bucket = entries.get(key) ?? []
 	if (bucket.length >= config.maxPerOrigin || pooledCount() >= config.maxSockets) return false
 
@@ -174,11 +191,11 @@ function register(conn: Connection, key: string): boolean {
 	entries.set(key, bucket)
 	byConn.set(conn, entry)
 
-	const session = conn.h2Session
+	const session = conn.alpn === 'h2' ? conn.h2Session : null
 	// GOAWAY means the peer is winding the session down: stop handing out new streams but let
 	// in-flight ones finish. Session close/teardown evicts immediately.
-	session.on?.('goaway', () => remove(entry))
-	session.once?.('close', () => remove(entry))
+	session?.on?.('goaway', () => remove(entry))
+	session?.once?.('close', () => remove(entry))
 	conn.onClosed = () => remove(entry)
 	return true
 }
@@ -206,6 +223,12 @@ function release(conn: Connection): boolean {
 	return true
 }
 
+/** Whether this connection already owns a live pool slot. */
+function isPooled(conn: Connection): boolean {
+	const entry = byConn.get(conn)
+	return !!entry && !entry.dead
+}
+
 /** Drop a pooled entry whose connection is being torn down by the request path. */
 function poolEvict(conn: Connection): void {
 	const entry = byConn.get(conn)
@@ -225,5 +248,5 @@ function clearPool(reason = 'pool-cleared'): void {
 	entries.clear()
 }
 
-export { setPoolConfig, getPoolConfig, poolKey, take, register, release, poolEvict, clearPool, pooledCount }
+export { setPoolConfig, getPoolConfig, poolKey, take, register, release, isPooled, poolEvict, clearPool, pooledCount }
 export type { Entry }

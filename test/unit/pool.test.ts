@@ -1,5 +1,5 @@
 // Unit tests for the bounded keep-alive pool. Fake connections/sessions stand in for the
-// real TLS machinery — the pool only reads alpn/h2Session/closed and the close() side.
+// real TLS/QUIC machinery — the pool only reads alpn/session state/closed and close().
 
 import { EventEmitter } from 'node:events'
 
@@ -25,18 +25,23 @@ interface FakeSession extends EventEmitter {
 	peerSettings: Record<number, number>
 }
 
-function fakeConn(session?: Partial<FakeSession>): { conn: Connection; session: FakeSession; closeReasons: string[] } {
+function fakeConn(
+	session?: Partial<FakeSession>,
+	alpn: 'h2' | 'h3' | 'http/1.1' = 'h2'
+): { conn: Connection; session: FakeSession; closeReasons: string[] } {
 	const sess = Object.assign(new EventEmitter(), {
 		closed: false,
 		destroyed: false,
-		peerSettings: { 3: Infinity }, // MAX_CONCURRENT_STREAMS
+		peerSettings: { 3: Infinity } // MAX_CONCURRENT_STREAMS
 	}) as FakeSession
 	Object.assign(sess, session)
 	const closeReasons: string[] = []
 	const conn = {
-		alpn: 'h2',
-		h2Session: sess,
-		h2Transport: {},
+		alpn,
+		h2Session: alpn === 'h2' ? sess : null,
+		h2Transport: { destroyed: false },
+		h3Client: alpn === 'h3' ? { requestStream() {} } : null,
+		quicConn: alpn === 'h3' ? { _closed: false } : null,
 		closed: false,
 		onClosed: null,
 		close(reason = 'closed') {
@@ -44,7 +49,7 @@ function fakeConn(session?: Partial<FakeSession>): { conn: Connection; session: 
 			// Mirror the real Connection: notify whoever holds a hook, then mark closed.
 			;(conn as { onClosed?: ((r: string) => void) | null }).onClosed?.(reason)
 			conn.closed = true
-		},
+		}
 	} as unknown as Connection
 	return { conn, session: sess, closeReasons }
 }
@@ -114,7 +119,9 @@ describe('pool', () => {
 
 		// Credentials live in the process-wide map only as a digest.
 		expect(proxied).not.toContain('proxy:1')
-		expect(poolKey('a.com', 443, 'p', { url: 'http://alice:secret@proxy:1', authorization: 'Bearer abc123' }, true)).not.toContain('abc123')
+		expect(
+			poolKey('a.com', 443, 'p', { url: 'http://alice:secret@proxy:1', authorization: 'Bearer abc123' }, true)
+		).not.toContain('abc123')
 	})
 
 	it('register hands a fresh connection to later takers', () => {
@@ -125,16 +132,47 @@ describe('pool', () => {
 		expect(pooledCount()).toBe(1)
 	})
 
-	it('register ignores non-h2 connections and honours maxPerOrigin', () => {
-		const h1 = fakeConn()
-		;(h1.conn as { alpn: string }).alpn = 'http/1.1'
-		expect(register(h1.conn, KEY)).toBe(false)
+	it('poolKey separates the Alt-Svc dial target and the negotiated protocol', () => {
+		const base = poolKey('a.com', 443, 'p', null, true)
+		const dial = { host: 'edge.example', port: 8443 }
+		const alt = poolKey('a.com', 443, 'p', null, true, dial, 'h3')
+		expect(alt).not.toBe(base)
+		expect(alt).not.toBe(poolKey('a.com', 443, 'p', null, true, dial, 'h2'))
+		expect(alt).not.toBe(poolKey('a.com', 443, 'p', null, true, { host: 'other.example', port: 8443 }, 'h3'))
+		expect(alt).not.toBe(poolKey('a.com', 443, 'p', null, true, { host: 'edge.example', port: 443 }, 'h3'))
+		expect(alt).toBe(poolKey('a.com', 443, 'p', null, true, dial, 'h3'))
+	})
+
+	it('register honours maxPerOrigin and rejects unknown protocols', () => {
+		const unknown = fakeConn()
+		;(unknown.conn as { alpn: string }).alpn = 'ftp'
+		expect(register(unknown.conn, KEY)).toBe(false)
 
 		const a = fakeConn()
 		const b = fakeConn()
 		expect(register(a.conn, KEY)).toBe(true)
 		expect(register(b.conn, KEY)).toBe(false)
 		expect(pooledCount()).toBe(1)
+	})
+
+	it('register and reuse an h3 session', () => {
+		const { conn } = fakeConn(undefined, 'h3')
+		const key = poolKey('a.com', 443, 'p', null, true, null, 'h3')
+		expect(register(conn, key)).toBe(true)
+		release(conn)
+		expect(take(key)).toBe(conn)
+	})
+
+	it('h1 sockets are exclusive: one active request, then parked again', () => {
+		const { conn, closeReasons } = fakeConn(undefined, 'http/1.1')
+		const key = poolKey('a.com', 443, 'p', null, true, null, 'http/1.1')
+		// The completing response registers then releases the socket (active 1 -> 0).
+		expect(register(conn, key)).toBe(true)
+		expect(release(conn)).toBe(true)
+		expect(take(key)).toBe(conn)
+		expect(take(key)).toBe(null) // no multiplexing
+		expect(release(conn)).toBe(true)
+		expect(closeReasons).toEqual([])
 	})
 
 	it('global maxSockets bounds registrations across origins', () => {

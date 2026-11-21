@@ -60,7 +60,7 @@ it('sequential requests reuse one h2 socket by default', async () => {
 	const server = await startH2()
 	try {
 		for (const path of ['/a', '/b']) {
-			const res = await request({ url: `https://127.0.0.1:${server.port}${path}`, verifyTLS: false })
+			const res = await request(`https://127.0.0.1:${server.port}${path}`, { verifyTLS: false })
 			expect(await res.text()).toBe('ok')
 		}
 		expect(server.connections()).toBe(1)
@@ -73,8 +73,7 @@ it('keepalive: false opens a fresh h2 socket per request', async () => {
 	const server = await startH2()
 	try {
 		for (const path of ['/a', '/b']) {
-			const res = await request({
-				url: `https://127.0.0.1:${server.port}${path}`,
+			const res = await request(`https://127.0.0.1:${server.port}${path}`, {
 				verifyTLS: false,
 				keepalive: false
 			})

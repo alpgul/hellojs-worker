@@ -26,9 +26,12 @@ const TIMEOUT_MS = Number(process.env.SOAK_TIMEOUT_MS ?? 120_000)
 
 function genCert(): { key: Buffer; cert: Buffer } {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'soak-'))
-	const k = path.join(dir, 'k.pem'), c = path.join(dir, 'c.pem')
+	const k = path.join(dir, 'k.pem'),
+		c = path.join(dir, 'c.pem')
 	try {
-		execSync(`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days 1 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null`)
+		execSync(
+			`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days 1 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null`
+		)
 		return { key: fs.readFileSync(k), cert: fs.readFileSync(c) }
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true })
@@ -80,7 +83,11 @@ it(
 	'sustained load does not leak heap or sockets',
 	async () => {
 		const url = `https://127.0.0.1:${port}/`
-		const send = () => request({ url, verifyTLS: false, json: true, keepalive: false })
+		// Drain each body so a response stream cannot keep its socket alive and skew the handle count.
+		const send = async (): Promise<void> => {
+			const res = await request(url, { verifyTLS: false, keepalive: false })
+			await res.arrayBuffer()
+		}
 
 		// Warm up once so the baseline excludes first-request allocations.
 		await send()
@@ -112,20 +119,24 @@ it(
 		const rps = completed / elapsedSec
 		process.stdout.write(
 			`    soak: ${completed} requests in ${elapsedSec.toFixed(2)}s (${rps.toFixed(0)} rps), ` +
-			`heap ${heapGrowthMB.toFixed(2)} MB, handles ${baselineHandles} -> ${finalHandles}\n`
+				`heap ${heapGrowthMB.toFixed(2)} MB, handles ${baselineHandles} -> ${finalHandles}\n`
 		)
 
 		expect(completed).toBe(TOTAL_REQUESTS)
 
 		const gc = (globalThis as { gc?: () => void }).gc
 		if (gc) {
-			expect(heapGrowthMB, `heap grew ${heapGrowthMB.toFixed(2)} MB after GC (budget ${HEAP_BUDGET_MB} MB)`)
-				.toBeLessThan(HEAP_BUDGET_MB)
+			expect(
+				heapGrowthMB,
+				`heap grew ${heapGrowthMB.toFixed(2)} MB after GC (budget ${HEAP_BUDGET_MB} MB)`
+			).toBeLessThan(HEAP_BUDGET_MB)
 		}
 
 		if (baselineHandles >= 0 && finalHandles >= 0) {
-			expect(handleGrowth, `active handles grew by ${handleGrowth} (budget +${HANDLE_BUDGET}) — possible socket leak`)
-				.toBeLessThanOrEqual(HANDLE_BUDGET)
+			expect(
+				handleGrowth,
+				`active handles grew by ${handleGrowth} (budget +${HANDLE_BUDGET}) — possible socket leak`
+			).toBeLessThanOrEqual(HANDLE_BUDGET)
 		}
 	},
 	TIMEOUT_MS
