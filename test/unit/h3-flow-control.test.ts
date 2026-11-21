@@ -76,6 +76,33 @@ it('grants stream credit as bytes are consumed and withholds it while paused', (
 	expect(maxDataGrants(frames).length).toBeGreaterThan(0)
 })
 
+it('starts send-side flow-control limits at zero until the peer grants credit', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	expect(conn.peerMaxData).toBe(0)
+	expect(conn.peerMaxStreamDataBidiLocal).toBe(0)
+	expect(conn.peerMaxStreamDataBidiRemote).toBe(0)
+	expect(conn.peerMaxStreamDataUni).toBe(0)
+	expect(conn.openBidiStream().sendLimit).toBe(0)
+})
+
+it('keeps queued chunks buffered when a data listener pauses mid-flush', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	const stream = conn.openBidiStream()
+	const received: string[] = []
+	stream.on('data', (chunk: Buffer) => {
+		received.push(chunk.toString())
+		stream.pause()
+	})
+
+	stream.pause()
+	stream._onData(0, Buffer.from('a'), false)
+	stream._onData(1, Buffer.from('b'), false)
+	stream.resume()
+
+	expect(received).toEqual(['a'])
+	expect(stream._pendingBytes).toBe(1)
+})
+
 it('rejects STREAM data past the connection receive window', () => {
 	const conn = new QuicConnection('127.0.0.1', 443)
 	conn.recvLimit = 64 * 1024

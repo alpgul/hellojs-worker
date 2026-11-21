@@ -52,8 +52,6 @@ const log = logFactory('[h3]')
 // parameters (tp.FLOW_CONTROL), so the peer can never outrun the memory we budget.
 const WINDOW_UPDATE_FRACTION = 2
 // Servers that omit the flow-control TPs still get a usable request-body limit.
-const DEFAULT_PEER_SEND_LIMIT = tp.FLOW_CONTROL.maxStreamDataBidiRemote
-
 // -------- types -------------------------------------------------------------
 
 type Epoch = 'initial' | 'handshake' | 'oneRtt'
@@ -315,11 +313,14 @@ class QuicConnection extends EventEmitter {
 		this.recvReceived = 0
 		this.flowControlFrames = new Map()
 
-		this.peerMaxData = tp.FLOW_CONTROL.maxData
+		// Send-side limits are what the PEER grants us. Until its transport parameters (or a
+		// MAX_* frame) arrive, the RFC default is zero — our own receive-window constants must
+		// never be used here or we would send bytes the peer has not granted.
+		this.peerMaxData = 0
 		this.peerMaxDataSent = 0
-		this.peerMaxStreamDataBidiLocal = DEFAULT_PEER_SEND_LIMIT
-		this.peerMaxStreamDataBidiRemote = DEFAULT_PEER_SEND_LIMIT
-		this.peerMaxStreamDataUni = DEFAULT_PEER_SEND_LIMIT
+		this.peerMaxStreamDataBidiLocal = 0
+		this.peerMaxStreamDataBidiRemote = 0
+		this.peerMaxStreamDataUni = 0
 
 		this.availableDstCids = []
 		this.activeDstCidSeq = 0
@@ -1653,7 +1654,9 @@ class QuicStream extends EventEmitter {
 		this.paused = false
 		this._flowControlErrored = false
 
-		this.sendLimit = DEFAULT_PEER_SEND_LIMIT
+		// A new stream starts with whatever credit the peer's transport parameters grant us;
+		// before those arrive this is zero, never our own receive-window constant.
+		this.sendLimit = kind === 'uni' ? this.conn.peerMaxStreamDataUni : this.conn.peerMaxStreamDataBidiRemote
 		this.blocked = false
 		this.sendQueue = []
 	}
@@ -1748,8 +1751,7 @@ class QuicStream extends EventEmitter {
 	}
 
 	_flushPending(): void {
-		if (this.paused) return
-		while (this.pending.length && this.pending[0].offset <= this.recvOffset) {
+		while (!this.paused && this.pending.length && this.pending[0].offset <= this.recvOffset) {
 			const chunk = this.pending.shift()!
 			this._pendingBytes = (this._pendingBytes || 0) - chunk.data.length
 			const skipBytes = this.recvOffset - chunk.offset

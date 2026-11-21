@@ -35,6 +35,7 @@ import { buildResponse, isWebReadableStream, webToNodeStream } from './web-respo
 import type { Alpn, Connection } from './connect.ts'
 import type { ErrorCode } from './errors.ts'
 import type { H2Session, H2Stream } from './h2/session.ts'
+import type { H3StreamHandlers } from './h3/h3.ts'
 import type { HeaderMap } from './headers.ts'
 import type { Profile } from './profiles/types.ts'
 import type { Readable } from 'node:stream'
@@ -619,120 +620,121 @@ function performH3(
 		let resHeaders: Record<string, string> = {}
 		let resolved = false
 
-		conn.h3Client!.requestStream(
-			{ method, path, host, headers, body },
-			{
-				onHeaders: (s, h) => {
-					// 1xx informational responses are not final; wait for the real HEADERS.
-					if (s >= 100 && s < 200) return
-					status = s
-					resHeaders = h
-					observeAltSvc(h, opts, s)
-					if (opts.jar && h['set-cookie']) opts.jar.setCookie(h['set-cookie'], url.toString())
-					const isRedirect = opts.redirect !== 'manual' && s >= 300 && s < 400 && !!h.location
-					if (isRedirect) {
-						buffering = true
-						return
-					}
-					stream = startProgressiveResponse({
-						status: s,
-						headers: h,
-						...responseMeta(opts),
-						signal: opts.signal,
-						errorCode: 'EH3STREAM',
-						onCancel: () => {
-							try {
-								conn.close('h3-stream-cancel')
-							} catch {
-								/* already closed */
-							}
-						},
-						onFirstByte: () =>
-							observability.safeEmit('request:firstByte', { id: reqId, durationMs: Date.now() - reqT0 }),
-						onEnd: (bytes) => {
-							observability.safeEmit('request:end', {
-								id: reqId,
-								status: s,
-								headers: h,
-								totalBytes: bytes,
-								durationMs: Date.now() - reqT0,
-								tls: summarizeConn(conn)
-							})
-							close()
-						},
-						onError: (error, bytes) => {
-							observability.safeEmit('request:error', {
-								id: reqId,
-								code: errorCodeOf(error, 'EH3STREAM'),
-								message: messageOf(error),
-								durationMs: Date.now() - reqT0
-							})
-							void bytes
-							close()
-						}
-					})
-					resolved = true
-					resolve(stream.result)
-				},
-				onData: (chunk) => {
-					if (buffering) {
-						buffered.push(chunk)
-						return true
-					}
-					// false pauses QuicStream delivery and withholds MAX_DATA/MAX_STREAM_DATA
-					// until response-stream signals drain through onBackpressure.
-					return stream ? stream.write(chunk) : true
-				},
-				onBackpressure: (paused) => {
-					observability.safeEmit('request:backpressure', { id: reqId, paused })
-				},
-				onEnd: () => {
-					if (buffering) {
-						close()
-						let raw: Buffer = Buffer.concat(buffered)
+		const handlers: H3StreamHandlers = {
+			onHeaders: (s, h) => {
+				// 1xx informational responses are not final; wait for the real HEADERS.
+				if (s >= 100 && s < 200) return
+				status = s
+				resHeaders = h
+				observeAltSvc(h, opts, s)
+				if (opts.jar && h['set-cookie']) opts.jar.setCookie(h['set-cookie'], url.toString())
+				const isRedirect = opts.redirect !== 'manual' && s >= 300 && s < 400 && !!h.location
+				if (isRedirect) {
+					buffering = true
+					return
+				}
+				stream = startProgressiveResponse({
+					status: s,
+					headers: h,
+					...responseMeta(opts),
+					signal: opts.signal,
+					errorCode: 'EH3STREAM',
+					// H3Client wraps this handler to pause/resume the QUIC stream; drain
+					// events from the web body must travel back through that wrapper.
+					onBackpressure: (paused) => handlers.onBackpressure!(paused),
+					onCancel: () => {
 						try {
-							raw = decompressIfNeeded(raw, resHeaders['content-encoding'])
-						} catch (e) {
-							reject(new HellojsError((e as Error).message, 'EDECOMPRESS', e))
-							return
+							conn.close('h3-stream-cancel')
+						} catch {
+							/* already closed */
 						}
+					},
+					onFirstByte: () =>
+						observability.safeEmit('request:firstByte', { id: reqId, durationMs: Date.now() - reqT0 }),
+					onEnd: (bytes) => {
 						observability.safeEmit('request:end', {
 							id: reqId,
-							status,
-							headers: resHeaders,
-							totalBytes: raw.length,
+							status: s,
+							headers: h,
+							totalBytes: bytes,
 							durationMs: Date.now() - reqT0,
-							responseBody: raw,
 							tls: summarizeConn(conn)
 						})
-						handleResponse({
-							status,
-							statusText: statusTextFor(status),
-							headers: resHeaders,
-							raw,
-							opts,
-							resolve,
-							reject
+						close()
+					},
+					onError: (error, bytes) => {
+						observability.safeEmit('request:error', {
+							id: reqId,
+							code: errorCodeOf(error, 'EH3STREAM'),
+							message: messageOf(error),
+							durationMs: Date.now() - reqT0
 						})
-						return
+						void bytes
+						close()
 					}
-					stream?.end()
-				},
-				onError: (e) => {
-					if (stream) {
-						stream.fail(new HellojsError(e.message, 'EH3STREAM', e))
-						return
-					}
-					// No response was resolved: the QUIC session's state is untrustworthy.
-					try {
-						conn.close('h3-stream-error')
-					} catch {
-						/* already closed */
-					}
-					if (!resolved) reject(new HellojsError(e.message, 'EH3STREAM', e))
+				})
+				resolved = true
+				resolve(stream.result)
+			},
+			onData: (chunk) => {
+				if (buffering) {
+					buffered.push(chunk)
+					return true
 				}
+				// false pauses QuicStream delivery and withholds MAX_DATA/MAX_STREAM_DATA
+				// until response-stream signals drain through onBackpressure.
+				return stream ? stream.write(chunk) : true
+			},
+			onBackpressure: (paused) => {
+				observability.safeEmit('request:backpressure', { id: reqId, paused })
+			},
+			onEnd: () => {
+				if (buffering) {
+					close()
+					let raw: Buffer = Buffer.concat(buffered)
+					try {
+						raw = decompressIfNeeded(raw, resHeaders['content-encoding'])
+					} catch (e) {
+						reject(new HellojsError((e as Error).message, 'EDECOMPRESS', e))
+						return
+					}
+					observability.safeEmit('request:end', {
+						id: reqId,
+						status,
+						headers: resHeaders,
+						totalBytes: raw.length,
+						durationMs: Date.now() - reqT0,
+						responseBody: raw,
+						tls: summarizeConn(conn)
+					})
+					handleResponse({
+						status,
+						statusText: statusTextFor(status),
+						headers: resHeaders,
+						raw,
+						opts,
+						resolve,
+						reject
+					})
+					return
+				}
+				stream?.end()
+			},
+			onError: (e) => {
+				if (stream) {
+					stream.fail(new HellojsError(e.message, 'EH3STREAM', e))
+					return
+				}
+				// No response was resolved: the QUIC session's state is untrustworthy.
+				try {
+					conn.close('h3-stream-error')
+				} catch {
+					/* already closed */
+				}
+				if (!resolved) reject(new HellojsError(e.message, 'EH3STREAM', e))
 			}
-		)
+		}
+		conn.h3Client!.requestStream({ method, path, host, headers, body }, handlers)
 	})
 }
 
