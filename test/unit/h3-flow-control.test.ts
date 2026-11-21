@@ -85,6 +85,16 @@ it('starts send-side flow-control limits at zero until the peer grants credit', 
 	expect(conn.openBidiStream().sendLimit).toBe(0)
 })
 
+it('encodes per-stream cancel frames', () => {
+	const frames = pkt.decodeFrames(
+		Buffer.concat([pkt.encodeResetStreamFrame(4, 0x0c, 128), pkt.encodeStopSendingFrame(4, 0x0c)])
+	)
+	expect(frames.slice(0, 2)).toEqual([
+		{ type: 'reset_stream', streamId: 4, errorCode: 0x0c, finalSize: 128 },
+		{ type: 'stop_sending', streamId: 4, errorCode: 0x0c }
+	])
+})
+
 it('keeps queued chunks buffered when a data listener pauses mid-flush', () => {
 	const conn = new QuicConnection('127.0.0.1', 443)
 	const stream = conn.openBidiStream()
@@ -146,12 +156,16 @@ it('queues writes past the peer flow-control limit and flushes after MAX_* grant
 class FakeQuicStream extends EventEmitter {
 	pauseCalls = 0
 	resumeCalls = 0
+	cancelCalls = 0
 	send(_data: Buffer, _fin = false): void {}
 	pause(): void {
 		this.pauseCalls++
 	}
 	resume(): void {
 		this.resumeCalls++
+	}
+	cancel(_errorCode = 0x0c): void {
+		this.cancelCalls++
 	}
 }
 
@@ -193,6 +207,26 @@ it('pauses H3 delivery when the consumer returns false and resumes on drain', ()
 	handlers.onBackpressure!(false)
 	expect(stream.resumeCalls).toBe(1)
 	expect(received).toEqual(['hello', 'world'])
+})
+
+it('cancels one H3 request without closing the QUIC session', () => {
+	const { h3, stream } = fakeH3()
+	let ended = false
+	const handle = h3.requestStream(
+		{ method: 'GET', path: '/', host: 'example.com' },
+		{
+			onHeaders: () => {},
+			onData: () => true,
+			onEnd: () => {
+				ended = true
+			},
+			onError: () => {}
+		}
+	)
+
+	handle.cancel()
+	expect(stream.cancelCalls).toBe(1)
+	expect(ended).toBe(false)
 })
 
 it('streams response bodies past the former 16 MB buffered cap', () => {

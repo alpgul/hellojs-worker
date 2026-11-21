@@ -66,6 +66,11 @@ export interface H3StreamHandlers {
 	onBackpressure?: (paused: boolean) => void
 }
 
+/** Per-request cancellation handle — never closes the shared QUIC session. */
+export interface H3StreamHandle {
+	cancel: () => void
+}
+
 // QUIC STREAM data is split into DATA frames no larger than this. 16 KiB matches the h2
 // default frame size and keeps a single frame comfortably inside the peer's flow-control
 // window without depending on the negotiated transport parameter.
@@ -185,7 +190,10 @@ class H3Client {
 	// Streaming form: headers fire as soon as the response HEADERS frame decodes, DATA frames
 	// fire as they arrive. Request bodies may be a Buffer or a Node Readable; both are split
 	// into bounded DATA frames instead of the old single-frame cast.
-	requestStream({ method, path, host, headers = {}, body }: H3RequestOptions, handlers: H3StreamHandlers): void {
+	requestStream(
+		{ method, path, host, headers = {}, body }: H3RequestOptions,
+		handlers: H3StreamHandlers
+	): H3StreamHandle {
 		if (!this.bootstrapped) this.bootstrap()
 		const stream = this.conn.openBidiStream()
 
@@ -205,6 +213,17 @@ class H3Client {
 		let headersEmitted = false
 		let ended = false
 		let pausedByConsumer = false
+		let cancelled = false
+
+		const handle: H3StreamHandle = {
+			cancel: () => {
+				if (cancelled || ended) return
+				cancelled = true
+				ended = true
+				// H3_REQUEST_CANCELLED (0x0c): stop this stream only.
+				stream.cancel(0x0c)
+			}
+		}
 
 		const emitHeaders = () => {
 			if (headersEmitted) return
@@ -311,7 +330,7 @@ class H3Client {
 		// streams each chunk as DATA frames and finishes the stream at end-of-source.
 		if (!body) {
 			stream.send(headersFrame, true)
-			return
+			return handle
 		}
 		stream.send(headersFrame, false)
 		if (Buffer.isBuffer(body)) {
@@ -319,7 +338,7 @@ class H3Client {
 				stream.send(encodeFrame(FRAME.DATA, body.subarray(off, off + H3_MAX_FRAME)), false)
 			}
 			stream.send(Buffer.alloc(0), true)
-			return
+			return handle
 		}
 		// Streaming request body (Node Readable / NodeJS.ReadableStream).
 		const source = body
@@ -331,6 +350,7 @@ class H3Client {
 		})
 		source.on('end', () => stream.send(Buffer.alloc(0), true))
 		source.on('error', (e: Error) => finish(e))
+		return handle
 	}
 }
 

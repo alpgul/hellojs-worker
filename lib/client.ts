@@ -188,6 +188,10 @@ interface RequestContext {
 	profileObj: Profile | null
 	/** h1 sockets are registered only after a reusable response, so the key travels with the request. */
 	h1PoolKey: string | null
+	/** h2/h3 register a per-stream cancel so abort never kills a pooled sibling stream. */
+	registerCancel?: (cancel: () => void) => void
+	/** Return this request's pool slot exactly once, even if abort and stream teardown race. */
+	release: () => boolean
 }
 
 type HeadMode = 'none' | 'chunked' | 'length' | 'eof'
@@ -549,6 +553,17 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 	if (isStream && !_hasHeader('content-length') && !_hasHeader('transfer-encoding') && conn.alpn === 'http/1.1')
 		userHeaders['transfer-encoding'] = 'chunked'
 
+	// h1 has no per-stream cancel (its socket is exclusive), so abort still closes it. h2/h3
+	// override this with a stream-scoped cancel that keeps their pooled session alive.
+	let cancelRequest = () => {
+		if (conn.alpn === 'http/1.1') conn.close('abort')
+	}
+	let releasedSlot = false
+	const release = (): boolean => {
+		if (releasedSlot) return true
+		releasedSlot = true
+		return pool.release(conn)
+	}
 	const ctx: RequestContext = {
 		method,
 		url,
@@ -557,7 +572,11 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 		userHeaders,
 		opts,
 		profileObj,
-		h1PoolKey
+		h1PoolKey,
+		registerCancel: (cancel) => {
+			cancelRequest = cancel
+		},
+		release
 	}
 	const transport = (async () => {
 		if (conn.alpn === 'h3') return performH3(conn, ctx)
@@ -573,7 +592,7 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 			})
 			removeAbort = onAbort(opts.signal, () => {
 				try {
-					conn.close('abort')
+					cancelRequest()
 				} catch {}
 				rejectAbort(abortReason(opts.signal))
 			})
@@ -584,7 +603,7 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 		// Synchronous setup failures (e.g. a header builder throwing) must not leak the socket.
 		// A pooled socket survives with its slot returned so sibling streams are unaffected;
 		// one-shot sockets close. close() is idempotent.
-		if (!pool.release(conn)) conn.close('error')
+		if (!release()) conn.close('error')
 		throw e
 	} finally {
 		removeAbort()
@@ -593,7 +612,7 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 
 function performH3(
 	conn: Connection,
-	{ method, url, host, body, userHeaders, opts, profileObj }: RequestContext
+	{ method, url, host, body, userHeaders, opts, profileObj, registerCancel, release }: RequestContext
 ): Promise<Response> {
 	const headers = mergeProfileHeaders(userHeaders, profileObj)
 	const path = url.pathname + url.search
@@ -601,7 +620,7 @@ function performH3(
 	const reqT0 = Date.now()
 	const close = () => {
 		// A healthy QUIC session stays pooled; unpooled or poisoned sessions close as before.
-		if (!pool.release(conn)) {
+		if (!release()) {
 			try {
 				conn.close('h3-response-complete')
 			} catch {
@@ -619,6 +638,7 @@ function performH3(
 		let status = 0
 		let resHeaders: Record<string, string> = {}
 		let resolved = false
+		let cancelStream = () => {}
 
 		const handlers: H3StreamHandlers = {
 			onHeaders: (s, h) => {
@@ -643,11 +663,8 @@ function performH3(
 					// events from the web body must travel back through that wrapper.
 					onBackpressure: (paused) => handlers.onBackpressure!(paused),
 					onCancel: () => {
-						try {
-							conn.close('h3-stream-cancel')
-						} catch {
-							/* already closed */
-						}
+						cancelStream()
+						close()
 					},
 					onFirstByte: () =>
 						observability.safeEmit('request:firstByte', { id: reqId, durationMs: Date.now() - reqT0 }),
@@ -734,13 +751,15 @@ function performH3(
 				if (!resolved) reject(new HellojsError(e.message, 'EH3STREAM', e))
 			}
 		}
-		conn.h3Client!.requestStream({ method, path, host, headers, body }, handlers)
+		const handle = conn.h3Client!.requestStream({ method, path, host, headers, body }, handlers)
+		cancelStream = () => handle.cancel()
+		registerCancel?.(cancelStream)
 	})
 }
 
 function performH2(
 	conn: Connection,
-	{ method, url, host, body, userHeaders, opts, profileObj }: RequestContext
+	{ method, url, host, body, userHeaders, opts, profileObj, registerCancel, release }: RequestContext
 ): Promise<Response> {
 	return new Promise((resolve, reject) => {
 		const headers = buildH2Headers({
@@ -759,6 +778,13 @@ function performH2(
 		// falls back to Chrome's exclusive/weight=256. Passing `null` here lets H2Session pick.
 		const reqOpts = { endStream: !body }
 		const req: H2Stream = conn.h2Session!.request(headers, reqOpts)
+		registerCancel?.(() => {
+			try {
+				req.close(0x8)
+			} catch {
+				/* already closed */
+			}
+		})
 		observability.safeEmit('request:headersSent', { id: reqId, method, path: url.pathname + url.search })
 		// Browsers impose no response-header timeout; the caller's `signal` is the only
 		// deadline here. A stalled server is bounded by transport-level TCP/QUIC budgets.
@@ -802,7 +828,7 @@ function performH2(
 					} catch {
 						/* already closed */
 					}
-					if (!pool.release(conn)) conn.close('h2-stream-cancel')
+					if (!release()) conn.close('h2-stream-cancel')
 				},
 				onBackpressure: (paused) => {
 					if (paused) req.pauseInbound()
@@ -821,7 +847,7 @@ function performH2(
 						durationMs: Date.now() - reqT0,
 						tls: summarizeConn(conn)
 					})
-					if (!pool.release(conn)) conn.close('h2-stream-end')
+					if (!release()) conn.close('h2-stream-end')
 				},
 				onError: (error) => {
 					observability.safeEmit('request:error', {
@@ -850,7 +876,7 @@ function performH2(
 				stream?.end()
 				return
 			}
-			if (!pool.release(conn)) conn.close('h2-response-complete')
+			if (!release()) conn.close('h2-response-complete')
 			let raw: Buffer = Buffer.concat(buffered)
 			try {
 				raw = decompressIfNeeded(raw, bufferedHeaders?.['content-encoding'] as string)
@@ -876,16 +902,24 @@ function performH2(
 				reject
 			})
 		})
-		req.on('error', (e: Error) => {
+		req.on('error', (e: Error & { code?: string; errorCode?: number }) => {
+			// RST_STREAM / REFUSED_STREAM are per-stream: only session-level failures
+			// (EH2PROTOCOL, transport errors) may tear down a socket shared by siblings.
+			const perStream = e.code === 'EH2STREAM' && typeof e.errorCode === 'number'
+			const h2Error = new HellojsError(e.message, 'EH2STREAM', e)
 			if (stream) {
-				conn.close('h2-stream-error')
-				stream.fail(new HellojsError(e.message, 'EH2STREAM', e))
+				if (!perStream) conn.close('h2-session-error')
+				stream.fail(h2Error)
 				return
 			}
 			if (settled && !buffering) return
 			settled = true
-			conn.close('h2-stream-error')
-			reject(new HellojsError(e.message, 'EH2STREAM', e))
+			if (perStream) {
+				if (!release()) conn.close('h2-stream-error')
+			} else {
+				conn.close('h2-session-error')
+			}
+			reject(h2Error)
 		})
 		if (streamingBody) {
 			// req.write returns false when the peer's flow-control window is full and the chunk

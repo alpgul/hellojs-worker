@@ -1630,6 +1630,7 @@ class QuicStream extends EventEmitter {
 	declare recvConsumed: number
 	declare highestOffset: number
 	declare paused: boolean
+	declare cancelled: boolean
 	declare _flowControlErrored: boolean
 
 	// Send flow control: peer grants are pushed in via MAX_*; blocked writes wait here.
@@ -1652,6 +1653,7 @@ class QuicStream extends EventEmitter {
 		this.recvConsumed = 0
 		this.highestOffset = 0
 		this.paused = false
+		this.cancelled = false
 		this._flowControlErrored = false
 
 		// A new stream starts with whatever credit the peer's transport parameters grant us;
@@ -1701,6 +1703,22 @@ class QuicStream extends EventEmitter {
 		this._flushSend()
 	}
 
+	/**
+	 * Cancel only this stream. RESET_STREAM / STOP_SENDING let the peer and the rest of the
+	 * QUIC session continue, unlike closing the whole connection from a request's cancel path.
+	 */
+	cancel(errorCode = 0x0c): void {
+		if (this.cancelled) return
+		this.cancelled = true
+		this.pending = []
+		this._pendingBytes = 0
+		this.paused = false
+		if (this.conn.appKeys && !this.conn._closed) {
+			this.conn._sendFlowControlFrame(pkt.encodeResetStreamFrame(this.id, errorCode, this.sendOffset))
+			this.conn._sendFlowControlFrame(pkt.encodeStopSendingFrame(this.id, errorCode))
+		}
+	}
+
 	/** Consumer is behind: stop emitting DATA and stop granting credit. */
 	pause(): void {
 		this.paused = true
@@ -1713,6 +1731,7 @@ class QuicStream extends EventEmitter {
 	}
 
 	_onData(offset: number, data: Buffer, fin: boolean): void {
+		if (this.cancelled) return
 		const end = offset + data.length
 		const flowControlError = (scope: string) => {
 			if (!this._flowControlErrored) {
@@ -1751,7 +1770,7 @@ class QuicStream extends EventEmitter {
 	}
 
 	_flushPending(): void {
-		while (!this.paused && this.pending.length && this.pending[0].offset <= this.recvOffset) {
+		while (!this.cancelled && !this.paused && this.pending.length && this.pending[0].offset <= this.recvOffset) {
 			const chunk = this.pending.shift()!
 			this._pendingBytes = (this._pendingBytes || 0) - chunk.data.length
 			const skipBytes = this.recvOffset - chunk.offset

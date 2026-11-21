@@ -38,6 +38,8 @@ const FRAME_TYPE = {
 	PING: 0x01,
 	ACK: 0x02,
 	ACK_ECN: 0x03,
+	RESET_STREAM: 0x04,
+	STOP_SENDING: 0x05,
 	CRYPTO: 0x06,
 	NEW_TOKEN: 0x07,
 	STREAM_BASE: 0x08, // 0x08..0x0f
@@ -167,6 +169,8 @@ export interface AckRange {
 // packet number or size, all of which a consumer has to fit in a JS number to use anyway.
 export type QuicFrame =
 	| { type: 'ping' }
+	| { type: 'reset_stream'; streamId: number; errorCode: number; finalSize: number }
+	| { type: 'stop_sending'; streamId: number; errorCode: number }
 	| { type: 'ack'; largestAcked: number; ackDelay: number; firstAckRange: number; ranges: AckRange[] }
 	| { type: 'crypto'; offset: number; data: Buffer }
 	| { type: 'stream'; streamId: number; offset: number; data: Buffer; fin: boolean }
@@ -441,6 +445,22 @@ function encodeStreamFrame(streamId: number, offset: number, data: Buffer, fin =
 	])
 }
 
+// RFC 9000 §19.4/§19.5 — per-stream cancellation without tearing down the connection.
+// RESET_STREAM declares our final size; STOP_SENDING asks the peer to stop sending and lets
+// us keep the rest of the session alive.
+function encodeResetStreamFrame(streamId: number, errorCode: number, finalSize: number): Buffer {
+	return Buffer.concat([
+		Buffer.from([FRAME_TYPE.RESET_STREAM]),
+		varint.encode(streamId),
+		varint.encode(errorCode),
+		varint.encode(finalSize)
+	])
+}
+
+function encodeStopSendingFrame(streamId: number, errorCode: number): Buffer {
+	return Buffer.concat([Buffer.from([FRAME_TYPE.STOP_SENDING]), varint.encode(streamId), varint.encode(errorCode)])
+}
+
 // RFC 9000 §19 flow-control frames. MAX_* grant the peer credit; *_BLOCKED tell it we are
 // waiting for credit. All four carry varint-only fields.
 function encodeMaxDataFrame(maxData: number): Buffer {
@@ -487,6 +507,30 @@ function decodeFrames(buf: Buffer): QuicFrame[] {
 		if (t === FRAME_TYPE.PING) {
 			frames.push({ type: 'ping' })
 			off++
+			continue
+		}
+		if (t === FRAME_TYPE.RESET_STREAM || t === FRAME_TYPE.STOP_SENDING) {
+			off++
+			const sid = varint.decode(buf, off)
+			off += sid.length
+			const ec = varint.decode(buf, off)
+			off += ec.length
+			if (t === FRAME_TYPE.RESET_STREAM) {
+				const fs = varint.decode(buf, off)
+				off += fs.length
+				frames.push({
+					type: 'reset_stream',
+					streamId: asNumber(sid.value),
+					errorCode: asNumber(ec.value),
+					finalSize: asNumber(fs.value)
+				})
+			} else {
+				frames.push({
+					type: 'stop_sending',
+					streamId: asNumber(sid.value),
+					errorCode: asNumber(ec.value)
+				})
+			}
 			continue
 		}
 		if (t === FRAME_TYPE.ACK || t === FRAME_TYPE.ACK_ECN) {
@@ -719,6 +763,8 @@ export {
 	parsePacket,
 	encodeCryptoFrame,
 	encodeStreamFrame,
+	encodeResetStreamFrame,
+	encodeStopSendingFrame,
 	encodeMaxDataFrame,
 	encodeMaxStreamDataFrame,
 	encodeDataBlockedFrame,
