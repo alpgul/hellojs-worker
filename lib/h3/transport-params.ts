@@ -24,8 +24,8 @@ const TP = {
 	initial_source_connection_id: 0x0f,
 	retry_source_connection_id: 0x10,
 	version_information: 0x11,
-	max_datagram_frame_size: 0x20,            // RFC 9221 — peer accepts DATAGRAM frames up to this size
-	grease_quic_bit: 0x2ab2,
+	max_datagram_frame_size: 0x20, // RFC 9221 — peer accepts DATAGRAM frames up to this size
+	grease_quic_bit: 0x2ab2
 }
 
 // Peer parameters keyed by parameter id: varint-valued ones decoded, everything else raw.
@@ -42,21 +42,30 @@ function tpEmpty(id: number): Buffer {
 	return Buffer.concat([varint.encode(id), varint.encode(0)])
 }
 
+// Chrome 147 flow-control windows, shared by the TP builder and the receive-side grant logic so
+// the limits we advertise are exactly the limits we enforce.
+const FLOW_CONTROL = {
+	maxData: 15_729_040,
+	maxStreamDataBidiLocal: 6_291_456,
+	maxStreamDataBidiRemote: 6_291_456,
+	maxStreamDataUni: 6_291_456
+} as const
+
 // Chrome 147 transport parameters profile. Values reverse-engineered from public packet captures.
 function buildChrome147({ initialSourceConnectionId }: { initialSourceConnectionId: Buffer }): Buffer {
 	return Buffer.concat([
 		tpVarint(TP.max_idle_timeout, 30000),
-		tpVarint(TP.initial_max_data, 15728640),
-		tpVarint(TP.initial_max_stream_data_bidi_local, 6291456),
-		tpVarint(TP.initial_max_stream_data_bidi_remote, 6291456),
-		tpVarint(TP.initial_max_stream_data_uni, 6291456),
+		tpVarint(TP.initial_max_data, FLOW_CONTROL.maxData),
+		tpVarint(TP.initial_max_stream_data_bidi_local, FLOW_CONTROL.maxStreamDataBidiLocal),
+		tpVarint(TP.initial_max_stream_data_bidi_remote, FLOW_CONTROL.maxStreamDataBidiRemote),
+		tpVarint(TP.initial_max_stream_data_uni, FLOW_CONTROL.maxStreamDataUni),
 		tpVarint(TP.initial_max_streams_bidi, 100),
 		tpVarint(TP.initial_max_streams_uni, 100),
 		tpOpaque(TP.initial_source_connection_id, initialSourceConnectionId),
 		// Accept up to 8 server-issued CIDs so we can rotate / migrate.
 		tpVarint(TP.active_connection_id_limit, 8),
 		// Advertise willingness to receive DATAGRAM frames up to 65535 bytes (RFC 9221 §3).
-		tpVarint(TP.max_datagram_frame_size, 65535),
+		tpVarint(TP.max_datagram_frame_size, 65535)
 	])
 }
 
@@ -66,13 +75,24 @@ function decode(buf: Buffer): TransportParams {
 	const out: TransportParams = {}
 	let off = 0
 	while (off < buf.length) {
-		const id = varint.decode(buf, off); off += id.length
-		const len = varint.decode(buf, off); off += len.length
-		const val = buf.subarray(off, off + Number(len.value)); off += Number(len.value)
+		const id = varint.decode(buf, off)
+		off += id.length
+		const len = varint.decode(buf, off)
+		off += len.length
+		const val = buf.subarray(off, off + Number(len.value))
+		off += Number(len.value)
 		// Heuristic: known varint params we want to read get decoded; everything else stays raw.
-		if (id.value === TP.max_datagram_frame_size || id.value === TP.max_idle_timeout ||
-		    id.value === TP.initial_max_data || id.value === TP.initial_max_streams_bidi ||
-		    id.value === TP.initial_max_streams_uni || id.value === TP.active_connection_id_limit) {
+		if (
+			id.value === TP.max_datagram_frame_size ||
+			id.value === TP.max_idle_timeout ||
+			id.value === TP.initial_max_data ||
+			id.value === TP.initial_max_stream_data_bidi_local ||
+			id.value === TP.initial_max_stream_data_bidi_remote ||
+			id.value === TP.initial_max_stream_data_uni ||
+			id.value === TP.initial_max_streams_bidi ||
+			id.value === TP.initial_max_streams_uni ||
+			id.value === TP.active_connection_id_limit
+		) {
 			out[Number(id.value)] = val.length > 0 ? varint.decode(val, 0).value : 0
 		} else {
 			out[Number(id.value)] = val
@@ -84,8 +104,9 @@ function decode(buf: Buffer): TransportParams {
 // Wrap into a TLS extension (ext type 0x0039 for QUIC-in-TLS, RFC 9001 §8.2).
 function asTlsExtension(tpBlock: Buffer): Buffer {
 	const extType = Buffer.from([0x00, 0x39])
-	const extLen = Buffer.alloc(2); extLen.writeUInt16BE(tpBlock.length, 0)
+	const extLen = Buffer.alloc(2)
+	extLen.writeUInt16BE(tpBlock.length, 0)
 	return Buffer.concat([extType, extLen, tpBlock])
 }
 
-export { TP, buildChrome147, asTlsExtension, decode, tpVarint, tpOpaque, tpEmpty }
+export { TP, FLOW_CONTROL, buildChrome147, asTlsExtension, decode, tpVarint, tpOpaque, tpEmpty }

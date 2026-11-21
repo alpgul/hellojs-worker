@@ -34,13 +34,16 @@ const MAX_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000
 
 const tickets = new Map<string, SessionTicket>()
 
-function ticketKey(host: string, port: number): string {
-	return `${host}:${port}`
+// Keys include the ALPN so an h3 (QUIC) ticket and an h2/h1 (TCP TLS) ticket for the same
+// host:port can coexist. Without this, whichever protocol handshakes last would evict the
+// other's ticket. All protocols share the one store, so clearSessionTickets() empties them all.
+function ticketKey(host: string, port: number, alpn: string): string {
+	return `${host}:${port}:${alpn}`
 }
 
 function storeSessionTicket(host: string, port: number, ticket: SessionTicket): void {
 	if (ticket.lifetime <= 0) return
-	const key = ticketKey(host, port)
+	const key = ticketKey(host, port, ticket.alpn)
 	tickets.delete(key)
 	tickets.set(key, ticket)
 	while (tickets.size > MAX_ENTRIES) {
@@ -58,19 +61,21 @@ function getSessionTicket(
 	offeredAlpn: readonly string[],
 	needVerified = true
 ): SessionTicket | null {
-	const key = ticketKey(host, port)
-	const ticket = tickets.get(key)
-	if (!ticket) return null
-	const ttl = Math.min(ticket.lifetime * 1000, MAX_LIFETIME_MS)
-	if (Date.now() - ticket.receivedAt >= ttl) {
-		tickets.delete(key)
-		return null
+	// Prefer the first protocol the ClientHello advertises, and fall back to a ticket issued
+	// on a connection with no ALPN (the historical behaviour for such tickets).
+	for (const alpn of [...offeredAlpn, '']) {
+		const key = ticketKey(host, port, alpn)
+		const ticket = tickets.get(key)
+		if (!ticket) continue
+		const ttl = Math.min(ticket.lifetime * 1000, MAX_LIFETIME_MS)
+		if (Date.now() - ticket.receivedAt >= ttl) {
+			tickets.delete(key)
+			continue
+		}
+		if (needVerified && !ticket.verified) continue
+		return ticket
 	}
-	// A ticket is bound to the ALPN of the connection that issued it. Offer it only when the
-	// new ClientHello still advertises that protocol.
-	if (ticket.alpn && offeredAlpn.length > 0 && !offeredAlpn.includes(ticket.alpn)) return null
-	if (needVerified && !ticket.verified) return null
-	return ticket
+	return null
 }
 
 function clearSessionTickets(): void {

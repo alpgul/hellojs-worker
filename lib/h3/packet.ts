@@ -27,33 +27,37 @@ const asNumber = (v: number | bigint): number => Number(v)
 const VERSION_V1 = 0x00000001
 
 const PACKET_TYPE = {
-	INITIAL:   0x00,
-	ZERO_RTT:  0x01,
+	INITIAL: 0x00,
+	ZERO_RTT: 0x01,
 	HANDSHAKE: 0x02,
-	RETRY:     0x03,
+	RETRY: 0x03
 }
 
 const FRAME_TYPE = {
-	PADDING:       0x00,
-	PING:          0x01,
-	ACK:           0x02,
-	ACK_ECN:       0x03,
-	CRYPTO:        0x06,
-	NEW_TOKEN:     0x07,
-	STREAM_BASE:   0x08,  // 0x08..0x0f
-	MAX_DATA:      0x10,
+	PADDING: 0x00,
+	PING: 0x01,
+	ACK: 0x02,
+	ACK_ECN: 0x03,
+	CRYPTO: 0x06,
+	NEW_TOKEN: 0x07,
+	STREAM_BASE: 0x08, // 0x08..0x0f
+	MAX_DATA: 0x10,
 	MAX_STREAM_DATA: 0x11,
 	MAX_STREAMS_BIDI: 0x12,
-	MAX_STREAMS_UNI:  0x13,
+	MAX_STREAMS_UNI: 0x13,
+	DATA_BLOCKED: 0x14,
+	STREAMS_BLOCKED_BIDI: 0x15,
+	STREAMS_BLOCKED_UNI: 0x16,
+	STREAM_DATA_BLOCKED: 0x17,
 	CONNECTION_CLOSE: 0x1c,
 	CONNECTION_CLOSE_APP: 0x1d,
 	HANDSHAKE_DONE: 0x1e,
-	DATAGRAM:      0x30,  // RFC 9221 — runs to end of packet
-	DATAGRAM_LEN:  0x31,  // RFC 9221 — explicit length-prefixed
-	NEW_CONNECTION_ID:    0x18,
+	DATAGRAM: 0x30, // RFC 9221 — runs to end of packet
+	DATAGRAM_LEN: 0x31, // RFC 9221 — explicit length-prefixed
+	NEW_CONNECTION_ID: 0x18,
 	RETIRE_CONNECTION_ID: 0x19,
-	PATH_CHALLENGE:       0x1a,
-	PATH_RESPONSE:        0x1b,
+	PATH_CHALLENGE: 0x1a,
+	PATH_RESPONSE: 0x1b
 }
 
 // The keys a parser may use to decrypt inbound packets of one epoch. `server` is absent
@@ -105,15 +109,58 @@ export interface BuildOneRttOptions {
 // A parsed packet, discriminated on `kind` — decryptable packets carry a payload, the rest
 // only whatever the header exposed before protection was removed.
 export type ParsedPacket =
-	| { kind: 'initial'; version: number; dstCid: Buffer; srcCid: Buffer; firstByte: number; pn: number; payload: Buffer; consumed: number }
-	| { kind: 'handshake'; version: number; dstCid: Buffer; srcCid: Buffer; firstByte: number; pn: number; payload: Buffer; consumed: number }
-	| { kind: '1rtt'; firstByte: number; pn: number; payload: Buffer; peerPhase: number; usedNextKeys: boolean; consumed: number }
-	| { kind: 'retry'; version: number; dstCid: Buffer; srcCid: Buffer; retryToken: Buffer; integrityTag: Buffer; consumed: number }
+	| {
+			kind: 'initial'
+			version: number
+			dstCid: Buffer
+			srcCid: Buffer
+			firstByte: number
+			pn: number
+			payload: Buffer
+			consumed: number
+	  }
+	| {
+			kind: 'handshake'
+			version: number
+			dstCid: Buffer
+			srcCid: Buffer
+			firstByte: number
+			pn: number
+			payload: Buffer
+			consumed: number
+	  }
+	| {
+			kind: '1rtt'
+			firstByte: number
+			pn: number
+			payload: Buffer
+			peerPhase: number
+			usedNextKeys: boolean
+			consumed: number
+	  }
+	| {
+			kind: 'retry'
+			version: number
+			dstCid: Buffer
+			srcCid: Buffer
+			retryToken: Buffer
+			integrityTag: Buffer
+			consumed: number
+	  }
 	| { kind: 'unknown-long'; type: number; version: number; dstCid: Buffer; srcCid: Buffer; consumed: number }
 	| { kind: 'unknown-short'; consumed: number }
-	| { kind: 'decrypt-failed'; epoch: 'initial' | 'handshake' | '1rtt' | null; error: string; peerPhase?: number; consumed: number }
+	| {
+			kind: 'decrypt-failed'
+			epoch: 'initial' | 'handshake' | '1rtt' | null
+			error: string
+			peerPhase?: number
+			consumed: number
+	  }
 
-export interface AckRange { gap: number; length: number }
+export interface AckRange {
+	gap: number
+	length: number
+}
 
 // Decoded frames, discriminated on `type` so a handler only sees the fields its own frame
 // carries. Wire varints narrow to `number` here: every field below is an offset, stream ID,
@@ -127,6 +174,8 @@ export type QuicFrame =
 	| { type: 'handshake_done' }
 	| { type: 'flow_control'; subtype: number; value: number }
 	| { type: 'max_stream_data'; streamId: number; value: number }
+	| { type: 'data_blocked'; value: number }
+	| { type: 'stream_data_blocked'; streamId: number; value: number }
 	| { type: 'path_challenge'; data: Buffer }
 	| { type: 'path_response'; data: Buffer }
 	| { type: 'new_connection_id'; seq: number; retirePriorTo: number; cid: Buffer; statelessResetToken: Buffer }
@@ -146,18 +195,27 @@ export type FrameType = QuicFrame['type']
 const HP_SAMPLE_OFFSET = 4
 const HP_SAMPLE_LEN = 16
 function padForHeaderProtection(payloadFrames: Buffer, pnLen: number): Buffer {
-	const minPlaintext = (HP_SAMPLE_OFFSET + HP_SAMPLE_LEN) - 16 - pnLen
+	const minPlaintext = HP_SAMPLE_OFFSET + HP_SAMPLE_LEN - 16 - pnLen
 	if (payloadFrames.length >= minPlaintext) return payloadFrames
 	return Buffer.concat([payloadFrames, Buffer.alloc(minPlaintext - payloadFrames.length, FRAME_TYPE.PADDING)])
 }
 
 // Build an Initial packet. Initial epoch always uses AES-128-GCM.
-function buildInitial({ dstCid, srcCid, token = Buffer.alloc(0), payloadFrames, pn, pnLen, clientKeys }: BuildInitialOptions): Buffer {
+function buildInitial({
+	dstCid,
+	srcCid,
+	token = Buffer.alloc(0),
+	payloadFrames,
+	pn,
+	pnLen,
+	clientKeys
+}: BuildInitialOptions): Buffer {
 	const aead: Aead = 'aes-128-gcm'
-	const reservedAndPnLen = (pnLen - 1) & 0x03  // bottom 2 bits = pnLen - 1
+	const reservedAndPnLen = (pnLen - 1) & 0x03 // bottom 2 bits = pnLen - 1
 	const firstByte = 0xc0 | (PACKET_TYPE.INITIAL << 4) | reservedAndPnLen
 	const padded = padForHeaderProtection(payloadFrames, pnLen)
-	const version = Buffer.alloc(4); version.writeUInt32BE(VERSION_V1, 0)
+	const version = Buffer.alloc(4)
+	version.writeUInt32BE(VERSION_V1, 0)
 	const dstLen = Buffer.from([dstCid.length])
 	const srcLen = Buffer.from([srcCid.length])
 	const tokenLen = varint.encode(token.length)
@@ -169,11 +227,14 @@ function buildInitial({ dstCid, srcCid, token = Buffer.alloc(0), payloadFrames, 
 	const header = Buffer.concat([
 		Buffer.from([firstByte]),
 		version,
-		dstLen, dstCid,
-		srcLen, srcCid,
-		tokenLen, token,
+		dstLen,
+		dstCid,
+		srcLen,
+		srcCid,
+		tokenLen,
+		token,
 		lengthVarint,
-		pnBytes,
+		pnBytes
 	])
 	const ciphertext = keys.aeadEncrypt(aead, clientKeys.key, clientKeys.iv, pn, header, padded)
 	const packet = Buffer.concat([header, ciphertext])
@@ -182,11 +243,20 @@ function buildInitial({ dstCid, srcCid, token = Buffer.alloc(0), payloadFrames, 
 	return packet
 }
 
-function buildHandshake({ dstCid, srcCid, payloadFrames, pn, pnLen, clientKeys, aead = 'aes-128-gcm' }: BuildHandshakeOptions): Buffer {
+function buildHandshake({
+	dstCid,
+	srcCid,
+	payloadFrames,
+	pn,
+	pnLen,
+	clientKeys,
+	aead = 'aes-128-gcm'
+}: BuildHandshakeOptions): Buffer {
 	const reservedAndPnLen = (pnLen - 1) & 0x03
 	const firstByte = 0xc0 | (PACKET_TYPE.HANDSHAKE << 4) | reservedAndPnLen
 	const padded = padForHeaderProtection(payloadFrames, pnLen)
-	const version = Buffer.alloc(4); version.writeUInt32BE(VERSION_V1, 0)
+	const version = Buffer.alloc(4)
+	version.writeUInt32BE(VERSION_V1, 0)
 	const dstLen = Buffer.from([dstCid.length])
 	const srcLen = Buffer.from([srcCid.length])
 	const totalProtectedLen = pnLen + padded.length + 16
@@ -195,10 +265,12 @@ function buildHandshake({ dstCid, srcCid, payloadFrames, pn, pnLen, clientKeys, 
 	const header = Buffer.concat([
 		Buffer.from([firstByte]),
 		version,
-		dstLen, dstCid,
-		srcLen, srcCid,
+		dstLen,
+		dstCid,
+		srcLen,
+		srcCid,
 		lengthVarint,
-		pnBytes,
+		pnBytes
 	])
 	const ciphertext = keys.aeadEncrypt(aead, clientKeys.key, clientKeys.iv, pn, header, padded)
 	const packet = Buffer.concat([header, ciphertext])
@@ -207,7 +279,15 @@ function buildHandshake({ dstCid, srcCid, payloadFrames, pn, pnLen, clientKeys, 
 	return packet
 }
 
-function buildOneRtt({ dstCid, payloadFrames, pn, pnLen, clientKeys, aead = 'aes-128-gcm', keyPhase = 0 }: BuildOneRttOptions): Buffer {
+function buildOneRtt({
+	dstCid,
+	payloadFrames,
+	pn,
+	pnLen,
+	clientKeys,
+	aead = 'aes-128-gcm',
+	keyPhase = 0
+}: BuildOneRttOptions): Buffer {
 	const reservedAndPnLen = (pnLen - 1) & 0x03
 	// Short header layout: 0|1|S|R|R|K|P|P  → fixed bit (0x40), spin, reserved, K (0x04), pnLen-1.
 	const firstByte = 0x40 | ((keyPhase & 0x01) << 2) | reservedAndPnLen
@@ -236,22 +316,34 @@ function parsePacket(buf: Buffer, offset: number, keysByEpoch: KeysByEpoch, ourS
 		const version = buf.readUInt32BE(offset + 1)
 		let p = offset + 5
 		const dstLen = buf[p++]
-		const dstCid = buf.subarray(p, p + dstLen); p += dstLen
+		const dstCid = buf.subarray(p, p + dstLen)
+		p += dstLen
 		const srcLen = buf[p++]
-		const srcCid = buf.subarray(p, p + srcLen); p += srcLen
+		const srcCid = buf.subarray(p, p + srcLen)
+		p += srcLen
 
 		if (type === PACKET_TYPE.RETRY) {
 			// Retry has no length / pn — rest is integrity tag + token
 			const tail = buf.subarray(p)
-			return { kind: 'retry', version, dstCid, srcCid, retryToken: tail.subarray(0, -16), integrityTag: tail.subarray(-16), consumed: buf.length - offset }
+			return {
+				kind: 'retry',
+				version,
+				dstCid,
+				srcCid,
+				retryToken: tail.subarray(0, -16),
+				integrityTag: tail.subarray(-16),
+				consumed: buf.length - offset
+			}
 		}
 
 		if (type === PACKET_TYPE.INITIAL) {
 			// The token plays no part in decryption — step over it.
-			const tk = varint.decode(buf, p); p += tk.length
+			const tk = varint.decode(buf, p)
+			p += tk.length
 			p += asNumber(tk.value)
 		}
-		const lenInfo = varint.decode(buf, p); p += lenInfo.length
+		const lenInfo = varint.decode(buf, p)
+		p += lenInfo.length
 		const remaining = asNumber(lenInfo.value)
 		const pnOffset = p
 		const packetEndOffset = pnOffset + remaining
@@ -259,19 +351,32 @@ function parsePacket(buf: Buffer, offset: number, keysByEpoch: KeysByEpoch, ourS
 		const pktSlice = Buffer.from(buf.subarray(offset, packetEndOffset))
 		const localPnOffset = pnOffset - offset
 
-		const epoch = type === PACKET_TYPE.INITIAL ? 'initial' : (type === PACKET_TYPE.HANDSHAKE ? 'handshake' : null)
+		const epoch = type === PACKET_TYPE.INITIAL ? 'initial' : type === PACKET_TYPE.HANDSHAKE ? 'handshake' : null
 		const epochKeys = epoch ? keysByEpoch[epoch] : undefined
 		if (!epoch || !epochKeys?.server) {
 			return { kind: 'unknown-long', type, version, consumed: packetEndOffset - offset, dstCid, srcCid }
 		}
 		const sk = epochKeys.server
 		const aead = epochKeys.aead ?? 'aes-128-gcm'
-		const { firstByte: unprotected, pnLen, pn } = keys.removeHeaderProtection(pktSlice, sk.hp, localPnOffset, true, aead)
+		const {
+			firstByte: unprotected,
+			pnLen,
+			pn
+		} = keys.removeHeaderProtection(pktSlice, sk.hp, localPnOffset, true, aead)
 		const headerBytes = pktSlice.subarray(0, localPnOffset + pnLen)
 		const ciphertext = pktSlice.subarray(localPnOffset + pnLen)
 		try {
 			const plaintext = keys.aeadDecrypt(aead, sk.key, sk.iv, pn, headerBytes, ciphertext)
-			return { kind: epoch === 'initial' ? 'initial' : 'handshake', firstByte: unprotected, version, dstCid, srcCid, pn, payload: plaintext, consumed: packetEndOffset - offset }
+			return {
+				kind: epoch === 'initial' ? 'initial' : 'handshake',
+				firstByte: unprotected,
+				version,
+				dstCid,
+				srcCid,
+				pn,
+				payload: plaintext,
+				consumed: packetEndOffset - offset
+			}
 		} catch (e) {
 			return { kind: 'decrypt-failed', epoch, error: (e as Error).message, consumed: packetEndOffset - offset }
 		}
@@ -285,7 +390,11 @@ function parsePacket(buf: Buffer, offset: number, keysByEpoch: KeysByEpoch, ourS
 	const pktSlice = Buffer.from(buf.subarray(offset))
 	const localPnOffset = 1 + ourSrcCidLen
 	const aead = ek.aead ?? 'aes-128-gcm'
-	const { firstByte: unprotected, pnLen, pn } = keys.removeHeaderProtection(pktSlice, ek.server.hp, localPnOffset, false, aead)
+	const {
+		firstByte: unprotected,
+		pnLen,
+		pn
+	} = keys.removeHeaderProtection(pktSlice, ek.server.hp, localPnOffset, false, aead)
 	const headerBytes = pktSlice.subarray(0, localPnOffset + pnLen)
 	const ciphertext = pktSlice.subarray(localPnOffset + pnLen)
 	const peerPhase = (unprotected & 0x04) >> 2
@@ -293,9 +402,23 @@ function parsePacket(buf: Buffer, offset: number, keysByEpoch: KeysByEpoch, ourS
 	const aeadKeys = usingNextKeys && ek.serverNext ? ek.serverNext : ek.server
 	try {
 		const plaintext = keys.aeadDecrypt(aead, aeadKeys.key, aeadKeys.iv, pn, headerBytes, ciphertext)
-		return { kind: '1rtt', firstByte: unprotected, pn, payload: plaintext, peerPhase, usedNextKeys: usingNextKeys, consumed: buf.length - offset }
+		return {
+			kind: '1rtt',
+			firstByte: unprotected,
+			pn,
+			payload: plaintext,
+			peerPhase,
+			usedNextKeys: usingNextKeys,
+			consumed: buf.length - offset
+		}
 	} catch (e) {
-		return { kind: 'decrypt-failed', epoch: '1rtt', error: (e as Error).message, peerPhase, consumed: buf.length - offset }
+		return {
+			kind: 'decrypt-failed',
+			epoch: '1rtt',
+			error: (e as Error).message,
+			peerPhase,
+			consumed: buf.length - offset
+		}
 	}
 }
 
@@ -303,12 +426,7 @@ function parsePacket(buf: Buffer, offset: number, keysByEpoch: KeysByEpoch, ourS
 
 // Encode a CRYPTO frame: type=0x06, offset, length, data.
 function encodeCryptoFrame(offset: number, data: Buffer): Buffer {
-	return Buffer.concat([
-		Buffer.from([FRAME_TYPE.CRYPTO]),
-		varint.encode(offset),
-		varint.encode(data.length),
-		data,
-	])
+	return Buffer.concat([Buffer.from([FRAME_TYPE.CRYPTO]), varint.encode(offset), varint.encode(data.length), data])
 }
 
 // Encode a STREAM frame with type byte 0x08..0x0f. We always set OFF (0x04) and LEN (0x02) bits, optionally FIN (0x01).
@@ -319,8 +437,30 @@ function encodeStreamFrame(streamId: number, offset: number, data: Buffer, fin =
 		varint.encode(streamId),
 		varint.encode(offset),
 		varint.encode(data.length),
-		data,
+		data
 	])
+}
+
+// RFC 9000 §19 flow-control frames. MAX_* grant the peer credit; *_BLOCKED tell it we are
+// waiting for credit. All four carry varint-only fields.
+function encodeMaxDataFrame(maxData: number): Buffer {
+	return Buffer.concat([Buffer.from([FRAME_TYPE.MAX_DATA]), varint.encode(maxData)])
+}
+
+function encodeMaxStreamDataFrame(streamId: number, maxStreamData: number): Buffer {
+	return Buffer.concat([
+		Buffer.from([FRAME_TYPE.MAX_STREAM_DATA]),
+		varint.encode(streamId),
+		varint.encode(maxStreamData)
+	])
+}
+
+function encodeDataBlockedFrame(limit: number): Buffer {
+	return Buffer.concat([Buffer.from([FRAME_TYPE.DATA_BLOCKED]), varint.encode(limit)])
+}
+
+function encodeStreamDataBlockedFrame(streamId: number, limit: number): Buffer {
+	return Buffer.concat([Buffer.from([FRAME_TYPE.STREAM_DATA_BLOCKED]), varint.encode(streamId), varint.encode(limit)])
 }
 
 // Encode an ACK frame. `largestAcked` and `firstAckRange` are integers; we send a single contiguous range starting from largestAcked-firstAckRange to largestAcked.
@@ -329,8 +469,8 @@ function encodeAckFrame(largestAcked: number, ackDelay = 0, firstAckRange = 0): 
 		Buffer.from([FRAME_TYPE.ACK]),
 		varint.encode(largestAcked),
 		varint.encode(ackDelay),
-		varint.encode(0),                   // ack range count
-		varint.encode(firstAckRange),
+		varint.encode(0), // ack range count
+		varint.encode(firstAckRange)
 	])
 }
 
@@ -340,89 +480,168 @@ function decodeFrames(buf: Buffer): QuicFrame[] {
 	let off = 0
 	while (off < buf.length) {
 		const t = buf[off]
-		if (t === FRAME_TYPE.PADDING) { off++; continue }
-		if (t === FRAME_TYPE.PING) { frames.push({ type: 'ping' }); off++; continue }
+		if (t === FRAME_TYPE.PADDING) {
+			off++
+			continue
+		}
+		if (t === FRAME_TYPE.PING) {
+			frames.push({ type: 'ping' })
+			off++
+			continue
+		}
 		if (t === FRAME_TYPE.ACK || t === FRAME_TYPE.ACK_ECN) {
 			off++
-			const la = varint.decode(buf, off); off += la.length
-			const ad = varint.decode(buf, off); off += ad.length
-			const rc = varint.decode(buf, off); off += rc.length
-			const fr = varint.decode(buf, off); off += fr.length
+			const la = varint.decode(buf, off)
+			off += la.length
+			const ad = varint.decode(buf, off)
+			off += ad.length
+			const rc = varint.decode(buf, off)
+			off += rc.length
+			const fr = varint.decode(buf, off)
+			off += fr.length
 			const ranges: AckRange[] = []
 			for (let i = 0; i < asNumber(rc.value); i++) {
-				const gap = varint.decode(buf, off); off += gap.length
-				const len = varint.decode(buf, off); off += len.length
+				const gap = varint.decode(buf, off)
+				off += gap.length
+				const len = varint.decode(buf, off)
+				off += len.length
 				ranges.push({ gap: asNumber(gap.value), length: asNumber(len.value) })
 			}
 			if (t === FRAME_TYPE.ACK_ECN) {
-				for (let i = 0; i < 3; i++) { const v = varint.decode(buf, off); off += v.length }  // ect0, ect1, ce
+				for (let i = 0; i < 3; i++) {
+					const v = varint.decode(buf, off)
+					off += v.length
+				} // ect0, ect1, ce
 			}
-			frames.push({ type: 'ack', largestAcked: asNumber(la.value), ackDelay: asNumber(ad.value), firstAckRange: asNumber(fr.value), ranges })
+			frames.push({
+				type: 'ack',
+				largestAcked: asNumber(la.value),
+				ackDelay: asNumber(ad.value),
+				firstAckRange: asNumber(fr.value),
+				ranges
+			})
 			continue
 		}
 		if (t === FRAME_TYPE.CRYPTO) {
 			off++
-			const offV = varint.decode(buf, off); off += offV.length
-			const lenV = varint.decode(buf, off); off += lenV.length
-			const data = buf.subarray(off, off + asNumber(lenV.value)); off += asNumber(lenV.value)
+			const offV = varint.decode(buf, off)
+			off += offV.length
+			const lenV = varint.decode(buf, off)
+			off += lenV.length
+			const data = buf.subarray(off, off + asNumber(lenV.value))
+			off += asNumber(lenV.value)
 			frames.push({ type: 'crypto', offset: asNumber(offV.value), data })
 			continue
 		}
 		if (t >= 0x08 && t <= 0x0f) {
-			const fin  = (t & 0x01) !== 0
-			const hasLen  = (t & 0x02) !== 0
-			const hasOff  = (t & 0x04) !== 0
+			const fin = (t & 0x01) !== 0
+			const hasLen = (t & 0x02) !== 0
+			const hasOff = (t & 0x04) !== 0
 			off++
-			const sid = varint.decode(buf, off); off += sid.length
+			const sid = varint.decode(buf, off)
+			off += sid.length
 			let so = 0
-			if (hasOff) { const v = varint.decode(buf, off); so = asNumber(v.value); off += v.length }
+			if (hasOff) {
+				const v = varint.decode(buf, off)
+				so = asNumber(v.value)
+				off += v.length
+			}
 			let dlen: number
-			if (hasLen) { const v = varint.decode(buf, off); dlen = asNumber(v.value); off += v.length }
-			else { dlen = buf.length - off }
-			const data = buf.subarray(off, off + dlen); off += dlen
+			if (hasLen) {
+				const v = varint.decode(buf, off)
+				dlen = asNumber(v.value)
+				off += v.length
+			} else {
+				dlen = buf.length - off
+			}
+			const data = buf.subarray(off, off + dlen)
+			off += dlen
 			frames.push({ type: 'stream', streamId: asNumber(sid.value), offset: so, data, fin })
 			continue
 		}
 		if (t === FRAME_TYPE.NEW_TOKEN) {
 			off++
-			const lv = varint.decode(buf, off); off += lv.length
+			const lv = varint.decode(buf, off)
+			off += lv.length
 			off += asNumber(lv.value)
 			frames.push({ type: 'new_token' })
 			continue
 		}
-		if (t === FRAME_TYPE.HANDSHAKE_DONE) { off++; frames.push({ type: 'handshake_done' }); continue }
+		if (t === FRAME_TYPE.HANDSHAKE_DONE) {
+			off++
+			frames.push({ type: 'handshake_done' })
+			continue
+		}
 		if (t === FRAME_TYPE.MAX_DATA || t === FRAME_TYPE.MAX_STREAMS_BIDI || t === FRAME_TYPE.MAX_STREAMS_UNI) {
 			off++
-			const v = varint.decode(buf, off); off += v.length
+			const v = varint.decode(buf, off)
+			off += v.length
 			frames.push({ type: 'flow_control', subtype: t, value: asNumber(v.value) })
 			continue
 		}
 		if (t === FRAME_TYPE.MAX_STREAM_DATA) {
 			off++
-			const sid = varint.decode(buf, off); off += sid.length
-			const v = varint.decode(buf, off); off += v.length
+			const sid = varint.decode(buf, off)
+			off += sid.length
+			const v = varint.decode(buf, off)
+			off += v.length
 			frames.push({ type: 'max_stream_data', streamId: asNumber(sid.value), value: asNumber(v.value) })
+			continue
+		}
+		if (
+			t === FRAME_TYPE.DATA_BLOCKED ||
+			t === FRAME_TYPE.STREAMS_BLOCKED_BIDI ||
+			t === FRAME_TYPE.STREAMS_BLOCKED_UNI
+		) {
+			off++
+			const v = varint.decode(buf, off)
+			off += v.length
+			frames.push({ type: 'data_blocked', value: asNumber(v.value) })
+			continue
+		}
+		if (t === FRAME_TYPE.STREAM_DATA_BLOCKED) {
+			off++
+			const sid = varint.decode(buf, off)
+			off += sid.length
+			const v = varint.decode(buf, off)
+			off += v.length
+			frames.push({ type: 'stream_data_blocked', streamId: asNumber(sid.value), value: asNumber(v.value) })
 			continue
 		}
 		if (t === FRAME_TYPE.PATH_CHALLENGE || t === FRAME_TYPE.PATH_RESPONSE) {
 			off++
-			const data = buf.subarray(off, off + 8); off += 8
-			frames.push({ type: t === FRAME_TYPE.PATH_CHALLENGE ? 'path_challenge' : 'path_response', data: Buffer.from(data) })
+			const data = buf.subarray(off, off + 8)
+			off += 8
+			frames.push({
+				type: t === FRAME_TYPE.PATH_CHALLENGE ? 'path_challenge' : 'path_response',
+				data: Buffer.from(data)
+			})
 			continue
 		}
 		if (t === FRAME_TYPE.NEW_CONNECTION_ID) {
 			off++
-			const seq = varint.decode(buf, off); off += seq.length
-			const retire = varint.decode(buf, off); off += retire.length
+			const seq = varint.decode(buf, off)
+			off += seq.length
+			const retire = varint.decode(buf, off)
+			off += retire.length
 			const clen = buf[off++]
-			const cid = buf.subarray(off, off + clen); off += clen
-			const token = buf.subarray(off, off + 16); off += 16
-			frames.push({ type: 'new_connection_id', seq: asNumber(seq.value), retirePriorTo: asNumber(retire.value), cid: Buffer.from(cid), statelessResetToken: Buffer.from(token) })
+			const cid = buf.subarray(off, off + clen)
+			off += clen
+			const token = buf.subarray(off, off + 16)
+			off += 16
+			frames.push({
+				type: 'new_connection_id',
+				seq: asNumber(seq.value),
+				retirePriorTo: asNumber(retire.value),
+				cid: Buffer.from(cid),
+				statelessResetToken: Buffer.from(token)
+			})
 			continue
 		}
 		if (t === FRAME_TYPE.RETIRE_CONNECTION_ID) {
 			off++
-			const seq = varint.decode(buf, off); off += seq.length
+			const seq = varint.decode(buf, off)
+			off += seq.length
 			frames.push({ type: 'retire_connection_id', seq: asNumber(seq.value) })
 			continue
 		}
@@ -430,22 +649,29 @@ function decodeFrames(buf: Buffer): QuicFrame[] {
 			off++
 			let dlen: number
 			if (t === FRAME_TYPE.DATAGRAM_LEN) {
-				const v = varint.decode(buf, off); off += v.length; dlen = asNumber(v.value)
+				const v = varint.decode(buf, off)
+				off += v.length
+				dlen = asNumber(v.value)
 			} else {
-				dlen = buf.length - off   // runs to end of packet
+				dlen = buf.length - off // runs to end of packet
 			}
-			const data = buf.subarray(off, off + dlen); off += dlen
+			const data = buf.subarray(off, off + dlen)
+			off += dlen
 			frames.push({ type: 'datagram', data })
 			continue
 		}
 		if (t === FRAME_TYPE.CONNECTION_CLOSE || t === FRAME_TYPE.CONNECTION_CLOSE_APP) {
 			off++
-			const ec = varint.decode(buf, off); off += ec.length
+			const ec = varint.decode(buf, off)
+			off += ec.length
 			if (t === FRAME_TYPE.CONNECTION_CLOSE) {
-				const ft = varint.decode(buf, off); off += ft.length
+				const ft = varint.decode(buf, off)
+				off += ft.length
 			}
-			const rl = varint.decode(buf, off); off += rl.length
-			const reason = buf.subarray(off, off + asNumber(rl.value)); off += asNumber(rl.value)
+			const rl = varint.decode(buf, off)
+			off += rl.length
+			const reason = buf.subarray(off, off + asNumber(rl.value))
+			off += asNumber(rl.value)
 			frames.push({ type: 'connection_close', errorCode: asNumber(ec.value), reason: reason.toString('utf8') })
 			continue
 		}
@@ -493,6 +719,10 @@ export {
 	parsePacket,
 	encodeCryptoFrame,
 	encodeStreamFrame,
+	encodeMaxDataFrame,
+	encodeMaxStreamDataFrame,
+	encodeDataBlockedFrame,
+	encodeStreamDataBlockedFrame,
 	encodeAckFrame,
-	decodeFrames,
+	decodeFrames
 }

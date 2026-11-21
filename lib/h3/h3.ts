@@ -27,7 +27,7 @@ const FRAME = {
 	HEADERS: 0x01,
 	SETTINGS: 0x04,
 	GOAWAY: 0x07,
-	MAX_PUSH_ID: 0x0d,
+	MAX_PUSH_ID: 0x0d
 }
 
 // Chrome 147 h3 SETTINGS — captured/inferred values:
@@ -38,7 +38,7 @@ const FRAME = {
 const CHROME_147_SETTINGS: Setting[] = [
 	[0x01, 65536],
 	[0x06, 65536],
-	[0x07, 100],
+	[0x07, 100]
 ]
 
 export interface H3RequestOptions {
@@ -58,9 +58,12 @@ export interface H3Response {
 
 export interface H3StreamHandlers {
 	onHeaders: (status: number, headers: Record<string, string>) => void
-	onData: (chunk: Buffer) => void
+	/** Return false to pause QUIC delivery until `onBackpressure(false)` arrives. */
+	onData: (chunk: Buffer) => boolean | void
 	onEnd: () => void
 	onError: (error: Error) => void
+	/** Consumer drain signal; H3Client turns it into QuicStream.pause()/resume(). */
+	onBackpressure?: (paused: boolean) => void
 }
 
 // QUIC STREAM data is split into DATA frames no larger than this. 16 KiB matches the h2
@@ -91,7 +94,7 @@ class H3Client {
 	// QPACK dynamic table replica — populated from server's encoder stream.
 	declare peerDynamicTable: qpack.DynamicTable
 	declare peerEncoderBuf: Buffer
-	declare peerQpackMaxTableCapacity: number   // populated when we see server SETTINGS
+	declare peerQpackMaxTableCapacity: number // populated when we see server SETTINGS
 
 	constructor(quicConn: QuicConnection) {
 		this.conn = quicConn
@@ -125,7 +128,7 @@ class H3Client {
 					// 0x00 = control, 0x03 = decoder — we don't use these for anything yet.
 					return
 				} catch {
-					return  // need more bytes for varint
+					return // need more bytes for varint
 				}
 			}
 			if (streamType === 0x02) {
@@ -166,10 +169,15 @@ class H3Client {
 		const chunks: Buffer[] = []
 		return new Promise<H3Response>((resolve, reject) => {
 			this.requestStream(options, {
-				onHeaders: (s, h) => { status = s; headers = h },
-				onData: (chunk) => chunks.push(chunk),
+				onHeaders: (s, h) => {
+					status = s
+					headers = h
+				},
+				onData: (chunk) => {
+					chunks.push(chunk)
+				},
 				onEnd: () => resolve({ status, headers, body: Buffer.concat(chunks) }),
-				onError: reject,
+				onError: reject
 			})
 		})
 	}
@@ -177,10 +185,7 @@ class H3Client {
 	// Streaming form: headers fire as soon as the response HEADERS frame decodes, DATA frames
 	// fire as they arrive. Request bodies may be a Buffer or a Node Readable; both are split
 	// into bounded DATA frames instead of the old single-frame cast.
-	requestStream(
-		{ method, path, host, headers = {}, body }: H3RequestOptions,
-		handlers: H3StreamHandlers,
-	): void {
+	requestStream({ method, path, host, headers = {}, body }: H3RequestOptions, handlers: H3StreamHandlers): void {
 		if (!this.bootstrapped) this.bootstrap()
 		const stream = this.conn.openBidiStream()
 
@@ -189,7 +194,7 @@ class H3Client {
 			[':authority', host],
 			[':scheme', 'https'],
 			[':path', path],
-			...Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v] as HeaderEntry),
+			...Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v] as HeaderEntry)
 		]
 		const fieldSection = qpack.encodeHeaders(ordered)
 		const headersFrame = encodeFrame(FRAME.HEADERS, fieldSection)
@@ -199,6 +204,7 @@ class H3Client {
 		let respFailed = false
 		let headersEmitted = false
 		let ended = false
+		let pausedByConsumer = false
 
 		const emitHeaders = () => {
 			if (headersEmitted) return
@@ -211,7 +217,10 @@ class H3Client {
 			if (ended) return
 			ended = true
 			if (error) handlers.onError(error)
-			else { emitHeaders(); handlers.onEnd() }
+			else {
+				emitHeaders()
+				handlers.onEnd()
+			}
 		}
 
 		// Read a QUIC varint only when all its bytes are present (its length is encoded in the top 2
@@ -224,15 +233,20 @@ class H3Client {
 			return varint.decode(b, o)
 		}
 
-		stream.on('data', (data: Buffer) => {
-			if (respFailed) return
-			respFrameBuf = Buffer.concat([respFrameBuf, data])
+		// Draining is separate from QUIC delivery so a paused consumer leaves already-decoded
+		// frames buffered here and already-received STREAM bytes buffered on the QuicStream.
+		const drainFrames = (): void => {
+			if (pausedByConsumer || respFailed || ended) return
 			try {
 				while (true) {
 					if (respFrameBuf.length === 0) break
 					let off = 0
-					const t = peekVarint(respFrameBuf, off); if (!t) break; off += t.length
-					const l = peekVarint(respFrameBuf, off); if (!l) break; off += l.length
+					const t = peekVarint(respFrameBuf, off)
+					if (!t) break
+					off += t.length
+					const l = peekVarint(respFrameBuf, off)
+					if (!l) break
+					off += l.length
 					const frameLen = Number(l.value)
 					if (off + frameLen > respFrameBuf.length) break
 					const payload = respFrameBuf.subarray(off, off + frameLen)
@@ -240,14 +254,18 @@ class H3Client {
 					if (t.value === FRAME.HEADERS) {
 						// Prefer dynamic-table-aware decode when the peer's table has entries;
 						// fall back to static-only decoder for the static-only path (RIC=0, Base=0).
-						const maxEntries = Math.floor((this.peerQpackMaxTableCapacity || this.peerDynamicTable.capacity) / 32)
-						const decoded = this.peerDynamicTable.entries.length > 0 || (payload[0] !== 0)
-							? qpack.decodeHeadersWithTable(payload, this.peerDynamicTable, maxEntries)
-							: qpack.decodeHeaders(payload)
+						const maxEntries = Math.floor(
+							(this.peerQpackMaxTableCapacity || this.peerDynamicTable.capacity) / 32
+						)
+						const decoded =
+							this.peerDynamicTable.entries.length > 0 || payload[0] !== 0
+								? qpack.decodeHeadersWithTable(payload, this.peerDynamicTable, maxEntries)
+								: qpack.decodeHeaders(payload)
 						for (const [n, v] of decoded) respHeaders[n] = v
 						emitHeaders()
-					} else if (t.value === FRAME.DATA) {
-						handlers.onData(Buffer.from(payload))
+					} else if (t.value === FRAME.DATA && handlers.onData(Buffer.from(payload)) === false) {
+						setPaused(true)
+						return
 					}
 				}
 			} catch (e) {
@@ -257,6 +275,33 @@ class H3Client {
 				err.code = 'EH3PARSE'
 				finish(err)
 			}
+		}
+
+		const setPaused = (paused: boolean): void => {
+			if (paused === pausedByConsumer) return
+			pausedByConsumer = paused
+			if (paused) stream.pause()
+			else {
+				stream.resume()
+				drainFrames()
+			}
+		}
+
+		// The consumer signals drain through onBackpressure; wrap it so H3Client also pauses the
+		// QUIC stream and withholds MAX_* credit. onData's return value gives the same behavior to
+		// callers that do not wire onBackpressure explicitly.
+		const consumerBackpressure = handlers.onBackpressure
+		if (consumerBackpressure) {
+			handlers.onBackpressure = (paused) => {
+				setPaused(paused)
+				consumerBackpressure(paused)
+			}
+		}
+
+		stream.on('data', (data: Buffer) => {
+			if (respFailed) return
+			respFrameBuf = Buffer.concat([respFrameBuf, data])
+			drainFrames()
 		})
 
 		stream.on('end', () => finish())

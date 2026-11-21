@@ -17,27 +17,42 @@
 // What's NOT implemented (MVP scope):
 //   - Loss detection / retransmission. A PTO probe re-sends handshake CRYPTO or elicits an
 //     ACK, but lost stream data is never retransmitted.
-//   - Connection migration and 0-RTT.
+//   - Connection migration and 0-RTT. 1-RTT TLS PSK resumption is supported (NewSessionTicket +
+//     pre_shared_key); early data is deliberately not offered.
 //   - Stateless reset.
 
 import * as crypto from 'node:crypto'
 import { EventEmitter } from 'node:events'
 
 import { resolveHost, type ResolvedAddress } from '../dns-cache.ts'
-import { CreateALPNExtension, CreatePSKExchangeModesExtension, CreateSignatureAlgorithmsExtension, CreateSNIExtension } from '../extensions/index.ts'
+import {
+	CreateALPNExtension,
+	CreatePSKExchangeModesExtension,
+	CreateSignatureAlgorithmsExtension,
+	CreateSNIExtension
+} from '../extensions/index.ts'
 import logFactory from '../models/log.ts'
+import { getSessionTicket, pskBinder, storeSessionTicket } from '../tls/session-tickets.ts'
 import { CIPHERS, HASHES, MESSAGE_TYPES } from '../utils/config.ts'
 import * as HKDF from '../utils/hkdf.ts'
 
 import * as keys from './keys.ts'
 import * as pkt from './packet.ts'
 import * as tp from './transport-params.ts'
-import * as dgram from './udp.ts'      // seam over node:dgram — same createSocket surface
+import * as dgram from './udp.ts' // seam over node:dgram — same createSocket surface
 import * as varint from './varint.ts'
 
+import type { SessionTicket } from '../tls/session-tickets.ts'
 import type { HashInfo } from '../utils/config.ts'
 
 const log = logFactory('[h3]')
+
+// Receive windows are granted in half-window steps: small enough to keep the peer fed, large
+// enough to avoid a MAX_* frame per packet. The same windows are advertised in our transport
+// parameters (tp.FLOW_CONTROL), so the peer can never outrun the memory we budget.
+const WINDOW_UPDATE_FRACTION = 2
+// Servers that omit the flow-control TPs still get a usable request-body limit.
+const DEFAULT_PEER_SEND_LIMIT = tp.FLOW_CONTROL.maxStreamDataBidiRemote
 
 // -------- types -------------------------------------------------------------
 
@@ -45,22 +60,46 @@ type Epoch = 'initial' | 'handshake' | 'oneRtt'
 
 const EPOCHS: Epoch[] = ['initial', 'handshake', 'oneRtt']
 
-interface EpochMap<T> { initial: T; handshake: T; oneRtt: T }
+interface EpochMap<T> {
+	initial: T
+	handshake: T
+	oneRtt: T
+}
 
 type RetryPacket = Extract<pkt.ParsedPacket, { kind: 'retry' }>
 type NcidFrame = Extract<pkt.QuicFrame, { type: 'new_connection_id' }>
 
 // A packet we put on the wire and keep until it is acked. `payload` is what a handshake
 // retransmission needs; `size` is what congestion control accounts for on 1-RTT.
-interface SentPacket { time: number; payload?: Buffer; size?: number; includesCrypto: boolean }
+interface SentPacket {
+	time: number
+	payload?: Buffer
+	size?: number
+	includesCrypto: boolean
+}
 
-interface DstCidEntry { seq: number; cid: Buffer; statelessResetToken: Buffer; retired: boolean }
+interface DstCidEntry {
+	seq: number
+	cid: Buffer
+	statelessResetToken: Buffer
+	retired: boolean
+}
 
-interface QueuedPacket { packet: Buffer; size: number; pn: number }
+interface QueuedPacket {
+	packet: Buffer
+	size: number
+	pn: number
+}
 
-interface PendingPathChallenge { data: Buffer; resolve: (ok: boolean) => void }
+interface PendingPathChallenge {
+	data: Buffer
+	resolve: (ok: boolean) => void
+}
 
-interface TrafficSecrets { client: Buffer; server: Buffer }
+interface TrafficSecrets {
+	client: Buffer
+	server: Buffer
+}
 
 // NewReno state (RFC 9002 §7.3 + Appendix B). The k-prefixed fields are the spec's constants.
 interface CongestionState {
@@ -79,7 +118,7 @@ interface CongestionState {
 // so the two HKDF functions are looked up through this table instead of the module namespace.
 const HASH_FNS: Record<string, (...bufs: Buffer[]) => Buffer> = {
 	sha256: HKDF.sha256,
-	sha384: HKDF.sha384,
+	sha384: HKDF.sha384
 }
 
 // -------- helpers ---------------------------------------------------------
@@ -102,20 +141,22 @@ function rawX25519ToSpkiDer(raw32: Buffer): Buffer {
 class QuicConnection extends EventEmitter {
 	declare host: string
 	declare port: number
+	/** SNI/certificate identity; differs from `host` only for Alt-Svc alternative authorities. */
+	declare sniHost: string
 
 	declare socket: dgram.UdpSocket | null
 	declare serverAddr: { host: string; port: number } | null
 
 	// Connection IDs
-	declare dstCid: Buffer              // we initially pick the server's dst CID; server may issue a new one
+	declare dstCid: Buffer // we initially pick the server's dst CID; server may issue a new one
 	declare srcCid: Buffer
-	declare serverChosenSrcCid: Buffer | null                     // server's chosen CID (becomes our dstCid for non-Initial packets)
+	declare serverChosenSrcCid: Buffer | null // server's chosen CID (becomes our dstCid for non-Initial packets)
 
 	// Key schedule
 	declare initialKeys: keys.EpochKeys | null
 	declare handshakeKeys: keys.EpochKeys | null
 	declare appKeys: keys.EpochKeys | null
-	declare cipher: HashInfo                      // QUIC TLS handshake: assume AES-128-GCM (Chrome's preferred for h3 Initial). Updated when we see ServerHello cipher.
+	declare cipher: HashInfo // QUIC TLS handshake: assume AES-128-GCM (Chrome's preferred for h3 Initial). Updated when we see ServerHello cipher.
 
 	// Packet number per epoch
 	declare pn: EpochMap<number>
@@ -141,7 +182,7 @@ class QuicConnection extends EventEmitter {
 	// are exempt; CC applies only to 1-RTT stream data. Standalone ACKs and PTO probes
 	// bypass CC so we can always ack and probe even when cwnd is exhausted.
 	declare cc: CongestionState
-	declare appSendQueue: QueuedPacket[]   // 1-RTT stream packets blocked on cwnd
+	declare appSendQueue: QueuedPacket[] // 1-RTT stream packets blocked on cwnd
 
 	// Key update state (RFC 9001 §6). currentPhase is what *we* send under. peerPhase
 	// is what we last saw inbound; when the two disagree on a successfully-decrypted
@@ -149,18 +190,35 @@ class QuicConnection extends EventEmitter {
 	declare currentPhase: number
 	declare appKeysPrev: keys.EpochKeys | null
 	declare appKeysNext: keys.EpochKeys | null
-	declare appSecretsCurrent: TrafficSecrets | null   // {client, server}
+	declare appSecretsCurrent: TrafficSecrets | null // {client, server}
 	declare keyUpdatesSeen: number
 
 	// DATAGRAM (RFC 9221). 0 = peer didn't advertise support.
 	declare peerMaxDatagramFrameSize: number
 
+	// Receive-side flow control (RFC 9000 §19). `recvLimit` is the absolute stream/connection
+	// offset we have granted; `recvConsumed` is how much the application has actually read.
+	// Withholding the next grant is the backpressure signal to the peer.
+	declare recvLimit: number
+	declare recvConsumed: number
+	/** Cumulative bytes accepted from the peer across all streams (for the connection window). */
+	declare recvReceived: number
+	/** Latest MAX_* frame per bucket, replayed on PTO because MAX frames are idempotent. */
+	declare flowControlFrames: Map<string, Buffer>
+
+	// Send-side flow control: the peer's advertised limits plus what we have sent so far.
+	declare peerMaxData: number
+	declare peerMaxDataSent: number
+	declare peerMaxStreamDataBidiLocal: number
+	declare peerMaxStreamDataBidiRemote: number
+	declare peerMaxStreamDataUni: number
+
 	// Connection ID pool (RFC 9000 §5.1). Server issues additional dst CIDs via
 	// NEW_CONNECTION_ID frames; we use them when rotating or migrating.
-	declare availableDstCids: DstCidEntry[]     // [{ seq, cid: Buffer, statelessResetToken: Buffer, retired: false }]
-	declare activeDstCidSeq: number       // seq of the dstCid we're currently sending under
-	declare lowestNotRetired: number      // matches retire_prior_to semantics
-	declare peerActiveConnectionIdLimit: number  // default per RFC 9000 §18.2
+	declare availableDstCids: DstCidEntry[] // [{ seq, cid: Buffer, statelessResetToken: Buffer, retired: false }]
+	declare activeDstCidSeq: number // seq of the dstCid we're currently sending under
+	declare lowestNotRetired: number // matches retire_prior_to semantics
+	declare peerActiveConnectionIdLimit: number // default per RFC 9000 §18.2
 
 	// TLS state
 	declare clientRandom: Buffer | null
@@ -168,16 +226,21 @@ class QuicConnection extends EventEmitter {
 	declare peerAddr: { address: string; port: number } | null
 	declare clientPubRaw32: Buffer | null
 	declare transcript: Buffer[]
+	declare cipherSuite: number
 	declare handshakeSecret: Buffer | null
 	declare cHsTraffic: Buffer | null
 	declare sHsTraffic: Buffer | null
+	declare masterSecret: Buffer | null
+	declare resumptionMasterSecret: Buffer | null
+	declare pskTicket: SessionTicket | null
+	declare pskAccepted: boolean
 	declare alpn: string | null
 	declare handshakeComplete: boolean
 
 	// Streams (h3 layer attaches here)
 	declare streams: Map<number, QuicStream>
-	declare nextClientBidiStreamId: number          // client-initiated bidirectional: 0,4,8,...
-	declare nextClientUniStreamId: number           // client-initiated unidirectional: 2,6,10,...
+	declare nextClientBidiStreamId: number // client-initiated bidirectional: 0,4,8,...
+	declare nextClientUniStreamId: number // client-initiated unidirectional: 2,6,10,...
 
 	// Populated by the HTTP/3 layer to claim server-initiated unidirectional streams.
 	declare onServerStream: ((stream: QuicStream) => void) | undefined
@@ -188,10 +251,12 @@ class QuicConnection extends EventEmitter {
 	declare _pendingPathChallenge: PendingPathChallenge | null
 	declare _closed: boolean
 
-	constructor(host: string, port = 443) {
+	constructor(host: string, port = 443, sniHost?: string) {
 		super()
 		this.host = host
 		this.port = port
+		// Alt-Svc can move the dial target while SNI/certificate identity stays on the origin.
+		this.sniHost = sniHost || host
 
 		this.socket = null
 		this.serverAddr = null
@@ -233,7 +298,7 @@ class QuicConnection extends EventEmitter {
 			ssthresh: Number.MAX_SAFE_INTEGER,
 			bytesInFlight: 0,
 			recoveryStart: 0,
-			congestionEvents: 0,
+			congestionEvents: 0
 		}
 		this.appSendQueue = []
 
@@ -245,19 +310,35 @@ class QuicConnection extends EventEmitter {
 
 		this.peerMaxDatagramFrameSize = 0
 
+		this.recvLimit = tp.FLOW_CONTROL.maxData
+		this.recvConsumed = 0
+		this.recvReceived = 0
+		this.flowControlFrames = new Map()
+
+		this.peerMaxData = tp.FLOW_CONTROL.maxData
+		this.peerMaxDataSent = 0
+		this.peerMaxStreamDataBidiLocal = DEFAULT_PEER_SEND_LIMIT
+		this.peerMaxStreamDataBidiRemote = DEFAULT_PEER_SEND_LIMIT
+		this.peerMaxStreamDataUni = DEFAULT_PEER_SEND_LIMIT
+
 		this.availableDstCids = []
 		this.activeDstCidSeq = 0
 		this.lowestNotRetired = 0
-		this.peerActiveConnectionIdLimit = 2  // default per RFC 9000 §18.2
+		this.peerActiveConnectionIdLimit = 2 // default per RFC 9000 §18.2
 
 		this.clientRandom = null
 		this.clientPrivateKey = null
 		this.peerAddr = null
 		this.clientPubRaw32 = null
 		this.transcript = []
+		this.cipherSuite = CIPHERS.TLS_AES_128_GCM_SHA256
 		this.handshakeSecret = null
 		this.cHsTraffic = null
 		this.sHsTraffic = null
+		this.masterSecret = null
+		this.resumptionMasterSecret = null
+		this.pskTicket = null
+		this.pskAccepted = false
 		this.alpn = null
 		this.handshakeComplete = false
 
@@ -309,7 +390,7 @@ class QuicConnection extends EventEmitter {
 		const cipherList = [
 			CIPHERS.TLS_AES_128_GCM_SHA256,
 			CIPHERS.TLS_AES_256_GCM_SHA384,
-			CIPHERS.TLS_CHACHA20_POLY1305_SHA256,
+			CIPHERS.TLS_CHACHA20_POLY1305_SHA256
 		]
 		const cipherSuites = Buffer.alloc(cipherList.length * 2)
 		cipherList.forEach((id, i) => cipherSuites.writeUInt16BE(id, i * 2))
@@ -322,10 +403,12 @@ class QuicConnection extends EventEmitter {
 		this.clientPrivateKey = x25519Priv
 		this.clientPubRaw32 = x25519Raw
 		const keyShare = (() => {
-			const entry = Buffer.concat([Buffer.from([0x00, 0x1d, 0x00, 0x20]), x25519Raw])  // group=x25519, len=32, key
-			const sharesLen = Buffer.alloc(2); sharesLen.writeUInt16BE(entry.length, 0)
+			const entry = Buffer.concat([Buffer.from([0x00, 0x1d, 0x00, 0x20]), x25519Raw]) // group=x25519, len=32, key
+			const sharesLen = Buffer.alloc(2)
+			sharesLen.writeUInt16BE(entry.length, 0)
 			const extBody = Buffer.concat([sharesLen, entry])
-			const extLen = Buffer.alloc(2); extLen.writeUInt16BE(extBody.length, 0)
+			const extLen = Buffer.alloc(2)
+			extLen.writeUInt16BE(extBody.length, 0)
 			return { extension: Buffer.concat([Buffer.from([0x00, 0x33]), extLen, extBody]) }
 		})()
 
@@ -338,17 +421,19 @@ class QuicConnection extends EventEmitter {
 
 		// QUIC-only supported_versions: only TLS 1.3 (no GREASE, no TLS 1.2).
 		const supportedVersionsQuic = (() => {
-			const body = Buffer.from([0x03, 0x04])  // just TLS 1.3
+			const body = Buffer.from([0x03, 0x04]) // just TLS 1.3
 			const lenByte = Buffer.from([body.length])
 			return Buffer.concat([Buffer.from([0x00, 0x2b]), Buffer.from([0x00, body.length + 1]), lenByte, body])
 		})()
 
 		// X25519-only supported_groups (no MLKEM, no GREASE).
 		const supportedGroupsX25519 = (() => {
-			const groups = Buffer.from([0x00, 0x1d, 0x00, 0x17, 0x00, 0x18])  // X25519, P-256, P-384
-			const ll = Buffer.alloc(2); ll.writeUInt16BE(groups.length, 0)
+			const groups = Buffer.from([0x00, 0x1d, 0x00, 0x17, 0x00, 0x18]) // X25519, P-256, P-384
+			const ll = Buffer.alloc(2)
+			ll.writeUInt16BE(groups.length, 0)
 			const data = Buffer.concat([ll, groups])
-			const el = Buffer.alloc(2); el.writeUInt16BE(data.length, 0)
+			const el = Buffer.alloc(2)
+			el.writeUInt16BE(data.length, 0)
 			return Buffer.concat([Buffer.from([0x00, 0x0a]), el, data])
 		})()
 
@@ -359,32 +444,73 @@ class QuicConnection extends EventEmitter {
 			key_share: keyShare.extension,
 			supported_groups: supportedGroupsX25519,
 			alpn,
-			sni: CreateSNIExtension(this.host),
+			sni: CreateSNIExtension(this.sniHost),
 			psk_key_exchange_modes: CreatePSKExchangeModesExtension(),
-			quic_transport_parameters: tpExt,
+			quic_transport_parameters: tpExt
 		}
 
-		const middleNames = Object.keys(namedExts)
-		const extensionsList = Buffer.concat(middleNames.map(n => namedExts[n]))
-		const extensionsLen = Buffer.alloc(2); extensionsLen.writeUInt16BE(extensionsList.length, 0)
+		// --- TLS 1.3 PSK resumption (RFC 8446 §4.2.11) ---
+		// Offer an h3-scoped ticket from a previous QUIC handshake. pre_shared_key must be the
+		// last ClientHello extension. needVerified=false: QUIC does not validate certificate
+		// chains, so its tickets never carry a verified lineage; the ALPN-scoped store keeps
+		// them out of TCP h2/h1 handshakes that do verify.
+		this.pskTicket = getSessionTicket(this.host, this.port, ['h3'], false)
+		let pskPrefix: Buffer | null = null
+		let pskBindersLen = 0
+		if (this.pskTicket) {
+			const age = Buffer.alloc(4)
+			const ageMs = Date.now() - this.pskTicket.receivedAt
+			age.writeUInt32BE(((ageMs + this.pskTicket.ageAdd) % 0x100000000) >>> 0, 0)
+			const identity = Buffer.concat([
+				Buffer.from([this.pskTicket.ticket.length >> 8, this.pskTicket.ticket.length & 0xff]),
+				this.pskTicket.ticket,
+				age
+			])
+			const identities = Buffer.concat([Buffer.from([identity.length >> 8, identity.length & 0xff]), identity])
+			pskBindersLen = 2 + 1 + this.pskTicket.hashLen
+			const extBodyLen = identities.length + pskBindersLen
+			// The binder is omitted from the transcript, so pskPrefix stops after the identities.
+			pskPrefix = Buffer.concat([Buffer.from([0x00, 0x29, extBodyLen >> 8, extBodyLen & 0xff]), identities])
+		}
+
+		const extensionsList = Buffer.concat([
+			...Object.keys(namedExts).map((n) => namedExts[n]),
+			...(pskPrefix ? [pskPrefix] : [])
+		])
+		const extensionsLen = Buffer.alloc(2)
+		extensionsLen.writeUInt16BE(extensionsList.length, 0)
 
 		const sessionIdLen = Buffer.from([sessionId.length])
-		const cipherSuitesLen = Buffer.alloc(2); cipherSuitesLen.writeUInt16BE(cipherSuites.length, 0)
+		const cipherSuitesLen = Buffer.alloc(2)
+		cipherSuitesLen.writeUInt16BE(cipherSuites.length, 0)
 
 		const clientHelloBody = Buffer.concat([
-			Buffer.from([0x03, 0x03]),   // legacy_version
+			Buffer.from([0x03, 0x03]), // legacy_version
 			this.clientRandom,
-			sessionIdLen, sessionId,
-			cipherSuitesLen, cipherSuites,
+			sessionIdLen,
+			sessionId,
+			cipherSuitesLen,
+			cipherSuites,
 			compression,
-			extensionsLen, extensionsList,
+			extensionsLen,
+			extensionsList
 		])
-		const hsLen = Buffer.alloc(3); hsLen.writeUIntBE(clientHelloBody.length, 0, 3)
-		const handshakeMsg = Buffer.concat([
-			Buffer.from([MESSAGE_TYPES.CLIENT_HELLO]),
-			hsLen,
-			clientHelloBody,
-		])
+		const hsLen = Buffer.alloc(3)
+		hsLen.writeUIntBE(clientHelloBody.length + pskBindersLen, 0, 3)
+
+		let handshakeMsg: Buffer
+		if (this.pskTicket && pskPrefix) {
+			const truncated = Buffer.concat([Buffer.from([MESSAGE_TYPES.CLIENT_HELLO]), hsLen, clientHelloBody])
+			const transcriptHash = HASH_FNS[this.pskTicket.hash](...this.transcript, truncated)
+			const binder = pskBinder(this.pskTicket, transcriptHash)
+			handshakeMsg = Buffer.concat([
+				truncated,
+				Buffer.from([(pskBindersLen - 2) >> 8, (pskBindersLen - 2) & 0xff, this.pskTicket.hashLen]),
+				binder
+			])
+		} else {
+			handshakeMsg = Buffer.concat([Buffer.from([MESSAGE_TYPES.CLIENT_HELLO]), hsLen, clientHelloBody])
+		}
 		this.transcript.push(handshakeMsg)
 
 		// Build CRYPTO frame containing the ClientHello.
@@ -398,7 +524,8 @@ class QuicConnection extends EventEmitter {
 		// Pad the UDP datagram to ≥1200 bytes (RFC 9000 §14.1).
 		const TARGET = 1200
 		const tokenLen = this.retryToken.length
-		const headerOverheadGuess = 1 + 4 + 1 + this.dstCid.length + 1 + this.srcCid.length + (tokenLen > 0 ? 2 : 1) + tokenLen + 2 + 4
+		const headerOverheadGuess =
+			1 + 4 + 1 + this.dstCid.length + 1 + this.srcCid.length + (tokenLen > 0 ? 2 : 1) + tokenLen + 2 + 4
 		const padTarget = TARGET - headerOverheadGuess - 16
 		if (payload.length < padTarget) {
 			return Buffer.concat([payload, Buffer.alloc(padTarget - payload.length, 0x00)])
@@ -415,7 +542,7 @@ class QuicConnection extends EventEmitter {
 			payloadFrames: payload,
 			pn: this.pn.initial,
 			pnLen: 4,
-			clientKeys: this.initialKeys!.client,
+			clientKeys: this.initialKeys!.client
 		})
 		// Record for loss recovery
 		this.sentPackets.initial.set(this.pn.initial, { time: Date.now(), payload, includesCrypto: true })
@@ -439,16 +566,21 @@ class QuicConnection extends EventEmitter {
 		try {
 			let off = 0
 			while (off < msg.length) {
-				const result = pkt.parsePacket(msg, off, {
-					initial:   { server: this.initialKeys?.server, aead: 'aes-128-gcm' },
-					handshake: { server: this.handshakeKeys?.server, aead: this.cipher.aead },
-					oneRtt:    {
-						server: this.appKeys?.server,
-						serverNext: this.appKeysNext?.server,
-						currentPhase: this.currentPhase,
-						aead: this.cipher.aead,
+				const result = pkt.parsePacket(
+					msg,
+					off,
+					{
+						initial: { server: this.initialKeys?.server, aead: 'aes-128-gcm' },
+						handshake: { server: this.handshakeKeys?.server, aead: this.cipher.aead },
+						oneRtt: {
+							server: this.appKeys?.server,
+							serverNext: this.appKeysNext?.server,
+							currentPhase: this.currentPhase,
+							aead: this.cipher.aead
+						}
 					},
-				}, this.srcCid.length)
+					this.srcCid.length
+				)
 				if (!result || result.consumed === 0) break
 				off += result.consumed
 				if (result.kind === '1rtt' && result.usedNextKeys) this._commitKeyUpdate()
@@ -461,7 +593,7 @@ class QuicConnection extends EventEmitter {
 
 	_handlePacket(p: pkt.ParsedPacket): void {
 		if (p.kind === 'initial' || p.kind === 'handshake' || p.kind === '1rtt') {
-			const epoch: Epoch = p.kind === 'initial' ? 'initial' : (p.kind === 'handshake' ? 'handshake' : 'oneRtt')
+			const epoch: Epoch = p.kind === 'initial' ? 'initial' : p.kind === 'handshake' ? 'handshake' : 'oneRtt'
 			if (p.pn > this.largestRecv[epoch]) this.largestRecv[epoch] = p.pn
 			this.recv[epoch].add(p.pn)
 			this.needAck[epoch] = true
@@ -528,7 +660,7 @@ class QuicConnection extends EventEmitter {
 				// widths are attacker-controlled varints that could otherwise span up to 2^62 and
 				// freeze the event loop.
 				const intervals: [lower: number, upper: number][] = [[f.largestAcked - f.firstAckRange, f.largestAcked]]
-				let cursor = (f.largestAcked - f.firstAckRange) - 1
+				let cursor = f.largestAcked - f.firstAckRange - 1
 				for (const r of f.ranges) {
 					cursor -= r.gap + 1
 					const top = cursor
@@ -541,7 +673,10 @@ class QuicConnection extends EventEmitter {
 				const outstanding = [...sent.keys()]
 				for (const pn of outstanding) {
 					for (const [bot, top] of intervals) {
-						if (pn >= bot && pn <= top) { ackOne(pn); break }
+						if (pn >= bot && pn <= top) {
+							ackOne(pn)
+							break
+						}
 					}
 				}
 			}
@@ -559,7 +694,7 @@ class QuicConnection extends EventEmitter {
 			if (f.offset > expected || end <= expected) return
 			this.cryptoBufIn[epoch] = Buffer.concat([
 				this.cryptoBufIn[epoch],
-				f.data.subarray(Math.max(0, expected - f.offset)),
+				f.data.subarray(Math.max(0, expected - f.offset))
 			])
 			this._processCryptoBuffer(epoch)
 			return
@@ -620,11 +755,27 @@ class QuicConnection extends EventEmitter {
 			this.emit('datagram', f.data)
 			return
 		}
-		if (f.type === 'flow_control' || f.type === 'max_stream_data' || f.type === 'new_token' || f.type === 'ping') return
+		if (f.type === 'flow_control') {
+			if (f.subtype === pkt.FRAME_TYPE.MAX_DATA) this._onPeerMaxData(f.value)
+			return
+		}
+		if (f.type === 'max_stream_data') {
+			this._onPeerMaxStreamData(f.streamId, f.value)
+			return
+		}
+		if (
+			f.type === 'data_blocked' ||
+			f.type === 'stream_data_blocked' ||
+			f.type === 'new_token' ||
+			f.type === 'ping'
+		)
+			return
 		// ignore unknown
 	}
 
-	_armPto(): void { this._rearmPto() }
+	_armPto(): void {
+		this._rearmPto()
+	}
 	_rearmPto(): void {
 		if (this.ptoTimer) clearTimeout(this.ptoTimer)
 		const totalOutstanding =
@@ -669,7 +820,9 @@ class QuicConnection extends EventEmitter {
 				if (info.size) this.cc.bytesInFlight = Math.max(0, this.cc.bytesInFlight - info.size)
 				this._onCongestionEvent(info.time)
 				if (!this.appKeys) return
-				const frame = Buffer.from([0x01])
+				// MAX frames are idempotent, so replaying the latest grants with the PING is safe
+				// and prevents a lost grant from wedging a paused-then-resumed response.
+				const frame = Buffer.concat([...this.flowControlFrames.values(), Buffer.from([0x01])])
 				const packet = pkt.buildOneRtt({
 					dstCid: this.dstCid,
 					payloadFrames: frame,
@@ -677,7 +830,7 @@ class QuicConnection extends EventEmitter {
 					pnLen: 2,
 					clientKeys: this.appKeys.client,
 					aead: this.cipher.aead,
-					keyPhase: this.currentPhase,
+					keyPhase: this.currentPhase
 				})
 				this.pn.oneRtt++
 				this._sendDatagram(packet)
@@ -715,7 +868,11 @@ class QuicConnection extends EventEmitter {
 			this._processEncryptedExtensions(body)
 			return
 		}
-		if (type === MESSAGE_TYPES.SERVER_CERTIFICATE || type === 0x19 /*CompressedCertificate*/ || type === MESSAGE_TYPES.SERVER_CERTIFICATE_VERIFY) {
+		if (
+			type === MESSAGE_TYPES.SERVER_CERTIFICATE ||
+			type === 0x19 /*CompressedCertificate*/ ||
+			type === MESSAGE_TYPES.SERVER_CERTIFICATE_VERIFY
+		) {
 			this.transcript.push(full)
 			return
 		}
@@ -724,9 +881,57 @@ class QuicConnection extends EventEmitter {
 			this.transcript.push(full)
 			this._deriveApplicationKeys()
 			this._sendClientFinished()
+			// Resumption master secret covers the transcript through our Finished; later
+			// NewSessionTicket messages derive their PSK from it (RFC 8446 §7.1).
+			this._deriveResumptionMasterSecret()
 			return
 		}
-		if (type === 0x04 /*NewSessionTicket*/) return
+		if (type === 0x04 /*NewSessionTicket*/) {
+			this._handleNewSessionTicket(body)
+			return
+		}
+	}
+
+	// NewSessionTicket (RFC 8446 §4.6.1) arrives on the 1-RTT CRYPTO stream. Derive the PSK
+	// from the nonce and our resumption master secret, then cache it for the next h3 handshake.
+	// Malformed tickets are ignored — they only cost a future full handshake.
+	_handleNewSessionTicket(body: Buffer): void {
+		if (!this.resumptionMasterSecret || !this.cipher) return
+		try {
+			let p = 0
+			const lifetime = body.readUInt32BE(p)
+			p += 4
+			const ageAdd = body.readUInt32BE(p)
+			p += 4
+			const nonceLen = body[p++]
+			if (body.length < p + nonceLen + 2) return
+			const nonce = body.subarray(p, p + nonceLen)
+			p += nonceLen
+			const ticketLen = body.readUInt16BE(p)
+			p += 2
+			if (ticketLen === 0 || body.length < p + ticketLen) return
+			if (lifetime === 0) return // RFC 8446 §4.6.1: discard immediately
+			const ticket = Buffer.from(body.subarray(p, p + ticketLen))
+			const { hash, hashLen } = this.cipher
+			const psk = HKDF.ExpandLabel(this.resumptionMasterSecret, 'resumption', nonce, hashLen, hash, hashLen)
+			storeSessionTicket(this.host, this.port, {
+				ticket,
+				psk,
+				cipherSuite: this.cipherSuite,
+				hash,
+				hashLen,
+				lifetime,
+				ageAdd,
+				receivedAt: Date.now(),
+				alpn: this.alpn || 'h3',
+				// QUIC never validates a certificate chain, so this ticket cannot seed a
+				// later handshake that requires verification. ALPN scoping keeps it h3-only.
+				verified: false
+			})
+			log.debug(`[resume] QUIC stored session ticket for ${this.host}:${this.port} (${ticketLen}B, ${lifetime}s)`)
+		} catch (e) {
+			log.notify(`[resume] ignoring malformed QUIC NewSessionTicket: ${(e as Error).message}`)
+		}
 	}
 
 	_processServerHello(body: Buffer): void {
@@ -735,58 +940,118 @@ class QuicConnection extends EventEmitter {
 		let o = 2 + 32
 		const sidLen = body[o++]
 		o += sidLen
-		const cipherSuite = body.readUInt16BE(o); o += 2
+		const cipherSuite = body.readUInt16BE(o)
+		o += 2
 		this.cipher = HASHES[cipherSuite.toString(16)]
-		o += 1                                  // legacy compression method — always null in TLS 1.3
-		const extLen = body.readUInt16BE(o); o += 2
+		this.cipherSuite = cipherSuite
+		o += 1 // legacy compression method — always null in TLS 1.3
+		const extLen = body.readUInt16BE(o)
+		o += 2
 		const end = o + extLen
 		let serverKShare: { group: number; key: Buffer } | null = null
+		let pskSelected = false
 		while (o + 4 <= end) {
-			const et = body.readUInt16BE(o); o += 2
-			const el = body.readUInt16BE(o); o += 2
-			const ed = body.subarray(o, o + el); o += el
+			const et = body.readUInt16BE(o)
+			o += 2
+			const el = body.readUInt16BE(o)
+			o += 2
+			const ed = body.subarray(o, o + el)
+			o += el
 			if (et === 0x0033) {
 				const group = ed.readUInt16BE(0)
 				const klen = ed.readUInt16BE(2)
 				const key = ed.subarray(4, 4 + klen)
 				serverKShare = { group, key }
+			} else if (et === 0x0029) {
+				// pre_shared_key: the server accepted our offered ticket (selected_identity = 0).
+				pskSelected = true
 			}
 		}
+		if (pskSelected) {
+			const err: Error | null = !this.pskTicket
+				? new Error('QUIC: ServerHello selected a PSK that was never offered')
+				: this.cipher.hash !== this.pskTicket.hash
+					? new Error(
+							`QUIC: ServerHello selected a PSK whose hash (${this.pskTicket.hash}) does not match the negotiated suite (${this.cipher.hash})`
+						)
+					: null
+			if (err) {
+				this.emit('error', err)
+				return
+			}
+		}
+		this.pskAccepted = pskSelected
+		if (pskSelected) log.notify('[resume] QUIC server accepted the offered PSK')
+		else if (this.pskTicket) log.debug('[resume] QUIC server rejected the PSK; full handshake')
 		if (!serverKShare || serverKShare.group !== 0x001d) {
 			this.emit('error', new Error(`unsupported group in ServerHello: 0x${serverKShare?.group?.toString(16)}`))
 			return
 		}
 		// X25519 ECDH
-		const serverPub = crypto.createPublicKey({ type: 'spki', format: 'der', key: rawX25519ToSpkiDer(serverKShare.key) })
+		const serverPub = crypto.createPublicKey({
+			type: 'spki',
+			format: 'der',
+			key: rawX25519ToSpkiDer(serverKShare.key)
+		})
 		const shared = crypto.diffieHellman({ publicKey: serverPub, privateKey: this.clientPrivateKey! })
 
 		// Derive handshake-traffic secrets
 		const hashFn = HASH_FNS[this.cipher.hash]
 		const thSH = hashFn(this.transcript[0], this.transcript[1])
 		const zeros = Buffer.alloc(this.cipher.hashLen, 0x00)
-		const earlySecret = HKDF.Extract(this.cipher.hash, zeros, zeros)
+		// With an accepted PSK the Early Secret is extracted from the ticket's PSK instead of
+		// zeros (RFC 8446 §7.1); the rest of the schedule is unchanged.
+		const earlySecret =
+			this.pskAccepted && this.pskTicket
+				? HKDF.Extract(this.cipher.hash, zeros, this.pskTicket.psk)
+				: HKDF.Extract(this.cipher.hash, zeros, zeros)
 		const emptyHash = crypto.createHash(this.cipher.hash).update(Buffer.alloc(0)).digest()
-		const derived0 = HKDF.ExpandLabel(earlySecret, 'derived', emptyHash, this.cipher.hashLen, this.cipher.hash, this.cipher.hashLen)
+		const derived0 = HKDF.ExpandLabel(
+			earlySecret,
+			'derived',
+			emptyHash,
+			this.cipher.hashLen,
+			this.cipher.hash,
+			this.cipher.hashLen
+		)
 		this.handshakeSecret = HKDF.Extract(this.cipher.hash, derived0, shared)
-		this.cHsTraffic = HKDF.ExpandLabel(this.handshakeSecret, 'c hs traffic', thSH, this.cipher.hashLen, this.cipher.hash, this.cipher.hashLen)
-		this.sHsTraffic = HKDF.ExpandLabel(this.handshakeSecret, 's hs traffic', thSH, this.cipher.hashLen, this.cipher.hash, this.cipher.hashLen)
+		this.cHsTraffic = HKDF.ExpandLabel(
+			this.handshakeSecret,
+			'c hs traffic',
+			thSH,
+			this.cipher.hashLen,
+			this.cipher.hash,
+			this.cipher.hashLen
+		)
+		this.sHsTraffic = HKDF.ExpandLabel(
+			this.handshakeSecret,
+			's hs traffic',
+			thSH,
+			this.cipher.hashLen,
+			this.cipher.hash,
+			this.cipher.hashLen
+		)
 
 		// QUIC handshake-epoch keys: same labels but length and AEAD chosen by negotiated cipher
 		this.handshakeKeys = {
 			client: keys.deriveKeysFromSecret(this.cHsTraffic, this.cipher.hash, this.cipher.keyLen, 12),
-			server: keys.deriveKeysFromSecret(this.sHsTraffic, this.cipher.hash, this.cipher.keyLen, 12),
+			server: keys.deriveKeysFromSecret(this.sHsTraffic, this.cipher.hash, this.cipher.keyLen, 12)
 		}
 	}
 
 	_processEncryptedExtensions(body: Buffer): void {
 		// Find ALPN to confirm h3 was picked, plus parse peer transport_parameters (id 0x39).
 		let p = 0
-		const total = body.readUInt16BE(p); p += 2
+		const total = body.readUInt16BE(p)
+		p += 2
 		const end = p + total
 		while (p + 4 <= end) {
-			const t = body.readUInt16BE(p); p += 2
-			const l = body.readUInt16BE(p); p += 2
-			const data = body.subarray(p, p + l); p += l
+			const t = body.readUInt16BE(p)
+			p += 2
+			const l = body.readUInt16BE(p)
+			p += 2
+			const data = body.subarray(p, p + l)
+			p += l
 			if (t === 0x0010) {
 				const listLen = data.readUInt16BE(0)
 				if (listLen > 0) {
@@ -800,26 +1065,56 @@ class QuicConnection extends EventEmitter {
 					log.notify(`[datagram] peer supports DATAGRAM up to ${this.peerMaxDatagramFrameSize}B`)
 				}
 				this.peerActiveConnectionIdLimit = asParamNumber(peerTp[tp.TP.active_connection_id_limit], 2)
+				this.peerMaxData = asParamNumber(peerTp[tp.TP.initial_max_data], this.peerMaxData)
+				this.peerMaxStreamDataBidiLocal = asParamNumber(
+					peerTp[tp.TP.initial_max_stream_data_bidi_local],
+					this.peerMaxStreamDataBidiLocal
+				)
+				this.peerMaxStreamDataBidiRemote = asParamNumber(
+					peerTp[tp.TP.initial_max_stream_data_bidi_remote],
+					this.peerMaxStreamDataBidiRemote
+				)
+				this.peerMaxStreamDataUni = asParamNumber(
+					peerTp[tp.TP.initial_max_stream_data_uni],
+					this.peerMaxStreamDataUni
+				)
 			}
 		}
 	}
 
 	_validateServerFinished(body: Buffer): void {
 		const transcriptHash = HASH_FNS[this.cipher.hash](...this.transcript)
-		const finishedKey = HKDF.ExpandLabel(this.sHsTraffic!, 'finished', Buffer.alloc(0), this.cipher.hashLen, this.cipher.hash, this.cipher.hashLen)
+		const finishedKey = HKDF.ExpandLabel(
+			this.sHsTraffic!,
+			'finished',
+			Buffer.alloc(0),
+			this.cipher.hashLen,
+			this.cipher.hash,
+			this.cipher.hashLen
+		)
 		const expected = crypto.createHmac(this.cipher.hash, finishedKey).update(transcriptHash).digest()
 		if (!crypto.timingSafeEqual(body, expected)) throw new Error('QUIC: Server Finished verification failed')
 	}
 
 	_sendClientFinished(): void {
 		const transcriptHash = HASH_FNS[this.cipher.hash](...this.transcript)
-		const finishedKey = HKDF.ExpandLabel(this.cHsTraffic!, 'finished', Buffer.alloc(0), this.cipher.hashLen, this.cipher.hash, this.cipher.hashLen)
-		this._clientFinishedVerifyData = crypto.createHmac(this.cipher.hash, finishedKey).update(transcriptHash).digest()
+		const finishedKey = HKDF.ExpandLabel(
+			this.cHsTraffic!,
+			'finished',
+			Buffer.alloc(0),
+			this.cipher.hashLen,
+			this.cipher.hash,
+			this.cipher.hashLen
+		)
+		this._clientFinishedVerifyData = crypto
+			.createHmac(this.cipher.hash, finishedKey)
+			.update(transcriptHash)
+			.digest()
 		this._sendClientFinishedRaw()
 		const finishedMsg = Buffer.concat([
 			Buffer.from([MESSAGE_TYPES.FINISHED]),
 			Buffer.from([0x00, 0x00, this.cipher.hashLen]),
-			this._clientFinishedVerifyData,
+			this._clientFinishedVerifyData
 		])
 		this.transcript.push(finishedMsg)
 	}
@@ -828,10 +1123,11 @@ class QuicConnection extends EventEmitter {
 		const finishedMsg = Buffer.concat([
 			Buffer.from([MESSAGE_TYPES.FINISHED]),
 			Buffer.from([0x00, 0x00, this.cipher.hashLen]),
-			this._clientFinishedVerifyData!,
+			this._clientFinishedVerifyData!
 		])
 		const cryptoFrame = pkt.encodeCryptoFrame(0, finishedMsg)
-		const ackFrame = this.largestRecv.handshake >= 0 ? pkt.encodeAckFrame(this.largestRecv.handshake) : Buffer.alloc(0)
+		const ackFrame =
+			this.largestRecv.handshake >= 0 ? pkt.encodeAckFrame(this.largestRecv.handshake) : Buffer.alloc(0)
 		if (ackFrame.length) this.needAck.handshake = false
 		const payload = Buffer.concat([ackFrame, cryptoFrame])
 		const packet = pkt.buildHandshake({
@@ -841,7 +1137,7 @@ class QuicConnection extends EventEmitter {
 			pn: this.pn.handshake,
 			pnLen: 4,
 			clientKeys: this.handshakeKeys!.client,
-			aead: this.cipher.aead,
+			aead: this.cipher.aead
 		})
 		this.sentPackets.handshake.set(this.pn.handshake, { time: Date.now(), payload, includesCrypto: true })
 		this.pn.handshake++
@@ -852,22 +1148,69 @@ class QuicConnection extends EventEmitter {
 	_deriveApplicationKeys(): void {
 		const transcriptHash = HASH_FNS[this.cipher.hash](...this.transcript)
 		const emptyHash = crypto.createHash(this.cipher.hash).update(Buffer.alloc(0)).digest()
-		const derivedSecret = HKDF.ExpandLabel(this.handshakeSecret!, 'derived', emptyHash, this.cipher.hashLen, this.cipher.hash, this.cipher.hashLen)
+		const derivedSecret = HKDF.ExpandLabel(
+			this.handshakeSecret!,
+			'derived',
+			emptyHash,
+			this.cipher.hashLen,
+			this.cipher.hash,
+			this.cipher.hashLen
+		)
 		const masterSecret = HKDF.Extract(this.cipher.hash, derivedSecret, Buffer.alloc(this.cipher.hashLen, 0x00))
-		const cAppTraffic = HKDF.ExpandLabel(masterSecret, 'c ap traffic', transcriptHash, this.cipher.hashLen, this.cipher.hash, this.cipher.hashLen)
-		const sAppTraffic = HKDF.ExpandLabel(masterSecret, 's ap traffic', transcriptHash, this.cipher.hashLen, this.cipher.hash, this.cipher.hashLen)
+		this.masterSecret = masterSecret
+		const cAppTraffic = HKDF.ExpandLabel(
+			masterSecret,
+			'c ap traffic',
+			transcriptHash,
+			this.cipher.hashLen,
+			this.cipher.hash,
+			this.cipher.hashLen
+		)
+		const sAppTraffic = HKDF.ExpandLabel(
+			masterSecret,
+			's ap traffic',
+			transcriptHash,
+			this.cipher.hashLen,
+			this.cipher.hash,
+			this.cipher.hashLen
+		)
 		this.appKeys = {
 			client: keys.deriveKeysFromSecret(cAppTraffic, this.cipher.hash, this.cipher.keyLen, 12),
-			server: keys.deriveKeysFromSecret(sAppTraffic, this.cipher.hash, this.cipher.keyLen, 12),
+			server: keys.deriveKeysFromSecret(sAppTraffic, this.cipher.hash, this.cipher.keyLen, 12)
 		}
 		this.appSecretsCurrent = { client: cAppTraffic, server: sAppTraffic }
 		this._precomputeNextPhaseKeys()
 	}
 
+	_deriveResumptionMasterSecret(): void {
+		if (!this.masterSecret) return
+		const transcriptHash = HASH_FNS[this.cipher.hash](...this.transcript)
+		this.resumptionMasterSecret = HKDF.ExpandLabel(
+			this.masterSecret,
+			'res master',
+			transcriptHash,
+			this.cipher.hashLen,
+			this.cipher.hash,
+			this.cipher.hashLen
+		)
+	}
+
 	_precomputeNextPhaseKeys(): void {
 		this.appKeysNext = {
-			client: keys.deriveKeyUpdate(this.appSecretsCurrent!.client, this.cipher.hash, this.cipher.keyLen, 12, this.appKeys!.client.hp),
-			server: keys.deriveKeyUpdate(this.appSecretsCurrent!.server, this.cipher.hash, this.cipher.keyLen, 12, this.appKeys!.server.hp),
+			client: keys.deriveKeyUpdate(
+				this.appSecretsCurrent!.client,
+				this.cipher.hash,
+				this.cipher.keyLen,
+				12,
+				this.appKeys!.client.hp
+			),
+			server: keys.deriveKeyUpdate(
+				this.appSecretsCurrent!.server,
+				this.cipher.hash,
+				this.cipher.keyLen,
+				12,
+				this.appKeys!.server.hp
+			)
 		}
 	}
 
@@ -878,7 +1221,7 @@ class QuicConnection extends EventEmitter {
 		this.appKeys = this.appKeysNext
 		this.appSecretsCurrent = {
 			client: this.appKeysNext!.client.secret,
-			server: this.appKeysNext!.server.secret,
+			server: this.appKeysNext!.server.secret
 		}
 		this.currentPhase ^= 1
 		this.keyUpdatesSeen++
@@ -901,7 +1244,7 @@ class QuicConnection extends EventEmitter {
 				payloadFrames: this._padInitialPayload(pkt.encodeAckFrame(this.largestRecv.initial)),
 				pn: this.pn.initial,
 				pnLen: 4,
-				clientKeys: this.initialKeys.client,
+				clientKeys: this.initialKeys.client
 			})
 			this.pn.initial++
 			this._sendDatagram(packet)
@@ -913,7 +1256,7 @@ class QuicConnection extends EventEmitter {
 				pn: this.pn.handshake,
 				pnLen: 4,
 				clientKeys: this.handshakeKeys.client,
-				aead: this.cipher.aead,
+				aead: this.cipher.aead
 			})
 			this.pn.handshake++
 			this._sendDatagram(packet)
@@ -926,7 +1269,7 @@ class QuicConnection extends EventEmitter {
 				pnLen: 2,
 				clientKeys: this.appKeys.client,
 				aead: this.cipher.aead,
-				keyPhase: this.currentPhase,
+				keyPhase: this.currentPhase
 			})
 			this.pn.oneRtt++
 			this._sendDatagram(packet)
@@ -938,6 +1281,7 @@ class QuicConnection extends EventEmitter {
 		const id = this.nextClientUniStreamId
 		this.nextClientUniStreamId += 4
 		const stream = new QuicStream(this, id, 'uni')
+		stream.sendLimit = this.peerMaxStreamDataUni
 		this.streams.set(id, stream)
 		return stream
 	}
@@ -945,6 +1289,7 @@ class QuicConnection extends EventEmitter {
 		const id = this.nextClientBidiStreamId
 		this.nextClientBidiStreamId += 4
 		const stream = new QuicStream(this, id, 'bidi')
+		stream.sendLimit = this.peerMaxStreamDataBidiRemote
 		this.streams.set(id, stream)
 		return stream
 	}
@@ -954,9 +1299,13 @@ class QuicConnection extends EventEmitter {
 		const frame = pkt.encodePathResponseFrame(challengeData)
 		const pn = this.pn.oneRtt++
 		const packet = pkt.buildOneRtt({
-			dstCid: this.dstCid, payloadFrames: frame, pn, pnLen: 2,
-			clientKeys: this.appKeys.client, aead: this.cipher.aead,
-			keyPhase: this.currentPhase,
+			dstCid: this.dstCid,
+			payloadFrames: frame,
+			pn,
+			pnLen: 2,
+			clientKeys: this.appKeys.client,
+			aead: this.cipher.aead,
+			keyPhase: this.currentPhase
 		})
 		this._sendDatagram(packet)
 	}
@@ -969,9 +1318,13 @@ class QuicConnection extends EventEmitter {
 		const frame = pkt.encodePathChallengeFrame(data)
 		const pn = this.pn.oneRtt++
 		const packet = pkt.buildOneRtt({
-			dstCid: this.dstCid, payloadFrames: frame, pn, pnLen: 2,
-			clientKeys: this.appKeys.client, aead: this.cipher.aead,
-			keyPhase: this.currentPhase,
+			dstCid: this.dstCid,
+			payloadFrames: frame,
+			pn,
+			pnLen: 2,
+			clientKeys: this.appKeys.client,
+			aead: this.cipher.aead,
+			keyPhase: this.currentPhase
 		})
 		this._sendDatagram(packet)
 		return new Promise<boolean>((resolve, reject) => {
@@ -982,7 +1335,13 @@ class QuicConnection extends EventEmitter {
 				}
 			}, timeoutMs)
 			t.unref?.()
-			this._pendingPathChallenge = { data, resolve: (ok: boolean) => { clearTimeout(t); resolve(ok) } }
+			this._pendingPathChallenge = {
+				data,
+				resolve: (ok: boolean) => {
+					clearTimeout(t)
+					resolve(ok)
+				}
+			}
 		})
 	}
 
@@ -990,7 +1349,7 @@ class QuicConnection extends EventEmitter {
 	// for retirement on the next outbound 1-RTT packet.
 	_onNewConnectionId(f: NcidFrame): void {
 		// Reject if we'd exceed our own active_connection_id_limit (we said 8).
-		const live = this.availableDstCids.filter(e => !e.retired).length
+		const live = this.availableDstCids.filter((e) => !e.retired).length
 		if (live >= 8) {
 			log.notify(`[cid] peer overflowing active_connection_id_limit; dropping seq=${f.seq}`)
 			return
@@ -999,17 +1358,17 @@ class QuicConnection extends EventEmitter {
 			seq: f.seq,
 			cid: f.cid,
 			statelessResetToken: f.statelessResetToken,
-			retired: false,
+			retired: false
 		})
 		if (f.retirePriorTo > this.lowestNotRetired) {
-			const toRetire = this.availableDstCids.filter(e => e.seq < f.retirePriorTo && !e.retired)
+			const toRetire = this.availableDstCids.filter((e) => e.seq < f.retirePriorTo && !e.retired)
 			for (const e of toRetire) {
 				e.retired = true
 				this._sendRetireConnectionId(e.seq)
 			}
 			this.lowestNotRetired = f.retirePriorTo
 		}
-		log.notify(`[cid] +seq=${f.seq} (pool size=${this.availableDstCids.filter(e=>!e.retired).length})`)
+		log.notify(`[cid] +seq=${f.seq} (pool size=${this.availableDstCids.filter((e) => !e.retired).length})`)
 	}
 
 	_sendRetireConnectionId(seq: number): void {
@@ -1017,9 +1376,13 @@ class QuicConnection extends EventEmitter {
 		const frame = pkt.encodeRetireConnectionIdFrame(seq)
 		const pn = this.pn.oneRtt++
 		const packet = pkt.buildOneRtt({
-			dstCid: this.dstCid, payloadFrames: frame, pn, pnLen: 2,
-			clientKeys: this.appKeys.client, aead: this.cipher.aead,
-			keyPhase: this.currentPhase,
+			dstCid: this.dstCid,
+			payloadFrames: frame,
+			pn,
+			pnLen: 2,
+			clientKeys: this.appKeys.client,
+			aead: this.cipher.aead,
+			keyPhase: this.currentPhase
 		})
 		this._sendDatagram(packet)
 	}
@@ -1028,13 +1391,13 @@ class QuicConnection extends EventEmitter {
 	// unretired CID is available. Migration support (path validation) is separate; this just
 	// changes which CID we address packets to.
 	rotateConnectionId(): number | null {
-		const next = this.availableDstCids.find(e => !e.retired && e.seq !== this.activeDstCidSeq)
+		const next = this.availableDstCids.find((e) => !e.retired && e.seq !== this.activeDstCidSeq)
 		if (!next) return null
 		const oldSeq = this.activeDstCidSeq
 		this.dstCid = next.cid
 		this.activeDstCidSeq = next.seq
 		// Retire the one we were using
-		const oldEntry = this.availableDstCids.find(e => e.seq === oldSeq)
+		const oldEntry = this.availableDstCids.find((e) => e.seq === oldSeq)
 		if (oldEntry) {
 			oldEntry.retired = true
 			this._sendRetireConnectionId(oldSeq)
@@ -1055,13 +1418,88 @@ class QuicConnection extends EventEmitter {
 		}
 		const pn = this.pn.oneRtt
 		const packet = pkt.buildOneRtt({
-			dstCid: this.dstCid, payloadFrames: frame, pn, pnLen: 2,
-			clientKeys: this.appKeys.client, aead: this.cipher.aead,
-			keyPhase: this.currentPhase,
+			dstCid: this.dstCid,
+			payloadFrames: frame,
+			pn,
+			pnLen: 2,
+			clientKeys: this.appKeys.client,
+			aead: this.cipher.aead,
+			keyPhase: this.currentPhase
 		})
 		this.pn.oneRtt++
 		// Datagrams are unreliable — we don't track them for retransmission.
 		this._sendDatagram(packet)
+	}
+
+	// --- Flow control (RFC 9000 §19) -----------------------------------------
+	//
+	// MAX_* frames are sent directly (not through NewReno): they are tiny, idempotent, and must
+	// still get out when cwnd is full. The latest frame per bucket is remembered and replayed on
+	// PTO so a lost grant cannot stall a response whose consumer has stopped reading.
+
+	_sendFlowControlFrame(frame: Buffer): void {
+		if (!this.appKeys || this._closed) return
+		const packet = pkt.buildOneRtt({
+			dstCid: this.dstCid,
+			payloadFrames: frame,
+			pn: this.pn.oneRtt,
+			pnLen: 2,
+			clientKeys: this.appKeys.client,
+			aead: this.cipher.aead,
+			keyPhase: this.currentPhase
+		})
+		this.pn.oneRtt++
+		this._sendDatagram(packet)
+	}
+
+	_grantFlowControl(key: string, frame: Buffer): void {
+		this.flowControlFrames.set(key, frame)
+		this._sendFlowControlFrame(frame)
+	}
+
+	/** Called by QuicStream only when bytes actually reach the application. */
+	_onBytesConsumed(stream: QuicStream, bytes: number): void {
+		if (bytes <= 0) return
+		stream.recvConsumed += bytes
+		this.recvConsumed += bytes
+		this._grantStreamCredit(stream)
+		this._grantConnectionCredit()
+	}
+
+	_grantStreamCredit(stream: QuicStream): void {
+		// A paused consumer must not grant more credit: that is the whole backpressure contract.
+		if (stream.paused || this._closed) return
+		const step = Math.max(1, Math.floor(stream.recvWindow / WINDOW_UPDATE_FRACTION))
+		if (stream.recvConsumed + step < stream.recvLimit) return
+		stream.recvLimit = stream.recvConsumed + stream.recvWindow
+		this._grantFlowControl(`stream:${stream.id}`, pkt.encodeMaxStreamDataFrame(stream.id, stream.recvLimit))
+	}
+
+	_grantConnectionCredit(): void {
+		if (this._closed) return
+		const step = Math.max(1, Math.floor(tp.FLOW_CONTROL.maxData / WINDOW_UPDATE_FRACTION))
+		if (this.recvConsumed + step < this.recvLimit) return
+		this.recvLimit = this.recvConsumed + tp.FLOW_CONTROL.maxData
+		this._grantFlowControl('connection', pkt.encodeMaxDataFrame(this.recvLimit))
+	}
+
+	_onPeerMaxData(value: number): void {
+		if (value <= this.peerMaxData) return
+		this.peerMaxData = value
+		for (const stream of this.streams.values()) stream._flushSend()
+	}
+
+	_onPeerMaxStreamData(streamId: number, value: number): void {
+		const stream = this.streams.get(streamId)
+		stream?._applyPeerLimit(value)
+	}
+
+	_canSend(stream: QuicStream, bytes: number): boolean {
+		return this.peerMaxDataSent + bytes <= this.peerMaxData && stream.sendOffset + bytes <= stream.sendLimit
+	}
+
+	_reserveSend(bytes: number): void {
+		this.peerMaxDataSent += bytes
 	}
 
 	sendStreamData(streamId: number, offset: number, data: Buffer, fin: boolean): void {
@@ -1074,7 +1512,7 @@ class QuicConnection extends EventEmitter {
 			pnLen: 2,
 			clientKeys: this.appKeys.client,
 			aead: this.cipher.aead,
-			keyPhase: this.currentPhase,
+			keyPhase: this.currentPhase
 		})
 		const pn = this.pn.oneRtt++
 		this._send1Rtt(packet, pn)
@@ -1104,7 +1542,7 @@ class QuicConnection extends EventEmitter {
 			this.cc.cwnd += info.size
 		} else {
 			// Congestion avoidance — additive increase, per RFC 9002 §7.3.2.
-			this.cc.cwnd += Math.floor(this.cc.kMaxDatagramSize * info.size / this.cc.cwnd)
+			this.cc.cwnd += Math.floor((this.cc.kMaxDatagramSize * info.size) / this.cc.cwnd)
 		}
 		this._drainSendQueue()
 	}
@@ -1143,10 +1581,11 @@ class QuicConnection extends EventEmitter {
 				const socket = this.socket
 				const reasonBuf = Buffer.from(reason, 'utf8')
 				const frame = Buffer.concat([
-					Buffer.from([0x1c]),                                  // CONNECTION_CLOSE (transport)
-					varint.encode(code),                     // error code
-					varint.encode(0),                        // frame_type that caused (0 = generic)
-					varint.encode(reasonBuf.length), reasonBuf,
+					Buffer.from([0x1c]), // CONNECTION_CLOSE (transport)
+					varint.encode(code), // error code
+					varint.encode(0), // frame_type that caused (0 = generic)
+					varint.encode(reasonBuf.length),
+					reasonBuf
 				])
 				const packet = pkt.buildOneRtt({
 					dstCid: this.dstCid,
@@ -1155,16 +1594,20 @@ class QuicConnection extends EventEmitter {
 					pnLen: 2,
 					clientKeys: this.appKeys.client,
 					aead: this.cipher.aead,
-					keyPhase: this.currentPhase,
+					keyPhase: this.currentPhase
 				})
 				this.pn.oneRtt++
 				socket.send(packet, this.port, this.serverAddr?.host ?? this.host, () => {
-					try { socket.close() } catch {}
+					try {
+						socket.close()
+					} catch {}
 				})
 				return
 			}
 		} catch {}
-		try { this.socket?.close() } catch {}
+		try {
+			this.socket?.close()
+		} catch {}
 	}
 }
 
@@ -1180,25 +1623,118 @@ class QuicStream extends EventEmitter {
 	// chunk arrives; every read goes through `|| 0` so it behaves as zero.
 	declare _pendingBytes: number | undefined
 
+	// Receive flow control: `recvLimit` is granted by us, `recvConsumed` is read by the app.
+	declare recvLimit: number
+	declare recvWindow: number
+	declare recvConsumed: number
+	declare highestOffset: number
+	declare paused: boolean
+	declare _flowControlErrored: boolean
+
+	// Send flow control: peer grants are pushed in via MAX_*; blocked writes wait here.
+	declare sendLimit: number
+	declare blocked: boolean
+	declare sendQueue: { data: Buffer; fin: boolean }[]
+
 	constructor(conn: QuicConnection, id: number, kind: 'uni' | 'bidi') {
 		super()
 		this.conn = conn
 		this.id = id
 		this.kind = kind
 		this.recvOffset = 0
-		this.pending = []          // out-of-order chunks: [{offset, data, fin}]
+		this.pending = [] // out-of-order chunks: [{offset, data, fin}]
 		this.fin = false
 		this.sendOffset = 0
+
+		this.recvWindow = kind === 'uni' ? tp.FLOW_CONTROL.maxStreamDataUni : tp.FLOW_CONTROL.maxStreamDataBidiLocal
+		this.recvLimit = this.recvWindow
+		this.recvConsumed = 0
+		this.highestOffset = 0
+		this.paused = false
+		this._flowControlErrored = false
+
+		this.sendLimit = DEFAULT_PEER_SEND_LIMIT
+		this.blocked = false
+		this.sendQueue = []
 	}
+
 	send(data: Buffer, fin = false): void {
+		if (!this.conn._canSend(this, data.length)) {
+			this.sendQueue.push({ data, fin })
+			if (!this.blocked) {
+				this.blocked = true
+				const frame =
+					this.sendOffset + data.length > this.sendLimit
+						? pkt.encodeStreamDataBlockedFrame(this.id, this.sendLimit)
+						: pkt.encodeDataBlockedFrame(this.conn.peerMaxData)
+				this.conn._sendFlowControlFrame(frame)
+			}
+			return
+		}
+		this._write(data, fin)
+		// A MAX_* grant that arrived while this chunk was blocked may unblock the next one.
+		this._flushSend()
+	}
+
+	_write(data: Buffer, fin: boolean): void {
+		if (data.length === 0 && !fin) return
 		this.conn.sendStreamData(this.id, this.sendOffset, data, fin)
+		this.conn._reserveSend(data.length)
 		this.sendOffset += data.length
 		if (fin) this.emit('fin-sent')
 	}
+
+	_flushSend(): void {
+		while (this.sendQueue.length && this.conn._canSend(this, this.sendQueue[0].data.length)) {
+			const { data, fin } = this.sendQueue.shift()!
+			this._write(data, fin)
+		}
+		if (this.sendQueue.length === 0) this.blocked = false
+	}
+
+	_applyPeerLimit(value: number): void {
+		if (value <= this.sendLimit) return
+		this.sendLimit = value
+		this._flushSend()
+	}
+
+	/** Consumer is behind: stop emitting DATA and stop granting credit. */
+	pause(): void {
+		this.paused = true
+	}
+
+	resume(): void {
+		if (!this.paused) return
+		this.paused = false
+		this._flushPending()
+	}
+
 	_onData(offset: number, data: Buffer, fin: boolean): void {
-		// Buffer out-of-order chunks; flush in-order ones. Bound the out-of-order buffer so a server
-		// that streams data at ever-increasing offsets (never fillable in order) can't exhaust memory.
-		const MAX_PENDING = 8 * 1024 * 1024 // 8 MiB of unflushable out-of-order data per stream
+		const end = offset + data.length
+		const flowControlError = (scope: string) => {
+			if (!this._flowControlErrored) {
+				this._flowControlErrored = true
+				this.emit('error', new Error(`QUIC ${scope} flow control limit exceeded on stream ${this.id}`))
+			}
+		}
+		if (end > this.recvLimit) {
+			flowControlError('stream')
+			return
+		}
+		// Count fresh offset coverage (not duplicates) against the connection window too. Gaps
+		// are charged conservatively, which can only make us grant credit later, never earlier.
+		if (end > this.highestOffset) {
+			const fresh = end - this.highestOffset
+			if (this.conn.recvReceived + fresh > this.conn.recvLimit) {
+				flowControlError('connection')
+				return
+			}
+			this.conn.recvReceived += fresh
+			this.highestOffset = end
+		}
+		// Buffer out-of-order chunks; flush in-order ones. The receive window above bounds how
+		// much can ever land here; the 8 MiB cap is defense in depth for hostile offsets.
+		const MAX_PENDING = 8 * 1024 * 1024
 		if ((this._pendingBytes || 0) + data.length > MAX_PENDING) {
 			this.pending = []
 			this._pendingBytes = 0
@@ -1206,21 +1742,34 @@ class QuicStream extends EventEmitter {
 			return
 		}
 		this._pendingBytes = (this._pendingBytes || 0) + data.length
-		// Buffer out-of-order chunks; flush in-order ones.
 		this.pending.push({ offset, data, fin })
 		this.pending.sort((a, b) => a.offset - b.offset)
+		this._flushPending()
+	}
+
+	_flushPending(): void {
+		if (this.paused) return
 		while (this.pending.length && this.pending[0].offset <= this.recvOffset) {
 			const chunk = this.pending.shift()!
-			this._pendingBytes -= chunk.data.length
+			this._pendingBytes = (this._pendingBytes || 0) - chunk.data.length
 			const skipBytes = this.recvOffset - chunk.offset
 			if (skipBytes >= chunk.data.length) {
-				if (chunk.fin) { this.fin = true; this.emit('end') }
+				if (chunk.fin) {
+					this.fin = true
+					this.emit('end')
+				}
 				continue
 			}
 			const slice = chunk.data.subarray(skipBytes)
 			this.recvOffset += slice.length
 			this.emit('data', slice)
-			if (chunk.fin) { this.fin = true; this.emit('end') }
+			// A listener may pause us mid-emit; the next loop iteration will stop, and the rest
+			// of the already-received bytes stay buffered without granting more credit.
+			this.conn._onBytesConsumed(this, slice.length)
+			if (chunk.fin) {
+				this.fin = true
+				this.emit('end')
+			}
 		}
 	}
 }

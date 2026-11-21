@@ -16,7 +16,9 @@ it('_onDatagram drops malformed/garbage datagrams without throwing', () => {
 		expect(() => c._onDatagram(buf), `iteration ${i}`).not.toThrow()
 	}
 	// long-header-shaped garbage + truncated short-header packet
-	expect(() => c._onDatagram(Buffer.from([0xc0, 0, 0, 0, 1, 8, ...Array.from({ length: 20 }, () => 0xab)]))).not.toThrow()
+	expect(() =>
+		c._onDatagram(Buffer.from([0xc0, 0, 0, 0, 1, 8, ...Array.from({ length: 20 }, () => 0xab)]))
+	).not.toThrow()
 	expect(() => c._onDatagram(Buffer.from([0x40, 0x01]))).not.toThrow()
 	expect(() => c._onDatagram(Buffer.alloc(0))).not.toThrow()
 })
@@ -41,22 +43,32 @@ it('ACK still acks exactly the packets within the declared ranges', () => {
 		c.sentPackets.oneRtt.set(pn, { size: 100, time: 0, includesCrypto: false })
 	}
 	// largestAcked=10, firstAckRange=1 -> acks 9,10; then gap=1 (skips 8,7), range len=1 -> acks 5,6.
-	c._handleFrame('oneRtt', { type: 'ack', largestAcked: 10, ackDelay: 0, firstAckRange: 1, ranges: [{ gap: 1, length: 1 }] })
+	c._handleFrame('oneRtt', {
+		type: 'ack',
+		largestAcked: 10,
+		ackDelay: 0,
+		firstAckRange: 1,
+		ranges: [{ gap: 1, length: 1 }]
+	})
 	const remaining = [...c.sentPackets.oneRtt.keys()].sort((a, b) => a - b)
 	expect(remaining).toStrictEqual([0, 1, 2, 3, 4, 7, 8])
 })
 
-it('stream out-of-order reassembly buffer is bounded', () => {
+it('stream out-of-order reassembly and flow-control buffers are bounded', () => {
 	const c = new QuicConnection('127.0.0.1', 443)
 	const s = new QuicStream(c, 0, 'bidi')
 	const streamErrors: unknown[] = []
-	s.on('error', (err: unknown) => { streamErrors.push(err) })
+	s.on('error', (err: unknown) => {
+		streamErrors.push(err)
+	})
 	s.on('data', () => {})
-	// Feed 1 MiB chunks at ever-increasing, never-in-order offsets (recvOffset stays 0).
+	// Feed 1 MiB chunks at ever-increasing, never-in-order offsets outside the granted window.
 	const chunk = Buffer.alloc(1024 * 1024, 0xab)
 	for (let i = 0; i < 64 && streamErrors.length === 0; i++) s._onData((i + 1) * 1e9, chunk, false)
-	expect(streamErrors.length, 'stream should error once the out-of-order buffer cap is exceeded').toBeGreaterThan(0)
-	expect(s._pendingBytes, `pending bytes ${s._pendingBytes} should stay bounded`).toBeLessThanOrEqual(8 * 1024 * 1024)
+	expect(streamErrors.length, 'stream should reject data past the flow-control limit').toBeGreaterThan(0)
+	expect(s._pendingBytes ?? 0, `pending bytes ${s._pendingBytes} should stay bounded`).toBeLessThanOrEqual(
+		8 * 1024 * 1024
+	)
 })
 
 it('QPACK encoder-stream parser never throws or over-advances on arbitrary input', () => {
@@ -64,7 +76,9 @@ it('QPACK encoder-stream parser never throws or over-advances on arbitrary input
 		const t = new qpack.DynamicTable()
 		const buf = crypto.randomBytes(1 + (i % 40))
 		let consumed = 0
-		expect(() => { consumed = qpack.parseEncoderInstructions(buf, t) }, `iteration ${i}`).not.toThrow()
+		expect(() => {
+			consumed = qpack.parseEncoderInstructions(buf, t)
+		}, `iteration ${i}`).not.toThrow()
 		expect(consumed, `consumed ${consumed} not in [0, ${buf.length}]`).toBeGreaterThanOrEqual(0)
 		expect(consumed, `consumed ${consumed} not in [0, ${buf.length}]`).toBeLessThanOrEqual(buf.length)
 	}
