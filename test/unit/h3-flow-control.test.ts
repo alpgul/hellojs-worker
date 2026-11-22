@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events'
 import { expect, it } from 'vitest'
 
 import { Connection } from '../../lib/connect.ts'
-import { QuicConnection } from '../../lib/h3/connection.ts'
+import { QuicConnection, QuicStream } from '../../lib/h3/connection.ts'
 import { encodeFrame, FRAME, H3Client } from '../../lib/h3/h3.ts'
 import * as pkt from '../../lib/h3/packet.ts'
 import * as qpack from '../../lib/h3/qpack.ts'
@@ -157,21 +157,58 @@ it('replays cancel frames on PTO', () => {
 	expect(replayed).toContainEqual({ type: 'stop_sending', streamId: stream.id, errorCode: 0x0c })
 })
 
-it('dispatches peer RESET_STREAM and STOP_SENDING to the stream', () => {
+it('reports a peer RESET_STREAM once and cancels the whole bidi stream', () => {
 	const conn = new QuicConnection('127.0.0.1', 443)
 	const stream = conn.openBidiStream()
 	const errors: Error[] = []
 	stream.on('error', (e: Error) => errors.push(e))
 
 	conn._handleFrame('oneRtt', { type: 'reset_stream', streamId: stream.id, errorCode: 0x0c, finalSize: 0 })
-	expect(stream.cancelled).toBe(true)
-	expect(errors).toHaveLength(1)
+	conn._handleFrame('oneRtt', { type: 'reset_stream', streamId: stream.id, errorCode: 0x0c, finalSize: 0 })
 
-	errors.length = 0
-	stream.cancelled = false
-	conn._handleFrame('oneRtt', { type: 'stop_sending', streamId: stream.id, errorCode: 0x0c })
 	expect(stream.cancelled).toBe(true)
 	expect(errors).toHaveLength(1)
+})
+
+it('treats peer STOP_SENDING on a bidi stream as send-side only', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	conn.appKeys = {} as unknown as typeof conn.appKeys
+	const frames = captureFrames(conn)
+	const stream = conn.openBidiStream()
+	const received: string[] = []
+	const errors: Error[] = []
+	stream.on('data', (chunk: Buffer) => received.push(chunk.toString()))
+	stream.on('error', (e: Error) => errors.push(e))
+
+	conn._handleFrame('oneRtt', { type: 'stop_sending', streamId: stream.id, errorCode: 0x0c })
+	const decoded = frames.flatMap((frame) => pkt.decodeFrames(frame))
+	expect(decoded.some((f) => f.type === 'reset_stream')).toBe(true)
+	expect(decoded.some((f) => f.type === 'stop_sending')).toBe(false)
+
+	stream._onData(0, Buffer.from('ok'), true)
+	expect(stream.cancelled).toBe(false)
+	expect(received).toEqual(['ok'])
+	expect(errors).toEqual([])
+})
+
+it('does not echo illegal peer frames on unidirectional streams', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	conn.appKeys = {} as unknown as typeof conn.appKeys
+	const frames = captureFrames(conn)
+	const serverUni = new QuicStream(conn, 3, 'uni')
+	conn.streams.set(serverUni.id, serverUni)
+	serverUni.on('error', () => {})
+
+	conn._handleFrame('oneRtt', { type: 'reset_stream', streamId: serverUni.id, errorCode: 0x0c, finalSize: 0 })
+	expect(serverUni.cancelled).toBe(true)
+	expect(frames).toEqual([])
+
+	const clientUni = new QuicStream(conn, 2, 'uni')
+	conn.streams.set(clientUni.id, clientUni)
+	conn._handleFrame('oneRtt', { type: 'stop_sending', streamId: clientUni.id, errorCode: 0x0c })
+	const decoded = frames.flatMap((frame) => pkt.decodeFrames(frame))
+	expect(decoded.some((f) => f.type === 'reset_stream')).toBe(true)
+	expect(decoded.some((f) => f.type === 'stop_sending')).toBe(false)
 })
 
 it('rejects STREAM data past the connection receive window', () => {

@@ -717,13 +717,24 @@ class QuicConnection extends EventEmitter {
 			return
 		}
 		if (f.type === 'reset_stream' || f.type === 'stop_sending') {
-			// Both frames end this request only; siblings on the pooled session keep running.
+			// Only the peer's own direction may be reset. Echoing RESET_STREAM on a send-only
+			// uni stream (or STOP_SENDING on a receive-only one) is a STREAM_STATE_ERROR.
 			const s = this.streams.get(f.streamId)
 			if (!s) return
-			s.cancel(f.errorCode)
-			if (s.listenerCount('error') > 0) {
-				const kind = f.type === 'reset_stream' ? 'RESET_STREAM' : 'STOP_SENDING'
-				s.emit('error', new Error(`QUIC ${kind} on stream ${s.id}: ${f.errorCode}`))
+			const serverInitiated = (f.streamId & 0x01) !== 0
+			const uni = (f.streamId & 0x02) !== 0
+			if (f.type === 'reset_stream') {
+				if (uni && !serverInitiated) return // peer is only the receiver here
+				const alreadyStopped = s.cancelled
+				if (uni) s._stopReceiving()
+				else s.cancel() // our own H3_REQUEST_CANCELLED, never the peer's code
+				if (!alreadyStopped && s.listenerCount('error') > 0) {
+					s.emit('error', new Error(`QUIC RESET_STREAM on stream ${s.id}: ${f.errorCode}`))
+				}
+			} else {
+				if (uni && serverInitiated) return // peer is only the sender here
+				// STOP_SENDING ends our send direction only; a response may still be in flight.
+				s._resetSend(0x0c, false)
 			}
 			return
 		}
@@ -1648,7 +1659,11 @@ class QuicStream extends EventEmitter {
 	declare recvConsumed: number
 	declare highestOffset: number
 	declare paused: boolean
+	/** Receive side stopped: inbound bytes are discarded and MAX_* credit is granted. */
 	declare cancelled: boolean
+	/** Send side stopped: DATA/STOP_SENDING no longer leave this stream. */
+	declare sendCancelled: boolean
+	declare stopSendingSent: boolean
 	declare _flowControlErrored: boolean
 
 	// Send flow control: peer grants are pushed in via MAX_*; blocked writes wait here.
@@ -1672,6 +1687,8 @@ class QuicStream extends EventEmitter {
 		this.highestOffset = 0
 		this.paused = false
 		this.cancelled = false
+		this.sendCancelled = false
+		this.stopSendingSent = false
 		this._flowControlErrored = false
 
 		// A new stream starts with whatever credit the peer's transport parameters grant us;
@@ -1682,7 +1699,7 @@ class QuicStream extends EventEmitter {
 	}
 
 	send(data: Buffer, fin = false): void {
-		if (this.cancelled) return
+		if (this.cancelled || this.sendCancelled) return
 		if (!this.conn._canSend(this, data.length)) {
 			this.sendQueue.push({ data, fin })
 			if (!this.blocked) {
@@ -1701,7 +1718,7 @@ class QuicStream extends EventEmitter {
 	}
 
 	_write(data: Buffer, fin: boolean): void {
-		if (this.cancelled) return
+		if (this.cancelled || this.sendCancelled) return
 		if (data.length === 0 && !fin) return
 		this.conn.sendStreamData(this.id, this.sendOffset, data, fin)
 		this.conn._reserveSend(data.length)
@@ -1710,7 +1727,7 @@ class QuicStream extends EventEmitter {
 	}
 
 	_flushSend(): void {
-		if (this.cancelled) return
+		if (this.cancelled || this.sendCancelled) return
 		while (this.sendQueue.length && this.conn._canSend(this, this.sendQueue[0].data.length)) {
 			const { data, fin } = this.sendQueue.shift()!
 			this._write(data, fin)
@@ -1724,28 +1741,38 @@ class QuicStream extends EventEmitter {
 		this._flushSend()
 	}
 
-	/**
-	 * Cancel only this stream. RESET_STREAM / STOP_SENDING let the peer and the rest of the
-	 * QUIC session continue, unlike closing the whole connection from a request's cancel path.
-	 */
-	cancel(errorCode = 0x0c): void {
+	/** Stop receiving on this stream while crediting discarded bytes to the connection window. */
+	_stopReceiving(): void {
 		if (this.cancelled) return
 		this.cancelled = true
 		this.conn._onBytesDiscarded(this._pendingBytes || 0)
 		this.pending = []
 		this._pendingBytes = 0
+		this.paused = false
+	}
+
+	/** Stop sending on this stream. Optionally also ask the peer to stop sending. */
+	_resetSend(errorCode: number, includeStopSending: boolean): void {
+		if (this.sendCancelled && (!includeStopSending || this.stopSendingSent)) return
+		this.sendCancelled = true
 		this.sendQueue = []
 		this.blocked = false
-		this.paused = false
+		if (includeStopSending) this.stopSendingSent = true
 		if (this.conn.appKeys && !this.conn._closed) {
-			this.conn._grantFlowControl(
-				`cancel:${this.id}`,
-				Buffer.concat([
-					pkt.encodeResetStreamFrame(this.id, errorCode, this.sendOffset),
-					pkt.encodeStopSendingFrame(this.id, errorCode)
-				])
-			)
+			const frames = [pkt.encodeResetStreamFrame(this.id, errorCode, this.sendOffset)]
+			if (includeStopSending) frames.push(pkt.encodeStopSendingFrame(this.id, errorCode))
+			this.conn._grantFlowControl(`cancel:${this.id}`, Buffer.concat(frames))
 		}
+	}
+
+	/**
+	 * Cancel only this stream. RESET_STREAM / STOP_SENDING let the peer and the rest of the
+	 * QUIC session continue, unlike closing the whole connection from a request's cancel path.
+	 */
+	cancel(errorCode = 0x0c): void {
+		if (this.cancelled && this.sendCancelled) return
+		this._stopReceiving()
+		this._resetSend(errorCode, true)
 	}
 
 	/** Consumer is behind: stop emitting DATA and stop granting credit. */
