@@ -188,6 +188,39 @@ it('keeps the newer cancel replay when an older cancel packet is acknowledged', 
 	expect(conn.flowControlFrames.has(liveKey)).toBe(true)
 })
 
+it('does not charge flow-control packets to the congestion window', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	const secret = () => crypto.randomBytes(32)
+	const epochKeys = () => keys.deriveKeysFromSecret(secret(), 'sha256', 16, 12)
+	conn.appKeys = { client: epochKeys(), server: epochKeys() } as unknown as typeof conn.appKeys
+	conn._sendDatagram = (() => {}) as unknown as typeof conn._sendDatagram
+	conn.cc.bytesInFlight = 0
+
+	conn._grantFlowControl('max_data:0', Buffer.from([0x01]))
+
+	expect(conn.sentPackets.oneRtt.size).toBe(1)
+	expect(conn.cc.bytesInFlight).toBe(0)
+})
+
+it('does not halve cwnd when PTO declares a control packet lost', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	const secret = () => crypto.randomBytes(32)
+	const epochKeys = () => keys.deriveKeysFromSecret(secret(), 'sha256', 16, 12)
+	conn.appKeys = { client: epochKeys(), server: epochKeys() } as unknown as typeof conn.appKeys
+	conn._sendDatagram = (() => {}) as unknown as typeof conn._sendDatagram
+	conn.cc.bytesInFlight = 0
+	conn.cc.cwnd = 12000
+	conn.cc.ssthresh = 12000
+
+	try {
+		conn._grantFlowControl('max_data:0', Buffer.from([0x01]))
+		conn._onPtoFire()
+		expect(conn.cc.cwnd).toBe(12000)
+	} finally {
+		conn.close()
+	}
+})
+
 it('charges only unique discarded bytes when a cancelled stream has overlapping frames', () => {
 	const conn = new QuicConnection('127.0.0.1', 443)
 	const stream = conn.openBidiStream()

@@ -841,8 +841,10 @@ class QuicConnection extends EventEmitter {
 			if (epoch === 'oneRtt') {
 				// Declare the unacked 1-RTT packet lost, react to congestion event,
 				// and emit a PING to elicit an ACK. PING itself bypasses CC.
-				if (info.size) this.cc.bytesInFlight = Math.max(0, this.cc.bytesInFlight - info.size)
-				this._onCongestionEvent(info.time)
+				if (info.size) {
+					this.cc.bytesInFlight = Math.max(0, this.cc.bytesInFlight - info.size)
+					this._onCongestionEvent(info.time)
+				}
 				if (!this.appKeys) return
 				// MAX frames are idempotent, so replaying the latest grants with the PING is safe
 				// and prevents a lost grant from wedging a paused-then-resumed response.
@@ -859,10 +861,9 @@ class QuicConnection extends EventEmitter {
 					keyPhase: this.currentPhase
 				})
 				this.pn.oneRtt++
-				this.cc.bytesInFlight += packet.length
 				this.sentPackets.oneRtt.set(pn, {
 					time: Date.now(),
-					size: packet.length,
+					size: 0,
 					includesCrypto: false,
 					flowControlKeys: keys
 				})
@@ -1483,10 +1484,12 @@ class QuicConnection extends EventEmitter {
 			keyPhase: this.currentPhase
 		})
 		this.pn.oneRtt++
-		this.cc.bytesInFlight += packet.length
+		// Control packets bypass cwnd admission (they must get out even when it is full), so
+		// they must not consume cwnd either. `size: 0` keeps them in loss tracking/PTO without
+		// distorting congestion accounting.
 		this.sentPackets.oneRtt.set(pn, {
 			time: Date.now(),
-			size: packet.length,
+			size: 0,
 			includesCrypto: false,
 			flowControlKeys: keys
 		})
