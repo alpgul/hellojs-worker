@@ -390,7 +390,7 @@ must appear in `ALLOWED_HOSTS`. The same guard is a pure function in
 - Every request pays for a DO fetch and, while sockets stay open, DO duration. Compare that
   against the handshake latency the pool saves before adopting this in production.
 
-`GET /run` reports `pooledSockets` (one per origin+profile; h3 and one-shot requests never
+`GET /run` reports `pooledSockets` (one per origin+profile; one-shot requests never
 join the pool) so the reuse is observable from the test page. The four slowest scenarios
 (external fingerprint host, redirect chain, cookie redirect, h3 fallback) spend most of their
 time on network round trips; `GET /run?fast=1` runs four representative scenarios instead
