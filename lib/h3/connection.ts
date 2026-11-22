@@ -1897,7 +1897,7 @@ class QuicStream extends EventEmitter {
 			this._pendingBytes = (this._pendingBytes || 0) - chunk.data.length
 			const skipBytes = this.recvOffset - chunk.offset
 			if (skipBytes >= chunk.data.length) {
-				if (chunk.fin) {
+				if (chunk.fin && !this.fin) {
 					this.fin = true
 					this.emit('end')
 				}
@@ -1909,10 +1909,17 @@ class QuicStream extends EventEmitter {
 			this.conn._onBytesConsumed(this, slice.length)
 			this.emit('data', slice)
 			// A listener may cancel or pause mid-emit. Cancel ends the stream immediately;
-			// pause defers the FIN with the rest of the buffered bytes until resume(). Either
-			// way this chunk must not emit end now.
-			if (this.cancelled || this.paused) return
-			if (chunk.fin) {
+			// pause defers the FIN with the rest of the buffered bytes until resume().
+			if (this.cancelled) return
+			if (this.paused) {
+				if (chunk.fin) {
+					// The FIN was shifted with this chunk; requeue a zero-length marker at the
+					// head so resume() can still deliver end exactly once.
+					this.pending.unshift({ offset: this.recvOffset, data: Buffer.alloc(0), fin: true })
+				}
+				return
+			}
+			if (chunk.fin && !this.fin) {
 				this.fin = true
 				this.emit('end')
 			}

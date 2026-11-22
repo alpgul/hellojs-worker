@@ -301,19 +301,37 @@ it('does not emit end after a synchronous cancel from a data listener', () => {
 	expect(stream.fin).toBe(false)
 })
 
-it('does not emit end when a data listener pauses on the FIN chunk', () => {
+it('defers FIN until a stream paused from a data listener resumes', () => {
 	const conn = new QuicConnection('127.0.0.1', 443)
 	const stream = conn.openBidiStream()
-	let ended = false
+	let endCount = 0
 	stream.on('data', () => stream.pause())
 	stream.on('end', () => {
-		ended = true
+		endCount++
 	})
 
 	stream._onData(0, Buffer.from('ok'), true)
-
-	expect(ended).toBe(false)
+	expect(endCount).toBe(0)
 	expect(stream.fin).toBe(false)
+
+	stream.resume()
+	expect(endCount).toBe(1)
+	expect(stream.fin).toBe(true)
+})
+
+it('emits end once when duplicate FIN chunks arrive', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	const stream = conn.openBidiStream()
+	let endCount = 0
+	stream.on('end', () => {
+		endCount++
+	})
+
+	stream._onData(0, Buffer.from('ok'), true)
+	stream._onData(0, Buffer.from('ok'), true)
+
+	expect(endCount).toBe(1)
+	expect(stream.fin).toBe(true)
 })
 
 it('reports a peer RESET_STREAM once and cancels the whole bidi stream', () => {
