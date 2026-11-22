@@ -12,11 +12,14 @@
 import { DurableObject } from 'cloudflare:workers'
 
 import request, { setPoolConfig, type RequestOptions } from '../index.ts'
-import { clearPool, getPoolConfig, pooledCount } from '../lib/pool.ts'
+import { clearPool, getPoolConfig, pooledCount, poolStats } from '../lib/pool.ts'
 
+import { resolveProxyTarget } from './proxy-policy.ts'
 import roots from './root-certificates.ts'
 import { runScenario, type ScenarioResult } from './scenario-runner.ts'
 import { scenarios } from './scenarios.ts'
+
+import type { KeepaliveProbe, KeepaliveStep } from './keepalive-report.ts'
 
 // Module scope: once per DO isolate, before any request arrives. The Worker no longer
 // imports hellojs at all, so these fixes belong here now.
@@ -32,7 +35,9 @@ const TOUR_PATH = '/__tour'
 const STATS_PATH = '/__stats'
 const CONFIG_PATH = '/__config'
 const CLEAR_PATH = '/__clear'
+const KEEPALIVE_PATH = '/__keepalive'
 const KEEPALIVE_HEADER = 'x-hello-keepalive'
+const MAX_PROBE_REQUESTS = 5
 
 // A profile pins its browser identity headers: passing a client's own values through makes
 // hellojs reject the request with EHEADERFIXED (and would defeat the fingerprint anyway).
@@ -103,6 +108,7 @@ export class HelloConnectionDO extends DurableObject<Env> {
 			clearPool('bench-reset')
 			return Response.json({ pooledSockets: pooledCount() })
 		}
+		if (path === KEEPALIVE_PATH) return this.keepaliveProbe(req)
 		return this.proxy(req)
 	}
 
@@ -127,9 +133,7 @@ export class HelloConnectionDO extends DurableObject<Env> {
 		return Response.json(report)
 	}
 
-	private async proxy(req: Request): Promise<Response> {
-		// Only the Worker may set this: cleanHeaders() strips x-hello-* before the origin sees it.
-		const keepalive = req.headers.get(KEEPALIVE_HEADER) !== 'false'
+	private originInit(req: Request, keepalive: boolean): RequestOptions {
 		const init: RequestOptions = {
 			// Fetch exposes the verb as a plain string; hellojs types it as the registered-method union.
 			method: req.method as NonNullable<RequestOptions['method']>,
@@ -139,12 +143,64 @@ export class HelloConnectionDO extends DurableObject<Env> {
 			keepalive
 		}
 		if (req.body) init.body = req.body
+		return init
+	}
 
-		const res = await request(req.url, init)
+	private async proxy(req: Request): Promise<Response> {
+		// Only the Worker may set this: cleanHeaders() strips x-hello-* before the origin sees it.
+		const keepalive = req.headers.get(KEEPALIVE_HEADER) !== 'false'
+		const res = await request(req.url, this.originInit(req, keepalive))
 		return new Response(res.body, {
 			status: res.status,
 			statusText: res.statusText,
 			headers: cleanHeaders(res.headers)
 		})
+	}
+
+	private async runProbeSteps(options: {
+		url: string
+		n: number
+		keepalive: boolean
+		signal: AbortSignal
+	}): Promise<KeepaliveStep[]> {
+		const steps: KeepaliveStep[] = []
+		for (let index = 1; index <= options.n; index++) {
+			const t0 = Date.now()
+			const originRequest = new Request(options.url, { method: 'GET', signal: options.signal })
+			const res = await request(originRequest.url, this.originInit(originRequest, options.keepalive))
+			// A socket only returns to the pool once its response body has been consumed.
+			await res.arrayBuffer()
+			steps.push({ index, status: res.status, ms: Date.now() - t0, pooledSockets: pooledCount() })
+		}
+		return steps
+	}
+
+	private async keepaliveProbe(req: Request): Promise<Response> {
+		const params = new URL(req.url).searchParams
+		const target = resolveProxyTarget(params.get('url'), this.env.ALLOWED_HOSTS)
+		if (!target.ok) return new Response(target.message, { status: target.status })
+
+		const n = Math.max(1, Math.min(MAX_PROBE_REQUESTS, Number(params.get('n')) || 1))
+		const keepalive = params.get('keepalive') !== 'false'
+		if (params.get('reset') === '1') clearPool('keepalive-probe-reset')
+
+		const before = poolStats()
+		const t0 = Date.now()
+		const steps = await this.runProbeSteps({ url: target.url.toString(), n, keepalive, signal: req.signal })
+		const after = poolStats()
+		const probe: KeepaliveProbe = {
+			url: target.url.toString(),
+			n,
+			keepalive,
+			steps,
+			pooledSocketsBefore: before.pooled,
+			pooledSocketsAfter: after.pooled,
+			poolStatsBefore: before,
+			poolStatsAfter: after,
+			// A hand-out means a previous request left a live socket behind.
+			reused: after.hits > before.hits,
+			ms: Date.now() - t0
+		}
+		return Response.json(probe)
 	}
 }

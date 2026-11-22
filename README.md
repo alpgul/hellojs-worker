@@ -404,6 +404,24 @@ through the DO with `keepalive: false`, and hellojs with `keepalive: true`. Each
 starts from an empty pool and the response reports per-request times, totals and medians plus
 the final pool size. `&mode=native|false|true` isolates one mode.
 
+**Keep-alive probes.** `GET /keepalive?url=...&mode=paired` sends two sequential origin requests
+inside **one** DO fetch; `mode=single` sends one. Two separate `mode=single` Worker requests to
+the same DO (the first with `reset=1`) show whether the pool survives between calls; a `slot`
+parameter separates concurrent probes into their own named DOs. The JSON report carries the
+cumulative counters from `poolStats()` — `created` counts new connections, `hits` counts pooled
+hand-outs. `created: 1, hits: 1` in `paired` proves the second request reused the first one's
+socket; `created: 0, hits: 1` on the second `single` call proves the DO kept that socket across
+Worker requests. The test page exposes both scenarios as buttons.
+
+The automated version needs `npm run example` running first:
+
+```sh
+WORKER_URL=http://127.0.0.1:8787 npm run test:network -- test/integration/worker-do-keepalive.test.ts
+```
+
+`httpbingo.org` is deliberately the default target even though it is the jitteriest one — the
+assertions read counters, not latency. Set `KEEPALIVE_TARGET` to retarget.
+
 `httpbingo.org` is far too jittery to benchmark against (a direct `curl` ranged from 1 s to
 30 s between consecutive calls), and it made hellojs look slower than native fetch. Against a
 stable target (`GET /bench?url=https%3A%2F%2Fapi.github.com%2F&n=5`), two consecutive runs

@@ -54,4 +54,21 @@ describe('HelloConnectionDO', () => {
 		const b = bindings.HELLO_POOL.getByName('b')
 		expect(a.id.toString()).not.toBe(b.id.toString())
 	})
+
+	it('rejects a keepalive probe without a url', async () => {
+		const stub = bindings.HELLO_POOL.getByName('keepalive-validation')
+		const res = await stub.fetch('http://do/__keepalive')
+		expect(res.status).toBe(400)
+	})
+
+	it('rejects keepalive probes outside the allowlist', async () => {
+		const stub = bindings.HELLO_POOL.getByName('keepalive-validation')
+		const privateUrl = new URL('http://do/__keepalive')
+		privateUrl.searchParams.set('url', 'http://127.0.0.1/')
+		expect((await stub.fetch(privateUrl.toString())).status).toBe(403)
+
+		const unknownUrl = new URL('http://do/__keepalive')
+		unknownUrl.searchParams.set('url', 'https://example.invalid/')
+		expect((await stub.fetch(unknownUrl.toString())).status).toBe(403)
+	})
 })
