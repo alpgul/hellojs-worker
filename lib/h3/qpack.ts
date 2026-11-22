@@ -120,20 +120,26 @@ const STATIC_TABLE: HeaderEntry[] = [
 	['user-agent', ''],
 	['x-forwarded-for', ''],
 	['x-frame-options', 'deny'],
-	['x-frame-options', 'sameorigin'],
+	['x-frame-options', 'sameorigin']
 ]
+
+// Indexes built once: the static table never changes, so per-header linear scans are waste.
+// Only the first entry for a key is kept — that is the one the original loop returned.
+const STATIC_EXACT_INDEX = new Map<string, number>()
+const STATIC_NAME_INDEX = new Map<string, number>()
+for (let i = 0; i < STATIC_TABLE.length; i++) {
+	const [name, value] = STATIC_TABLE[i]
+	const exact = `${name}\0${value}`
+	if (!STATIC_EXACT_INDEX.has(exact)) STATIC_EXACT_INDEX.set(exact, i)
+	if (!STATIC_NAME_INDEX.has(name)) STATIC_NAME_INDEX.set(name, i)
+}
 
 // Find the static-table index for (name, value) — exact match first, then name-only.
 function findStatic(name: string, value: string): { exact: number } | { nameOnly: number } | null {
-	let nameIdx = -1
-	for (let i = 0; i < STATIC_TABLE.length; i++) {
-		const [n, v] = STATIC_TABLE[i]
-		if (n === name) {
-			if (v === value) return { exact: i }
-			if (nameIdx < 0) nameIdx = i
-		}
-	}
-	return nameIdx >= 0 ? { nameOnly: nameIdx } : null
+	const exact = STATIC_EXACT_INDEX.get(`${name}\0${value}`)
+	if (exact !== undefined) return { exact }
+	const nameOnly = STATIC_NAME_INDEX.get(name)
+	return nameOnly === undefined ? null : { nameOnly }
 }
 
 // QPACK integer encoding (RFC 9204 §4.1.1) — N-bit prefix on first byte.
@@ -142,7 +148,10 @@ function encodeInt(value: number, prefixBits: number, firstBytePrefix: number): 
 	if (value < max) return Buffer.from([firstBytePrefix | value])
 	const out: number[] = [firstBytePrefix | max]
 	value -= max
-	while (value >= 128) { out.push((value & 0x7f) | 0x80); value = value >>> 7 }
+	while (value >= 128) {
+		out.push((value & 0x7f) | 0x80)
+		value = value >>> 7
+	}
 	out.push(value)
 	return Buffer.from(out)
 }
@@ -157,8 +166,8 @@ function encodeString(str: string): Buffer {
 function encodeHeaders(headers: HeaderEntry[]): Buffer {
 	const out: Buffer[] = []
 	// Field section prefix: Required Insert Count = 0 (encoded as 0), Delta Base = 0 (encoded as sign=0, value=0).
-	out.push(encodeInt(0, 8, 0x00))   // Required Insert Count
-	out.push(encodeInt(0, 7, 0x00))   // Delta Base (S=0, base=0)
+	out.push(encodeInt(0, 8, 0x00)) // Required Insert Count
+	out.push(encodeInt(0, 7, 0x00)) // Delta Base (S=0, base=0)
 	for (const [n, v] of headers) {
 		const m = findStatic(n.toLowerCase(), v)
 		if (m && 'exact' in m) {
@@ -212,7 +221,8 @@ function decodeHeaders(buf: Buffer): HeaderEntry[] {
 		const b = buf[off]
 		if ((b & 0xc0) === 0xc0) {
 			// Indexed Field Line: 1T______, T=1 static.
-			const idx = decodeInt(buf, off, 6); off += idx.length
+			const idx = decodeInt(buf, off, 6)
+			off += idx.length
 			const e = STATIC_TABLE[idx.value]
 			if (!e) break
 			headers.push([e[0], e[1]])
@@ -220,11 +230,14 @@ function decodeHeaders(buf: Buffer): HeaderEntry[] {
 		}
 		if ((b & 0xf0) === 0x50 || (b & 0xf0) === 0x40) {
 			// Literal With Name Reference: 01NT____ ; T=static; bit at 0x10 doesn't matter for static index here
-			const idx = decodeInt(buf, off, 4); off += idx.length
+			const idx = decodeInt(buf, off, 4)
+			off += idx.length
 			const e = STATIC_TABLE[idx.value]
 			const huff = (buf[off] & 0x80) !== 0
-			const len = decodeInt(buf, off, 7); off += len.length
-			const raw = buf.subarray(off, off + len.value); off += len.value
+			const len = decodeInt(buf, off, 7)
+			off += len.length
+			const raw = buf.subarray(off, off + len.value)
+			off += len.value
 			const val = huff ? huffman.decode(raw).toString('utf8') : raw.toString('utf8')
 			if (!e) continue
 			headers.push([e[0], val])
@@ -233,12 +246,16 @@ function decodeHeaders(buf: Buffer): HeaderEntry[] {
 		if ((b & 0xe0) === 0x20) {
 			// Literal With Literal Name: 001NH___ where H is at bit 0x08
 			const nameHuff = (b & 0x08) !== 0
-			const nlen = decodeInt(buf, off, 3); off += nlen.length
-			const nameRaw = buf.subarray(off, off + nlen.value); off += nlen.value
+			const nlen = decodeInt(buf, off, 3)
+			off += nlen.length
+			const nameRaw = buf.subarray(off, off + nlen.value)
+			off += nlen.value
 			const name = nameHuff ? huffman.decode(nameRaw).toString('utf8') : nameRaw.toString('utf8')
 			const valHuff = (buf[off] & 0x80) !== 0
-			const vlen = decodeInt(buf, off, 7); off += vlen.length
-			const valRaw = buf.subarray(off, off + vlen.value); off += vlen.value
+			const vlen = decodeInt(buf, off, 7)
+			off += vlen.length
+			const valRaw = buf.subarray(off, off + vlen.value)
+			off += vlen.value
 			const val = valHuff ? huffman.decode(valRaw).toString('utf8') : valRaw.toString('utf8')
 			headers.push([name, val])
 			continue
@@ -257,10 +274,10 @@ function decodeHeaders(buf: Buffer): HeaderEntry[] {
 // Dynamic table (RFC 9204 §3.2). Maintained per-connection as a FIFO with a byte-size
 // budget. Each entry costs name.length + value.length + 32 bytes (RFC 7541 §4.1).
 class DynamicTable {
-	declare entries: HeaderEntry[]           // newest at end; indices grow over time (absolute)
-	declare totalInserted: number            // monotonic counter
-	declare capacity: number                 // bytes; set by Set Dynamic Table Capacity instruction
-	declare size: number                     // current byte usage
+	declare entries: HeaderEntry[] // newest at end; indices grow over time (absolute)
+	declare totalInserted: number // monotonic counter
+	declare capacity: number // bytes; set by Set Dynamic Table Capacity instruction
+	declare size: number // current byte usage
 
 	constructor() {
 		this.entries = []
@@ -315,7 +332,7 @@ function decodeLiteralString(buf: Buffer, off: number, prefixBits: number): { va
 	off += len.length
 	const raw = buf.subarray(off, off + len.value)
 	const str = isHuff ? huffman.decode(raw).toString('utf8') : raw.toString('utf8')
-	return { value: str, length: (len.length + len.value) }
+	return { value: str, length: len.length + len.value }
 }
 
 // Completeness-checked literal-string read for the encoder stream: returns null if the full string
@@ -325,9 +342,9 @@ function readLiteralComplete(buf: Buffer, off: number, prefixBits: number): { va
 	if (off >= buf.length) return null
 	const isHuff = (buf[off] & (1 << prefixBits)) !== 0
 	const len = decodeInt(buf, off, prefixBits)
-	if (len.truncated) return null  // over-long varint — treat as not yet (never) complete
+	if (len.truncated) return null // over-long varint — treat as not yet (never) complete
 	const start = off + len.length
-	if (start + len.value > buf.length) return null  // value bytes not all arrived
+	if (start + len.value > buf.length) return null // value bytes not all arrived
 	const raw = buf.subarray(start, start + len.value)
 	const str = isHuff ? huffman.decode(raw).toString('utf8') : raw.toString('utf8')
 	return { value: str, length: len.length + len.value }
@@ -356,10 +373,15 @@ function parseEncoderInstructions(buf: Buffer, table: DynamicTable): number {
 				const idx = decodeInt(buf, off, 6)
 				if (idx.truncated) return start
 				const val = readLiteralComplete(buf, off + idx.length, 7)
-				if (!val) return start  // whole instruction hasn't arrived — preserve it
+				if (!val) return start // whole instruction hasn't arrived — preserve it
 				let name: string | undefined
-				if (t) { const e = STATIC_TABLE[idx.value]; if (e) name = e[0] }
-				else { const e = table.getRelative(table.totalInserted, idx.value); if (e) name = e[0] }
+				if (t) {
+					const e = STATIC_TABLE[idx.value]
+					if (e) name = e[0]
+				} else {
+					const e = table.getRelative(table.totalInserted, idx.value)
+					if (e) name = e[0]
+				}
 				if (name != null) table.insert(name, val.value)
 				off += idx.length + val.length
 				continue
@@ -414,12 +436,14 @@ function decodeRequiredInsertCount(encodedRic: number, totalInserted: number, ma
 // Pass `table` (DynamicTable) and `maxEntries` (capacity / 32) to allow dynamic refs.
 function decodeHeadersWithTable(buf: Buffer, table: DynamicTable | null = null, maxEntries = 0): HeaderEntry[] {
 	let off = 0
-	const ricInfo = decodeInt(buf, off, 8); off += ricInfo.length
+	const ricInfo = decodeInt(buf, off, 8)
+	off += ricInfo.length
 	const baseFirstByte = buf[off]
 	const baseSign = (baseFirstByte & 0x80) !== 0
-	const baseInfo = decodeInt(buf, off, 7); off += baseInfo.length
+	const baseInfo = decodeInt(buf, off, 7)
+	off += baseInfo.length
 
-	const ric = (table && maxEntries > 0) ? decodeRequiredInsertCount(ricInfo.value, table.totalInserted, maxEntries) : 0
+	const ric = table && maxEntries > 0 ? decodeRequiredInsertCount(ricInfo.value, table.totalInserted, maxEntries) : 0
 	const base = baseSign ? ric - baseInfo.value - 1 : ric + baseInfo.value
 
 	const headers: HeaderEntry[] = []
@@ -428,7 +452,8 @@ function decodeHeadersWithTable(buf: Buffer, table: DynamicTable | null = null, 
 		// Indexed Field Line: 1Txxxxxx — top bit is the type tag, bit 0x40 is T.
 		if ((b & 0x80) === 0x80) {
 			const t = (b & 0x40) !== 0
-			const idx = decodeInt(buf, off, 6); off += idx.length
+			const idx = decodeInt(buf, off, 6)
+			off += idx.length
 			let e: HeaderEntry | null | undefined
 			if (t) e = STATIC_TABLE[idx.value]
 			else if (table) e = table.getRelative(base, idx.value)
@@ -437,7 +462,8 @@ function decodeHeadersWithTable(buf: Buffer, table: DynamicTable | null = null, 
 		}
 		// Indexed Field Line With Post-Base Index: 0001xxxx
 		if ((b & 0xf0) === 0x10) {
-			const idx = decodeInt(buf, off, 4); off += idx.length
+			const idx = decodeInt(buf, off, 4)
+			off += idx.length
 			if (table) {
 				const e = table.getPostBase(base, idx.value)
 				if (e) headers.push([e[0], e[1]])
@@ -447,26 +473,32 @@ function decodeHeadersWithTable(buf: Buffer, table: DynamicTable | null = null, 
 		// Literal Field Line With Name Reference: 01NTxxxx
 		if ((b & 0xc0) === 0x40) {
 			const t = (b & 0x10) !== 0
-			const idx = decodeInt(buf, off, 4); off += idx.length
+			const idx = decodeInt(buf, off, 4)
+			off += idx.length
 			let nameRef: string | undefined
 			if (t) nameRef = STATIC_TABLE[idx.value]?.[0]
 			else nameRef = table?.getRelative(base, idx.value)?.[0]
-			const valInfo = decodeLiteralString(buf, off, 7); off += valInfo.length
+			const valInfo = decodeLiteralString(buf, off, 7)
+			off += valInfo.length
 			if (nameRef != null) headers.push([nameRef, valInfo.value])
 			continue
 		}
 		// Literal Field Line With Post-Base Name Reference: 0000xxxx
 		if ((b & 0xf0) === 0x00) {
-			const idx = decodeInt(buf, off, 3); off += idx.length
+			const idx = decodeInt(buf, off, 3)
+			off += idx.length
 			const nameRef = table?.getPostBase(base, idx.value)?.[0]
-			const valInfo = decodeLiteralString(buf, off, 7); off += valInfo.length
+			const valInfo = decodeLiteralString(buf, off, 7)
+			off += valInfo.length
 			if (nameRef != null) headers.push([nameRef, valInfo.value])
 			continue
 		}
 		// Literal Field Line With Literal Name: 001NHxxx
 		if ((b & 0xe0) === 0x20) {
-			const nameInfo = decodeLiteralString(buf, off, 3); off += nameInfo.length
-			const valInfo = decodeLiteralString(buf, off, 7); off += valInfo.length
+			const nameInfo = decodeLiteralString(buf, off, 3)
+			off += nameInfo.length
+			const valInfo = decodeLiteralString(buf, off, 7)
+			off += valInfo.length
 			headers.push([nameInfo.value, valInfo.value])
 			continue
 		}
@@ -486,5 +518,5 @@ export {
 	// Dynamic-table additions
 	DynamicTable,
 	parseEncoderInstructions,
-	decodeHeadersWithTable,
+	decodeHeadersWithTable
 }

@@ -626,10 +626,10 @@ Pure-JS QUIC + HTTP/3 client at `lib/h3/`, integrated into `request()`. There is
 
 1. A live pooled session for the origin/dial target wins immediately: h3, then h2, then an
    idle h1 socket (if there is one).
-2. Otherwise QUIC starts first and TCP+TLS starts **300 ms later** (Chromium's
-   `quic_delay_tcp_race`). Whichever handshake completes first wins; the loser is
-   closed at once. A QUIC handshake has a 2 s budget, so origins without QUIC do
-   not stall the request.
+2. Otherwise QUIC and TCP+TLS start **in the same tick** (Happy Eyeballs) and the first
+   handshake to finish wins; the loser is closed at once. Chromium's 300 ms
+   `quic_delay_tcp_race` is deliberately not reproduced — it taxes every origin whose QUIC
+   path is unreachable with a fixed 300 ms. A QUIC handshake still has a 2 s budget.
 3. No UDP provider, a configured proxy, or an Alt-Svc hint of h2/h1 skips QUIC
    entirely and goes straight to TCP/CONNECT.
 
@@ -1008,44 +1008,47 @@ that entry is the one that declares ML-KEM.
 
 ## Performance
 
-> The numbers below were captured with an earlier build. The current tree reuses the bounded
-> keep-alive pool by default (`keepalive: false` opts out — see [Request options](#request-options)),
-> so cold per-request timings differ.
-
-Benchmarked on macOS / Node 22.11 against a local HTTP/2 server (127.0.0.1, 1 KB
+Measured on Linux / Node 24.21.0 against a local HTTP/2 server (127.0.0.1, 1 KB
 fixed-size response). Each client runs as a fresh subprocess: 1 cold request
-(includes TLS handshake), then 30 warm-serial requests on the same connection,
-then 50 parallel requests. Reproduce with `npm run bench`; the same harness runs
-in CI (`bench` job) to prove every client still completes.
+(includes TLS handshake), then 100 warm-serial requests on a reused connection,
+then 50 parallel requests. Numbers are the median of 3 runs (`WARM_REPS=100 npm run bench`).
+The keep-alive pool is on by default (`keepalive: false` opts out — see
+[Request options](#request-options)). Reproduce with `npm run bench`; the same harness runs
+in CI (`bench` job) to prove every client still completes. The profiling harness, bottleneck
+analysis and before/after numbers live in [`test/bench/RESULTS.md`](test/bench/RESULTS.md).
 
-| Client          |        Cold |   Warm p50 |   Warm p99 | 50 parallel |       RSS Δ |
-| --------------- | ----------: | ---------: | ---------: | ----------: | ----------: |
-| got (h2)        |      9.1 ms |     0.3 ms |     1.3 ms |      6.2 ms |      9.3 MB |
-| node-https (h1) |     15.6 ms |     0.8 ms |     1.4 ms |     21.0 ms |     15.8 MB |
-| node-http2      |     16.3 ms | **0.2 ms** | **0.4 ms** |  **2.4 ms** |  **7.9 MB** |
-| undici (h1)     |     17.3 ms |     0.2 ms |     0.5 ms |     26.3 ms |     11.7 MB |
-| axios (h1)      |     17.3 ms |     1.1 ms |     2.6 ms |     23.7 ms |     14.3 MB |
-| node-fetch (h1) |     17.7 ms |     0.9 ms |     2.1 ms |     23.8 ms |     14.2 MB |
-| **hellojs**     | **18.9 ms** | **0.3 ms** | **0.7 ms** |  **4.6 ms** | **11.8 MB** |
+| Client          |        Cold |   Warm p50 | Warm p99 | 50 parallel |      RSS Δ |
+| --------------- | ----------: | ---------: | -------: | ----------: | ---------: |
+| node-http2      | **14.9 ms** | **0.7 ms** |   1.7 ms | **12.6 ms** | **4.8 MB** |
+| node-https (h1) |     18.3 ms |     0.6 ms |   1.4 ms |     84.0 ms |     8.8 MB |
+| undici (h1)     |     22.2 ms |     0.9 ms |   2.3 ms |     14.8 ms |     6.6 MB |
+| axios (h1)      |     21.0 ms |     1.0 ms |   2.9 ms |    108.9 ms |    14.1 MB |
+| node-fetch (h1) |     20.4 ms |     1.1 ms |   2.6 ms |    100.6 ms |    20.3 MB |
+| got (h2)        |     27.4 ms |     1.4 ms |   3.4 ms |     27.5 ms |    11.9 MB |
+| fetch-native    |     39.2 ms |     1.0 ms |   4.7 ms |    125.2 ms |    31.5 MB |
+| **hellojs**     |     63.3 ms |     1.3 ms |   3.0 ms |     22.7 ms |    10.5 MB |
 
 **Where hellojs sits:**
 
-- **Cold connect: 2.6 ms behind node-http2**, within run-to-run noise of every other
-  client except got (which is exceptionally fast cold for unclear reasons). The
-  remaining gap is the genuine, irreducible cost of (a) building a Chrome-shape
-  ClientHello (~1500 B incl. the X25519MLKEM768 hybrid key share) and (b)
-  processing the handshake with a pure-JS TLS state machine vs. Node's native
-  C++ TLS.
-- **Warm p50: tied for fastest** (0.3 ms) with got, node-http2, undici.
-- **50 parallel: 2nd fastest** (4.6 ms) — 5-6× faster than every h1 client and
-  only 2.2 ms behind raw node-http2. h2 multiplexing wins decisively here.
-- **Memory: among the leanest** (11.8 MB RSS Δ); only node-http2 (7.9 MB) and
-  got (9.3 MB) are smaller.
+- **Cold connect: 63.3 ms**, down from ~356 ms before the Happy Eyeballs change (the old
+  300 ms QUIC head-start tax is gone; see [`test/bench/RESULTS.md`](test/bench/RESULTS.md)).
+  The remaining ~48 ms gap to node-http2 is the cost of building a Chrome-shape ClientHello
+  (~1500 B incl. the X25519MLKEM768 hybrid key share) and running a pure-JS TLS state machine
+  instead of Node's native C++ TLS.
+- **Warm p50: 1.3 ms** — close to the other h2 clients; the Huffman/HPACK rewrite and the
+  cached TLS traffic keys removed ~0.3 ms of per-request work.
+- **50 parallel: 22.7 ms** — 4-5× faster than the h1 clients, ahead of got (27.5 ms), behind
+  node-http2 (12.6 ms) and undici (14.8 ms). h2 multiplexing still wins decisively over h1.
+- **Memory: 10.5 MB RSS Δ** — leaner than every client here except node-http2, undici and
+  node-https.
 
 None of the alternatives can produce
 `JA4 = t13d1516h2_8daaf6152771_d8a2da3f94cd` — that's the trade-off.
 
 ### Real-internet (`www.cloudflare.com/cdn-cgi/trace`)
+
+> Historical numbers from an earlier build — the profiling environment had no network access,
+> and the transport race / header encoder have changed since. Treat these as context only.
 
 Same harness, different target — measures the cost over a real network path with
 genuine TLS handshake RTT. 10 warm + 10 parallel (smaller load to be polite to a
@@ -1073,8 +1076,9 @@ shared endpoint).
   This is the genuine, irreducible cost of the fingerprint: the larger
   ClientHello (~1500 B vs ~500 B for vanilla Node) takes longer to traverse the
   network, and the pure-JS TLS state machine processes the server's response
-  more slowly than Node's native C++ TLS. There's no further optimization
-  available here without dropping fingerprint fidelity.
+  more slowly than Node's native C++ TLS. The fixed 300 ms QUIC head start has since
+  been removed (Happy Eyeballs race), but these live-internet numbers were never
+  re-measured after that change.
 
 Reproduce: `npm run bench:remote` (default target `www.cloudflare.com/cdn-cgi/trace`,
 override with `REMOTE_TARGET=host/path`).

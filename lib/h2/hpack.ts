@@ -82,7 +82,18 @@ const STATIC: Array<HeaderEntry | null> = [
 	['www-authenticate', '']
 ]
 
-const STATIC_LEN = STATIC.length - 1   // 61
+const STATIC_LEN = STATIC.length - 1 // 61
+
+// The static table never changes; resolving its (name, value) pairs through maps instead of a
+// linear scan per header keeps the h2 request path free of ~61 string comparisons per field.
+const STATIC_EXACT_INDEX = new Map<string, number>()
+const STATIC_NAME_INDEX = new Map<string, number>()
+for (let i = 1; i <= STATIC_LEN; i++) {
+	const [name, value] = STATIC[i]!
+	const exact = `${name}\0${value}`
+	if (!STATIC_EXACT_INDEX.has(exact)) STATIC_EXACT_INDEX.set(exact, i)
+	if (!STATIC_NAME_INDEX.has(name)) STATIC_NAME_INDEX.set(name, i)
+}
 
 class DynamicTable {
 	declare entries: HeaderList
@@ -90,7 +101,7 @@ class DynamicTable {
 	declare size: number
 
 	constructor(capacity = 4096) {
-		this.entries = []   // newest first (index 1 = newest in spec, so [0] is newest)
+		this.entries = [] // newest first (index 1 = newest in spec, so [0] is newest)
 		this.capacity = capacity
 		this.size = 0
 	}
@@ -169,18 +180,22 @@ function decodeString(buf: Buffer, off: number): { value: string; length: number
 }
 
 // Helpers for the encoder.
-function findInTables(name: string, value: string, table: DynamicTable): { exact: number; nameOnly?: undefined } | { nameOnly: number; exact?: undefined } | null {
-	for (let i = 1; i <= STATIC_LEN; i++) {
-		const [n, v] = STATIC[i]!
-		if (n === name && v === value) return { exact: i }
-	}
+function findInTables(
+	name: string,
+	value: string,
+	table: DynamicTable
+): { exact: number; nameOnly?: undefined } | { nameOnly: number; exact?: undefined } | null {
+	const staticExact = STATIC_EXACT_INDEX.get(`${name}\0${value}`)
+	if (staticExact !== undefined) return { exact: staticExact }
 	for (let i = 0; i < table.entries.length; i++) {
 		const [n, v] = table.entries[i]
 		if (n === name && v === value) return { exact: STATIC_LEN + 1 + i }
 	}
 	// Name-only fallback (prefer static for stability)
-	for (let i = 1; i <= STATIC_LEN; i++) if (STATIC[i]![0] === name) return { nameOnly: i }
-	for (let i = 0; i < table.entries.length; i++) if (table.entries[i][0] === name) return { nameOnly: STATIC_LEN + 1 + i }
+	const staticName = STATIC_NAME_INDEX.get(name)
+	if (staticName !== undefined) return { nameOnly: staticName }
+	for (let i = 0; i < table.entries.length; i++)
+		if (table.entries[i][0] === name) return { nameOnly: STATIC_LEN + 1 + i }
 	return null
 }
 
@@ -188,7 +203,10 @@ function findInTables(name: string, value: string, table: DynamicTable): { exact
 // values — stateless encoder, no dynamic table writes from our side. Matches what Node's
 // http2 does by default for non-sensitive headers. Both halves are stringified, so callers
 // can hand us numbers (a content-length, a priority weight) directly.
-function encode(headers: Array<[name: string | number, value: string | number | boolean | null | undefined]>, table: DynamicTable): Buffer {
+function encode(
+	headers: Array<[name: string | number, value: string | number | boolean | null | undefined]>,
+	table: DynamicTable
+): Buffer {
 	const out: Buffer[] = []
 	for (const [name, value] of headers) {
 		const n = String(name).toLowerCase()
@@ -197,10 +215,10 @@ function encode(headers: Array<[name: string | number, value: string | number | 
 		if (m && m.exact != null) {
 			out.push(encodeInt(m.exact, 7, 0x80))
 		} else if (m && m.nameOnly != null) {
-			out.push(encodeInt(m.nameOnly, 4, 0x00))   // Without Indexing, name index
+			out.push(encodeInt(m.nameOnly, 4, 0x00)) // Without Indexing, name index
 			out.push(encodeString(v))
 		} else {
-			out.push(Buffer.from([0x00]))               // Without Indexing, literal name
+			out.push(Buffer.from([0x00])) // Without Indexing, literal name
 			out.push(encodeString(n))
 			out.push(encodeString(v))
 		}
@@ -217,7 +235,7 @@ function decode(buf: Buffer, table: DynamicTable, maxSize = 262144): HeaderList 
 	// repeated indexed references to large dynamic-table entries (a decompression bomb), so cap
 	// the running size at the MAX_HEADER_LIST_SIZE we advertise. Overrun throws a connection error.
 	const push = (n: string, v: string): void => {
-		listSize += (n ? n.length : 0) + (v ? v.length : 0) + 32  // RFC 7541 §4.1 entry-size estimate
+		listSize += (n ? n.length : 0) + (v ? v.length : 0) + 32 // RFC 7541 §4.1 entry-size estimate
 		if (listSize > maxSize) {
 			const e: Error & NodeJS.ErrnoException = new Error('HPACK header list exceeds MAX_HEADER_LIST_SIZE')
 			e.code = 'EH2COMPRESS'

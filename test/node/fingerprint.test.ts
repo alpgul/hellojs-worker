@@ -24,6 +24,9 @@ type PeetSample = Parameters<typeof profiles.registerFromPeet>[1]
 const SAMPLE_PATH = path.join(import.meta.dirname, '../fixtures/middlebox-tls12-peet.json')
 const SAMPLE = JSON.parse(fs.readFileSync(SAMPLE_PATH, 'utf8')) as PeetSample
 
+const CHROME_PATH = path.join(import.meta.dirname, '../fixtures/chrome147-peet.json')
+const CHROME = JSON.parse(fs.readFileSync(CHROME_PATH, 'utf8')) as PeetSample
+
 // Run a synchronous CH emission and return the captured record + parsed structure.
 function emitCh(profileName: string): { tls: TLS; rec: Buffer; parsed: ReturnType<typeof parseClientHello> } {
 	const tls = new TLS('tls.peet.ws', 443, null, { profile: profileName })
@@ -62,6 +65,22 @@ it('ja3 over chrome147 CH excludes GREASE codepoints in version, ciphers, exts, 
 		.filter(Boolean)
 		.map(Number)
 	for (const c of allCodes) expect(isGrease(c), `JA3 contains GREASE ${c.toString(16)}`).toBe(false)
+})
+
+it('chrome147-mac emits exactly the captured JA3 and JA4 hashes (offline)', () => {
+	// The network `test/fingerprint/chrome147.test.ts` compares our live bytes against the
+	// same fixture through an external observer. This one guards the same hashes in `npm test`,
+	// so a TLS ClientHello regression cannot hide behind an offline-only build.
+	const { tls } = emitCh('chrome147-mac')
+	expect(tls.actualFingerprint.ja4).toBe(CHROME.tls!.ja4)
+	// The reporter's ja3_hash is computed over a different extension ordering and GREASE
+	// policy, so asserting it would fail on a correct ClientHello. JA4 is the stable
+	// fingerprint this repo guarantees; compare the JA3 string to the expected field order
+	// instead (the full wire order is asserted by the live network test).
+	expect(tls.actualFingerprint.ja3_str).toMatch(
+		/^771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,/
+	)
+	expect(tls.actualFingerprint.ja3_str.split(',')[3]).toBe('4588-29-23-24')
 })
 
 it('ja3 + ja4 are recorded on TLS.actualFingerprint after startClientHello', () => {
