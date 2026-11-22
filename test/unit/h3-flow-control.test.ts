@@ -223,6 +223,10 @@ it('keeps the newest MAX replay when an older flow-control packet is acknowledge
 
 		expect(conn.flowControlFrames.has(newKey)).toBe(true)
 		expect(conn.flowControlFrames.size).toBe(1)
+
+		const newPn = [...conn.sentPackets.oneRtt.keys()].find((pn) => pn !== oldPn)!
+		conn._onPacketAcked('oneRtt', newPn, conn.sentPackets.oneRtt.get(newPn)!)
+		expect(conn.flowControlFrames.size).toBe(0)
 	} finally {
 		conn.close()
 	}

@@ -1638,8 +1638,9 @@ class QuicConnection extends EventEmitter {
 	_onPacketAcked(epoch: Epoch, _pn: number, info: SentPacket): void {
 		if (epoch !== 'oneRtt') return
 		for (const key of info.flowControlKeys || []) {
-			// A cancel is only replayed while unacked; keeping it forever bloats every PTO.
-			if (key.startsWith('cancel:')) this.flowControlFrames.delete(key)
+			// Keys are versioned per send, so deleting the exact ones this packet carried never
+			// removes a newer frame. Keeping ACKed frames would bloat every later PTO.
+			this.flowControlFrames.delete(key)
 		}
 		if (!info.size) {
 			// Control ACKs free no cwnd bytes, but a prior PTO may already have freed capacity;
