@@ -825,20 +825,14 @@ class QuicConnection extends EventEmitter {
 		for (const epoch of EPOCHS) {
 			const sent = this.sentPackets[epoch]
 			if (!sent || sent.size === 0) continue
-			const [oldestPn, info] = [...sent.entries()].sort((a, b) => a[1].time - b[1].time)[0]
-			sent.delete(oldestPn)
-			if (epoch === 'initial' && info.includesCrypto) {
-				// Re-send the ClientHello as a fresh Initial.
-				const cryptoFrame = pkt.encodeCryptoFrame(0, this.transcript[0])
-				this._sendInitial(cryptoFrame)
-				return
-			}
-			if (epoch === 'handshake' && info.includesCrypto) {
-				// Re-send Client Finished
-				this._sendClientFinishedRaw()
-				return
-			}
 			if (epoch === 'oneRtt') {
+				// A control packet is not congestion-controlled. Prefer the oldest sized DATA
+				// packet for loss/CC so an older MAX/cancel probe cannot mask a real loss.
+				const ordered = [...sent.entries()].sort((a, b) => a[1].time - b[1].time)
+				const chosen = ordered.find(([, i]) => (i.size || 0) > 0) || ordered[0]
+				if (!chosen) continue
+				const [oldestPn, info] = chosen
+				sent.delete(oldestPn)
 				// Declare the unacked 1-RTT packet lost, react to congestion event,
 				// and emit a PING to elicit an ACK. PING itself bypasses CC.
 				if (info.size) {
@@ -869,6 +863,19 @@ class QuicConnection extends EventEmitter {
 				})
 				this._sendDatagram(packet)
 				this._rearmPto()
+				return
+			}
+			const [oldestPn, info] = [...sent.entries()].sort((a, b) => a[1].time - b[1].time)[0]
+			sent.delete(oldestPn)
+			if (epoch === 'initial' && info.includesCrypto) {
+				// Re-send the ClientHello as a fresh Initial.
+				const cryptoFrame = pkt.encodeCryptoFrame(0, this.transcript[0])
+				this._sendInitial(cryptoFrame)
+				return
+			}
+			if (epoch === 'handshake' && info.includesCrypto) {
+				// Re-send Client Finished
+				this._sendClientFinishedRaw()
 				return
 			}
 		}

@@ -244,6 +244,37 @@ it('does not halve cwnd when PTO declares a control packet lost', () => {
 	}
 })
 
+it('uses a lost data packet for PTO congestion response ahead of older control packets', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	const secret = () => crypto.randomBytes(32)
+	const epochKeys = () => keys.deriveKeysFromSecret(secret(), 'sha256', 16, 12)
+	conn.appKeys = { client: epochKeys(), server: epochKeys() } as unknown as typeof conn.appKeys
+	conn._sendDatagram = (() => {}) as unknown as typeof conn._sendDatagram
+	conn.cc.bytesInFlight = 0
+	conn.cc.cwnd = 12000
+	conn.cc.ssthresh = 12000
+
+	try {
+		conn._grantFlowControl('max_data:0', Buffer.from([0x01]))
+		const controlPn = [...conn.sentPackets.oneRtt.keys()][0]!
+		conn.sentPackets.oneRtt.get(controlPn)!.time = Date.now() - 10_000
+
+		const dataPn = conn.pn.oneRtt++
+		conn._send1Rtt(Buffer.from([0x44, 0, 0, 0]), dataPn)
+		const dataInfo = conn.sentPackets.oneRtt.get(dataPn)!
+		expect(dataInfo.size).toBeGreaterThan(0)
+		conn.cc.bytesInFlight = dataInfo.size!
+
+		conn._onPtoFire()
+
+		expect(conn.cc.cwnd).toBe(6000)
+		expect(conn.sentPackets.oneRtt.has(dataPn)).toBe(false)
+		expect(conn.sentPackets.oneRtt.has(controlPn)).toBe(true)
+	} finally {
+		conn.close()
+	}
+})
+
 it('charges only unique discarded bytes when a cancelled stream has overlapping frames', () => {
 	const conn = new QuicConnection('127.0.0.1', 443)
 	const stream = conn.openBidiStream()
