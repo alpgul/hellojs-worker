@@ -331,6 +331,51 @@ it('retransmits the lost STREAM frame on PTO', () => {
 	}
 })
 
+it('drops retransmittable stream frames when the send direction is cancelled', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	const secret = () => crypto.randomBytes(32)
+	const epochKeys = () => keys.deriveKeysFromSecret(secret(), 'sha256', 16, 12)
+	conn.appKeys = { client: epochKeys(), server: epochKeys() } as unknown as typeof conn.appKeys
+	conn._sendDatagram = (() => {}) as unknown as typeof conn._sendDatagram
+	const stream = conn.openBidiStream()
+
+	try {
+		conn.sendStreamData(stream.id, 0, Buffer.from('hello'), true)
+		expect(conn.cc.bytesInFlight).toBeGreaterThan(0)
+
+		stream.cancel(0x0c)
+
+		const retained = [...conn.sentPackets.oneRtt.values()].filter((i) => i.streamFrame?.streamId === stream.id)
+		expect(retained).toHaveLength(0)
+		expect(conn.cc.bytesInFlight).toBe(0)
+		conn._onPtoFire()
+		expect([...conn.sentPackets.oneRtt.values()].some((i) => i.streamFrame?.streamId === stream.id)).toBe(false)
+	} finally {
+		conn.close()
+	}
+})
+
+it('drops cwnd-queued stream frames when the send direction is cancelled', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	const secret = () => crypto.randomBytes(32)
+	const epochKeys = () => keys.deriveKeysFromSecret(secret(), 'sha256', 16, 12)
+	conn.appKeys = { client: epochKeys(), server: epochKeys() } as unknown as typeof conn.appKeys
+	conn._sendDatagram = (() => {}) as unknown as typeof conn._sendDatagram
+	conn.cc.bytesInFlight = conn.cc.cwnd
+	const stream = conn.openBidiStream()
+
+	try {
+		conn.sendStreamData(stream.id, 0, Buffer.from('hello'), true)
+		expect(conn.appSendQueue).toHaveLength(1)
+
+		stream.cancel(0x0c)
+
+		expect(conn.appSendQueue).toHaveLength(0)
+	} finally {
+		conn.close()
+	}
+})
+
 it('drains queued stream data after PTO frees congestion capacity', () => {
 	const conn = new QuicConnection('127.0.0.1', 443)
 	const secret = () => crypto.randomBytes(32)

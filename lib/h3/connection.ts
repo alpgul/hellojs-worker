@@ -1530,6 +1530,16 @@ class QuicConnection extends EventEmitter {
 		this._rearmPto()
 	}
 
+	/** Drop outbound DATA for a stream whose send direction was reset. */
+	_dropStreamFrames(streamId: number): void {
+		for (const [pn, info] of this.sentPackets.oneRtt) {
+			if (info.streamFrame?.streamId !== streamId) continue
+			this.sentPackets.oneRtt.delete(pn)
+			if (info.size) this.cc.bytesInFlight = Math.max(0, this.cc.bytesInFlight - info.size)
+		}
+		this.appSendQueue = this.appSendQueue.filter((packet) => packet.streamFrame?.streamId !== streamId)
+	}
+
 	_grantFlowControl(bucket: string, frame: Buffer): void {
 		// Supersede older frames in this bucket. Every send gets a unique key so an ACK of an
 		// older packet can only delete the exact replay it carried, never a newer frame.
@@ -1841,6 +1851,9 @@ class QuicStream extends EventEmitter {
 		this.sendCancelled = true
 		this.sendQueue = []
 		this.blocked = false
+		// STREAM frames still on the wire or waiting for cwnd must not be retransmitted after
+		// RESET_STREAM; the peer would reject data past the final size and kill the connection.
+		this.conn._dropStreamFrames(this.id)
 		if (includeStopSending) this.stopSendingSent = true
 		if (this.conn.appKeys && !this.conn._closed) {
 			const frames = [pkt.encodeResetStreamFrame(this.id, errorCode, this.sendOffset)]
