@@ -759,8 +759,13 @@ function performH3(
 					stream.fail(new HellojsError(e.message, 'EH3STREAM', e))
 					return
 				}
-				// H3 parse/stream errors are request-scoped. Release this slot without tearing
-				// down a pooled QUIC session that sibling requests are still using.
+				// H3 parse/stream errors are request-scoped. Cancel this QUIC stream and release
+				// the slot without tearing down a pooled session that siblings still use.
+				try {
+					cancelStream()
+				} catch {
+					/* already cancelled */
+				}
 				close()
 				if (!resolved) {
 					resolved = true
