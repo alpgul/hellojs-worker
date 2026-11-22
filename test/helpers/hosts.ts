@@ -9,6 +9,9 @@
 export const HTTP_HOST = 'httpbingo.org'
 // Fingerprint reporting: parses the ClientHello it just received.
 export const FINGERPRINT_HOST = 'tools.scrapfly.io'
+// Second observer: browserleaks reports both the ClientHello (/tls) and the HTTP/2 SETTINGS
+// + HEADERS fingerprint (/http2) of the very same connection.
+export const BROWSERLEAKS_HOST = 'tls.browserleaks.com'
 // TLS 1.3 + h2 baseline; also the HRR and SCT subject.
 export const TLS13_HOST = 'www.cloudflare.com'
 // QUIC / HTTP/3 endpoint.

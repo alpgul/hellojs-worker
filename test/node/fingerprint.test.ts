@@ -6,12 +6,14 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { Writable } from 'node:stream'
 
-import { expect, it } from 'vitest'
+import { beforeEach, expect, it } from 'vitest'
 
 import * as profiles from '../../lib/profiles/index.ts'
 import { parseClientHello, ja3, isGrease } from '../../lib/tls/fingerprint.ts'
+import { clearSessionTickets, storeSessionTicket } from '../../lib/tls/session-tickets.ts'
 import { TLS } from '../../lib/tls/tls.ts'
 
+import type { SessionTicket } from '../../lib/tls/session-tickets.ts'
 import type net from 'node:net'
 
 interface EmittedFingerprint {
@@ -27,9 +29,30 @@ const SAMPLE = JSON.parse(fs.readFileSync(SAMPLE_PATH, 'utf8')) as PeetSample
 const CHROME_PATH = path.join(import.meta.dirname, '../fixtures/chrome147-peet.json')
 const CHROME = JSON.parse(fs.readFileSync(CHROME_PATH, 'utf8')) as PeetSample
 
+beforeEach(() => clearSessionTickets())
+
+function ticket(overrides: Partial<SessionTicket> = {}): SessionTicket {
+	return {
+		ticket: Buffer.from('offline-resume-ticket'),
+		psk: Buffer.alloc(32, 7),
+		cipherSuite: 0x1301,
+		hash: 'sha256',
+		hashLen: 32,
+		lifetime: 3600,
+		ageAdd: 1234,
+		receivedAt: Date.now(),
+		alpn: 'h2',
+		verified: true,
+		...overrides
+	}
+}
+
 // Run a synchronous CH emission and return the captured record + parsed structure.
-function emitCh(profileName: string): { tls: TLS; rec: Buffer; parsed: ReturnType<typeof parseClientHello> } {
-	const tls = new TLS('tls.peet.ws', 443, null, { profile: profileName })
+function emitCh(
+	profileName: string,
+	opts: { resume?: boolean } = {}
+): { tls: TLS; rec: Buffer; parsed: ReturnType<typeof parseClientHello> } {
+	const tls = new TLS('tls.peet.ws', 443, null, { profile: profileName, resume: opts.resume })
 	const chunks: Buffer[] = []
 	// The test writes into a capturing sink instead of a TCP socket.
 	tls.socket = new Writable({
@@ -81,6 +104,38 @@ it('chrome147-mac emits exactly the captured JA3 and JA4 hashes (offline)', () =
 		/^771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,/
 	)
 	expect(tls.actualFingerprint.ja3_str.split(',')[3]).toBe('4588-29-23-24')
+})
+
+it('resume: a cached ticket appends pre_shared_key last and shifts JA4 to 17 extensions', () => {
+	// Chrome also adds extension 41 on a resumed handshake, so the 16 -> 17 extension
+	// change is the expected shape, not a regression. What must NOT change: ciphers,
+	// groups, sigalgs, ALPN and the extension order before PSK.
+	storeSessionTicket('tls.peet.ws', 443, ticket())
+
+	const cold = emitCh('chrome147-mac')
+	const warm = emitCh('chrome147-mac', { resume: true })
+
+	expect(warm.tls.pskTicket, 'ticket was offered').not.toBeNull()
+	expect(warm.parsed.extensions.at(-1)?.id, 'pre_shared_key is last').toBe(0x0029)
+	expect(warm.parsed.extensions.filter((e) => e.id === 0x0029)).toHaveLength(1)
+
+	// JA4_a: 16 -> 17 extensions; same version / SNI / cipher count / ALPN.
+	expect(cold.tls.actualFingerprint.ja4).toMatch(/^t13d1516h2_8daaf6152771_/)
+	expect(warm.tls.actualFingerprint.ja4).toMatch(/^t13d1517h2_8daaf6152771_/)
+	// ja4_b (sorted ciphers) is identical; ja4_c (extensions + sigalgs) changes with 0x29.
+	const [, coldB, coldC] = cold.tls.actualFingerprint.ja4.split('_')
+	const [, warmB, warmC] = warm.tls.actualFingerprint.ja4.split('_')
+	expect(warmB).toBe(coldB)
+	expect(warmC).not.toBe(coldC)
+
+	// JA3 string: extension list gains 41, but cipher / group / point-format fields stay put.
+	const cold3 = cold.tls.actualFingerprint.ja3_str.split(',')
+	const warm3 = warm.tls.actualFingerprint.ja3_str.split(',')
+	expect(warm3[1]).toBe(cold3[1])
+	expect(warm3[3]).toBe(cold3[3])
+	expect(warm3[4]).toBe(cold3[4])
+	expect(warm3[2]!.split('-').map(Number)).toContain(41)
+	expect(warm3[2]!.split('-').at(-1)).toBe('41')
 })
 
 it('ja3 + ja4 are recorded on TLS.actualFingerprint after startClientHello', () => {

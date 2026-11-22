@@ -303,6 +303,69 @@ Mikro-bench'te umut verici görünen (%29) montaj değişikliği uçtan uca öl�
 `Buffer.concat` maliyeti cipher kurulumunun yanında küçük kaldı. Kabul kriteri (≥%5 **ve** gürültü
 üstü) sağlanmadığı için kod **geri alındı**; ağaçta yalnızca 6.1 değişikliği kaldı.
 
+## Faz 7 — Keepalive / TLS resume fingerprint doğrulaması
+
+Optimizasyonlardan sonra parmak izinin bozulup bozulmadığı, browserleaks'in iki uç noktası
+(`/tls`, `/http2`) ve ticket yayınlayan bir ikinci gözlemci (`tools.scrapfly.io`) ile doğrulandı.
+
+### 7.1 — Soğuk ClientHello: bozulma yok
+
+`https://tls.browserleaks.com/tls`, `chrome147-mac` profiliyle taze bağlantıda çağrıldı:
+
+| Alan          | Gözlenen                               | Beklenen (fixture) |
+| ------------- | -------------------------------------- | ------------------ |
+| JA4           | `t13d1516h2_8daaf6152771_d8a2da3f94cd` | aynı               |
+| cipher_suites | 16                                     | 16                 |
+| extensions    | 18 (2 GREASE + 16)                     | aynı               |
+
+B1/B2/B3/6.1 değişiklikleri soğuk CH byte'larını etkilememiş — JA4 birebir korundu.
+`test/node/fingerprint.test.ts` içindeki çevrimdışı guard da aynı değeri `npm test`'te sabitliyor.
+
+### 7.2 — TLS resume: beklenen şekilde değişiyor, bozulma değil
+
+Tarayıcılar resume'da `pre_shared_key` (0x0029) extension'ını ekler; bu yüzden JA4 16 → 17
+extension'a çıkar. Bu bizim için de geçerli ve doğru davranış:
+
+| Senaryo (gözlemci)                  | JA4                                    | Not                             |
+| ----------------------------------- | -------------------------------------- | ------------------------------- |
+| Soğuk (browserleaks)                | `t13d1516h2_8daaf6152771_d8a2da3f94cd` | referans                        |
+| Resume (scrapfly)                   | `t13d1517h2_8daaf6152771_b6f405a00624` | 17 ext, `ja4_r`'de `0029`       |
+| Gerçek Chrome 158 (headless, soğuk) | `t13d1517h2_8daaf6152771_cb7bf5808d99` | aynı JA4_a sınıfı, aynı `ja4_b` |
+
+Kritik noktalar: `ja4_b` (sıralı cipher hash'i) **değişmiyor** (`8daaf6152771`), cipher/group/
+sigalg listeleri aynı kalıyor, yalnızca `ja4_c` yeni extension yüzünden farklılaşıyor. Live
+scrapfly raporunda `pre_shared_key (41)` extension'ı son sırada görünüyor. Çevrimdışı test
+(`test/node/fingerprint.test.ts`) PSK'nın son extension olduğunu ve JA4'ün `t13d1517h2_...`
+olduğunu, canlı test (`test/fingerprint/browserleaks.test.ts`) ise gözlemci tarafında
+`0029`'un görüldüğünü doğruluyor.
+
+Not: browserleaks `NewSessionTicket` yayınlamıyor; bu yüzden canlı resume scrapfly üzerinden
+ölçüldü. İki gözlemcinin JA4 sözdizimi aynı (FoxIO spec), değerler karşılaştırılabilir.
+
+### 7.3 — Keepalive: yeni fingerprint üretilmiyor
+
+Havuzdan bağlantı alındığında yeni ClientHello ya da SETTINGS gönderilmiyor; gözlemci açısından
+fingerprint değişecek bir byte yok. Risk h2 HEADERS tarafındaydı; `test/unit/h2-keepalive-headers.test.ts`
+aynı `H2Session` üzerinde iki istek üretip şunları doğruluyor:
+
+- HEADERS payload'u (5 B priority + tüm HPACK bloğu) **byte-for-byte aynı**,
+- `END_STREAM | END_HEADERS | PRIORITY` flag'leri korunuyor,
+- ikinci istekte ek SETTINGS / WINDOW_UPDATE frame'i yok.
+
+Canlı `/http2` kontrolü de aynı oturumdan akamai fingerprint'inin doğru olduğunu gösterdi:
+`akamai_text = 1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p`
+(çevrimdışı referans: `test/unit/h2-chrome-headers.test.ts`).
+
+### 7.4 — Sonuç ve gate'ler
+
+**Bozulma yok.** Soğuk JA4 korundu; resume farkı Chrome ile aynı yönde ve beklenen; keepalive'da
+fingerprint üretecek yeni byte yok. Eklenen testler: `test/node/fingerprint.test.ts` (offline
+resume guard), `test/unit/h2-keepalive-headers.test.ts` (byte-for-byte keepalive) ve
+`test/fingerprint/browserleaks.test.ts` (canlı, `network` projesi — `npm test`'e dahil değil).
+
+Gate'ler: 490 test / 73 dosya geçti, `typecheck`, `lint` (0 uyarı), Prettier temiz.
+Canlı fingerprint testi ayrıca `npm run test:fingerprint` ile 4/4 geçti.
+
 ### Kalanlar
 
 - B4/B5 ortak kök nedeninin büyük kısmı 6.1 ile çözüldü; kalan TLS kaydı Buffer churn'ü için
