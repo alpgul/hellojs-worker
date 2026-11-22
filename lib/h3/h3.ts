@@ -211,6 +211,7 @@ class H3Client {
 		let respFrameBuf: Buffer = Buffer.alloc(0)
 		let respFailed = false
 		let headersEmitted = false
+		let informationalHeaders = false
 		let ended = false
 		let fatal = false
 		let pausedByConsumer = false
@@ -232,6 +233,11 @@ class H3Client {
 			if (headersEmitted) return true
 			const status = parseInt(respHeaders[':status'] || '0', 10)
 			if (!status) return false
+			// 1xx HEADERS are informational: keep parsing so the final HEADERS are not dropped.
+			if (status >= 100 && status < 200) {
+				informationalHeaders = true
+				return false
+			}
 			headersEmitted = true
 			handlers.onHeaders(status, respHeaders)
 			return true
@@ -242,13 +248,17 @@ class H3Client {
 			if (error) {
 				fatal = true
 				handlers.onError(error)
-			} else if (emitHeaders()) {
-				handlers.onEnd()
-			} else {
-				const err = new Error('h3 response ended before HEADERS') as NodeJS.ErrnoException
-				err.code = 'EH3PARSE'
-				handlers.onError(err)
+				return
 			}
+			if (emitHeaders() || informationalHeaders) {
+				// A 1xx-only stream has no final response; client.ts rejects it as EBADRESP.
+				handlers.onEnd()
+				return
+			}
+			fatal = true
+			const err = new Error('h3 response ended before HEADERS') as NodeJS.ErrnoException
+			err.code = 'EH3PARSE'
+			handlers.onError(err)
 		}
 
 		// Read a QUIC varint only when all its bytes are present (its length is encoded in the top 2
@@ -280,6 +290,9 @@ class H3Client {
 					const payload = respFrameBuf.subarray(off, off + frameLen)
 					respFrameBuf = respFrameBuf.subarray(off + frameLen)
 					if (t.value === FRAME.HEADERS) {
+						// Each HEADERS frame is a complete field section; don't carry 1xx fields
+						// into the final response.
+						for (const key of Object.keys(respHeaders)) delete respHeaders[key]
 						// Prefer dynamic-table-aware decode when the peer's table has entries;
 						// fall back to static-only decoder for the static-only path (RIC=0, Base=0).
 						const maxEntries = Math.floor(

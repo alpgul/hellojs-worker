@@ -372,7 +372,7 @@ it('reports a protocol error when an H3 stream ends before HEADERS', () => {
 	const { h3, stream } = fakeH3()
 	const errors: Error[] = []
 	let ended = false
-	h3.requestStream(
+	const handle = h3.requestStream(
 		{ method: 'GET', path: '/', host: 'example.com' },
 		{
 			onHeaders: () => {},
@@ -380,7 +380,10 @@ it('reports a protocol error when an H3 stream ends before HEADERS', () => {
 			onEnd: () => {
 				ended = true
 			},
-			onError: (e) => errors.push(e)
+			onError: (e) => {
+				errors.push(e)
+				handle.cancel()
+			}
 		}
 	)
 
@@ -388,6 +391,31 @@ it('reports a protocol error when an H3 stream ends before HEADERS', () => {
 	expect(ended).toBe(false)
 	expect(errors).toHaveLength(1)
 	expect(errors[0].message).toContain('before HEADERS')
+	expect(stream.cancelCalls).toBe(1)
+})
+
+it('waits for final HEADERS after a 1xx response', () => {
+	const { h3, stream } = fakeH3()
+	const statuses: number[] = []
+	let ended = false
+	h3.requestStream(
+		{ method: 'GET', path: '/', host: 'example.com' },
+		{
+			onHeaders: (status) => statuses.push(status),
+			onData: () => true,
+			onEnd: () => {
+				ended = true
+			},
+			onError: () => {}
+		}
+	)
+
+	stream.emit('data', encodeFrame(FRAME.HEADERS, qpack.encodeHeaders([[':status', '103']])))
+	expect(statuses).toEqual([])
+	stream.emit('data', encodeFrame(FRAME.HEADERS, qpack.encodeHeaders([[':status', '200']])))
+	stream.emit('end')
+	expect(statuses).toEqual([200])
+	expect(ended).toBe(true)
 })
 
 it('fails sibling H3 requests when the shared connection closes', () => {
