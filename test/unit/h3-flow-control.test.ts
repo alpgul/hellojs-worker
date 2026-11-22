@@ -2,6 +2,7 @@
 // no UDP server is needed to prove that credit is granted only as bytes are read, that a paused
 // consumer stops delivery, and that bodies larger than the old 16 MB client cap stream through.
 
+import * as crypto from 'node:crypto'
 import { EventEmitter } from 'node:events'
 
 import { expect, it } from 'vitest'
@@ -9,6 +10,7 @@ import { expect, it } from 'vitest'
 import { Connection } from '../../lib/connect.ts'
 import { QuicConnection, QuicStream } from '../../lib/h3/connection.ts'
 import { encodeFrame, FRAME, H3Client } from '../../lib/h3/h3.ts'
+import * as keys from '../../lib/h3/keys.ts'
 import * as pkt from '../../lib/h3/packet.ts'
 import * as qpack from '../../lib/h3/qpack.ts'
 import * as tp from '../../lib/h3/transport-params.ts'
@@ -145,16 +147,32 @@ it('charges discarded bytes to connection flow control after cancel', () => {
 	expect(conn.recvConsumed).toBe(64)
 })
 
-it('replays cancel frames on PTO', () => {
+it('tracks cancel frames for PTO and stops replaying them once acknowledged', () => {
 	const conn = new QuicConnection('127.0.0.1', 443)
-	conn.appKeys = {} as unknown as typeof conn.appKeys
-	captureFrames(conn)
+	const secret = () => crypto.randomBytes(32)
+	const epochKeys = () => keys.deriveKeysFromSecret(secret(), 'sha256', 16, 12)
+	conn.appKeys = { client: epochKeys(), server: epochKeys() } as unknown as typeof conn.appKeys
+	conn._sendDatagram = (() => {}) as unknown as typeof conn._sendDatagram
 	const stream = conn.openBidiStream()
 
 	stream.cancel(0x0c)
-	const replayed = [...conn.flowControlFrames.values()].flatMap((frame) => pkt.decodeFrames(frame))
-	expect(replayed).toContainEqual({ type: 'reset_stream', streamId: stream.id, errorCode: 0x0c, finalSize: 0 })
-	expect(replayed).toContainEqual({ type: 'stop_sending', streamId: stream.id, errorCode: 0x0c })
+	expect(conn.sentPackets.oneRtt.size).toBe(1)
+	expect(conn.flowControlFrames.has(`cancel:${stream.id}`)).toBe(true)
+	const pn = [...conn.sentPackets.oneRtt.keys()][0]
+	const info = conn.sentPackets.oneRtt.get(pn)!
+	conn._onPacketAcked('oneRtt', pn, info)
+	expect(conn.flowControlFrames.has(`cancel:${stream.id}`)).toBe(false)
+})
+
+it('charges only unique discarded bytes when a cancelled stream has overlapping frames', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	const stream = conn.openBidiStream()
+	stream.pause()
+	stream._onData(0, Buffer.alloc(100), false)
+	stream._onData(0, Buffer.alloc(100), false)
+	const before = conn.recvConsumed
+	stream.cancel(0x0c)
+	expect(conn.recvConsumed - before).toBe(100)
 })
 
 it('reports a peer RESET_STREAM once and cancels the whole bidi stream', () => {

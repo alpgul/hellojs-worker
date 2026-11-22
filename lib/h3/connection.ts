@@ -74,6 +74,7 @@ interface SentPacket {
 	payload?: Buffer
 	size?: number
 	includesCrypto: boolean
+	flowControlKeys?: string[]
 }
 
 interface DstCidEntry {
@@ -845,17 +846,26 @@ class QuicConnection extends EventEmitter {
 				if (!this.appKeys) return
 				// MAX frames are idempotent, so replaying the latest grants with the PING is safe
 				// and prevents a lost grant from wedging a paused-then-resumed response.
+				const keys = [...this.flowControlFrames.keys()]
 				const frame = Buffer.concat([...this.flowControlFrames.values(), Buffer.from([0x01])])
+				const pn = this.pn.oneRtt
 				const packet = pkt.buildOneRtt({
 					dstCid: this.dstCid,
 					payloadFrames: frame,
-					pn: this.pn.oneRtt,
+					pn,
 					pnLen: 2,
 					clientKeys: this.appKeys.client,
 					aead: this.cipher.aead,
 					keyPhase: this.currentPhase
 				})
 				this.pn.oneRtt++
+				this.cc.bytesInFlight += packet.length
+				this.sentPackets.oneRtt.set(pn, {
+					time: Date.now(),
+					size: packet.length,
+					includesCrypto: false,
+					flowControlKeys: keys
+				})
 				this._sendDatagram(packet)
 				this._rearmPto()
 				return
@@ -1460,24 +1470,33 @@ class QuicConnection extends EventEmitter {
 	// still get out when cwnd is full. The latest frame per bucket is remembered and replayed on
 	// PTO so a lost grant cannot stall a response whose consumer has stopped reading.
 
-	_sendFlowControlFrame(frame: Buffer): void {
+	_sendFlowControlFrame(frame: Buffer, keys?: string[]): void {
 		if (!this.appKeys || this._closed) return
+		const pn = this.pn.oneRtt
 		const packet = pkt.buildOneRtt({
 			dstCid: this.dstCid,
 			payloadFrames: frame,
-			pn: this.pn.oneRtt,
+			pn,
 			pnLen: 2,
 			clientKeys: this.appKeys.client,
 			aead: this.cipher.aead,
 			keyPhase: this.currentPhase
 		})
 		this.pn.oneRtt++
+		this.cc.bytesInFlight += packet.length
+		this.sentPackets.oneRtt.set(pn, {
+			time: Date.now(),
+			size: packet.length,
+			includesCrypto: false,
+			flowControlKeys: keys
+		})
 		this._sendDatagram(packet)
+		this._rearmPto()
 	}
 
 	_grantFlowControl(key: string, frame: Buffer): void {
 		this.flowControlFrames.set(key, frame)
-		this._sendFlowControlFrame(frame)
+		this._sendFlowControlFrame(frame, [key])
 	}
 
 	/** Called by QuicStream only when bytes actually reach the application. */
@@ -1563,7 +1582,12 @@ class QuicConnection extends EventEmitter {
 	}
 
 	_onPacketAcked(epoch: Epoch, _pn: number, info: SentPacket): void {
-		if (epoch !== 'oneRtt' || !info.size) return
+		if (epoch !== 'oneRtt') return
+		for (const key of info.flowControlKeys || []) {
+			// A cancel is only replayed while unacked; keeping it forever bloats every PTO.
+			if (key.startsWith('cancel:')) this.flowControlFrames.delete(key)
+		}
+		if (!info.size) return
 		this.cc.bytesInFlight = Math.max(0, this.cc.bytesInFlight - info.size)
 		// Only grow cwnd for packets sent after the last recovery start (RFC 9002 §7.3.1).
 		if (info.time < this.cc.recoveryStart) return
@@ -1745,7 +1769,10 @@ class QuicStream extends EventEmitter {
 	_stopReceiving(): void {
 		if (this.cancelled) return
 		this.cancelled = true
-		this.conn._onBytesDiscarded(this._pendingBytes || 0)
+		// `pending` can hold overlapping frames; credit only the unique offset span that
+		// connection flow control already charged as received.
+		const farthest = this.pending.reduce((max, c) => Math.max(max, c.offset + c.data.length), this.recvOffset)
+		this.conn._onBytesDiscarded(Math.max(0, farthest - this.recvOffset))
 		this.pending = []
 		this._pendingBytes = 0
 		this.paused = false
@@ -1850,10 +1877,11 @@ class QuicStream extends EventEmitter {
 			}
 			const slice = chunk.data.subarray(skipBytes)
 			this.recvOffset += slice.length
+			// Credit before the event: a consumer may cancel synchronously from this callback.
+			this.conn._onBytesConsumed(this, slice.length)
 			this.emit('data', slice)
 			// A listener may pause us mid-emit; the next loop iteration will stop, and the rest
 			// of the already-received bytes stay buffered without granting more credit.
-			this.conn._onBytesConsumed(this, slice.length)
 			if (chunk.fin) {
 				this.fin = true
 				this.emit('end')
