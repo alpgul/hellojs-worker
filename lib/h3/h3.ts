@@ -339,8 +339,10 @@ class H3Client {
 			pausedByConsumer = paused
 			if (paused) stream.pause()
 			else {
-				stream.resume()
+				// Drain H3 frames before resuming the QUIC stream: resume() may synchronously emit
+				// a deferred FIN, and `end` must not finish the request while DATA is still buffered.
 				drainFrames()
+				if (!pausedByConsumer && !cancelled && !ended) stream.resume()
 			}
 		}
 

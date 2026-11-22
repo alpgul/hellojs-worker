@@ -508,7 +508,7 @@ function responseBytes(data: string[]): Buffer {
 	return Buffer.concat([headers, ...data.map((text) => encodeFrame(FRAME.DATA, Buffer.from(text)))])
 }
 
-it('pauses H3 delivery when the consumer returns false and resumes on drain', () => {
+it('keeps the QUIC stream paused while the consumer stays backpressured', () => {
 	const { h3, stream } = fakeH3()
 	const received: string[] = []
 	const handlers: H3StreamHandlers = {
@@ -529,8 +529,42 @@ it('pauses H3 delivery when the consumer returns false and resumes on drain', ()
 	expect(received).toEqual(['hello'])
 	expect(stream.pauseCalls).toBe(1)
 	handlers.onBackpressure!(false)
-	expect(stream.resumeCalls).toBe(1)
+	expect(stream.resumeCalls).toBe(0)
 	expect(received).toEqual(['hello', 'world'])
+})
+
+it('drains buffered H3 DATA before a deferred QUIC end on resume', () => {
+	const { h3, stream } = fakeH3()
+	const received: string[] = []
+	let ended = false
+	// Real QuicStream.resume() flushes the deferred FIN marker and emits `end` synchronously.
+	const fakeResume = stream.resume.bind(stream)
+	stream.resume = () => {
+		fakeResume()
+		stream.emit('end')
+	}
+	const handlers: H3StreamHandlers = {
+		onHeaders: () => {},
+		onData: (chunk) => {
+			received.push(chunk.toString())
+			return received.length === 1 ? false : true
+		},
+		onEnd: () => {
+			ended = true
+		},
+		onError: (e) => {
+			throw e
+		},
+		onBackpressure: () => {}
+	}
+	h3.requestStream({ method: 'GET', path: '/', host: 'example.com' }, handlers)
+	stream.emit('data', responseBytes(['hello', 'world']))
+
+	expect(received).toEqual(['hello'])
+	handlers.onBackpressure!(false)
+
+	expect(received).toEqual(['hello', 'world'])
+	expect(ended).toBe(true)
 })
 
 it('cancels one H3 request without closing the QUIC session', () => {
