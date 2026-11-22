@@ -301,6 +301,29 @@ it('uses a lost data packet for PTO congestion response ahead of older control p
 	}
 })
 
+it('drains queued stream data after PTO frees congestion capacity', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	const secret = () => crypto.randomBytes(32)
+	const epochKeys = () => keys.deriveKeysFromSecret(secret(), 'sha256', 16, 12)
+	conn.appKeys = { client: epochKeys(), server: epochKeys() } as unknown as typeof conn.appKeys
+	conn._sendDatagram = (() => {}) as unknown as typeof conn._sendDatagram
+	conn.cc.cwnd = 2000
+	conn.cc.ssthresh = 2000
+	conn.cc.bytesInFlight = 1800
+	conn.sentPackets.oneRtt.set(1, { time: Date.now(), size: 1800, includesCrypto: false })
+	conn.appSendQueue.push({ packet: Buffer.from([0xaa]), size: 300, pn: 2 })
+
+	try {
+		conn._onPtoFire()
+
+		expect(conn.appSendQueue).toHaveLength(0)
+		expect(conn.sentPackets.oneRtt.has(2)).toBe(true)
+		expect(conn.cc.bytesInFlight).toBe(300)
+	} finally {
+		conn.close()
+	}
+})
+
 it('charges only unique discarded bytes when a cancelled stream has overlapping frames', () => {
 	const conn = new QuicConnection('127.0.0.1', 443)
 	const stream = conn.openBidiStream()

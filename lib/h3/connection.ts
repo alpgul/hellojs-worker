@@ -841,6 +841,8 @@ class QuicConnection extends EventEmitter {
 				if (info.size) {
 					this.cc.bytesInFlight = Math.max(0, this.cc.bytesInFlight - info.size)
 					this._onCongestionEvent(info.time)
+					// Loss frees capacity; queued DATA must not wait for another ACK to appear.
+					this._drainSendQueue()
 				}
 				if (!this.appKeys) return
 				// MAX frames are idempotent, so replaying the latest grants with the PING is safe
