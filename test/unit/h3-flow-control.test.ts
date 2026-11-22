@@ -418,6 +418,84 @@ it('waits for final HEADERS after a 1xx response', () => {
 	expect(ended).toBe(true)
 })
 
+it('keeps final headers intact when trailer HEADERS arrive', async () => {
+	const { h3, stream } = fakeH3()
+	const pending = h3.request({ method: 'GET', path: '/', host: 'example.com' })
+
+	stream.emit(
+		'data',
+		encodeFrame(
+			FRAME.HEADERS,
+			qpack.encodeHeaders([
+				[':status', '200'],
+				['content-type', 'text/plain']
+			])
+		)
+	)
+	stream.emit('data', encodeFrame(FRAME.HEADERS, qpack.encodeHeaders([['x-trailer', 'done']])))
+	stream.emit('end')
+
+	const response = await pending
+	expect(response.status).toBe(200)
+	expect(response.headers).toMatchObject({ ':status': '200', 'content-type': 'text/plain' })
+	expect(response.headers['x-trailer']).toBeUndefined()
+})
+
+it('stops draining buffered frames when onData cancels the stream', () => {
+	const { h3, stream } = fakeH3()
+	const received: string[] = []
+	const handle = h3.requestStream(
+		{ method: 'GET', path: '/', host: 'example.com' },
+		{
+			onHeaders: () => {},
+			onData: (chunk) => {
+				received.push(chunk.toString())
+				handle.cancel()
+				return true
+			},
+			onEnd: () => {},
+			onError: () => {}
+		}
+	)
+
+	stream.emit(
+		'data',
+		Buffer.concat([
+			encodeFrame(FRAME.HEADERS, qpack.encodeHeaders([[':status', '200']])),
+			encodeFrame(FRAME.DATA, Buffer.from('first')),
+			encodeFrame(FRAME.DATA, Buffer.from('second'))
+		])
+	)
+
+	expect(received).toEqual(['first'])
+	expect(stream.cancelCalls).toBe(1)
+})
+
+it('fails when a 1xx is followed by HEADERS without a final status', () => {
+	const { h3, stream } = fakeH3()
+	const errors: Error[] = []
+	let ended = false
+	h3.requestStream(
+		{ method: 'GET', path: '/', host: 'example.com' },
+		{
+			onHeaders: () => {},
+			onData: () => true,
+			onEnd: () => {
+				ended = true
+			},
+			onError: (e) => errors.push(e)
+		}
+	)
+
+	stream.emit('data', encodeFrame(FRAME.HEADERS, qpack.encodeHeaders([[':status', '103']])))
+	stream.emit('data', encodeFrame(FRAME.HEADERS, qpack.encodeHeaders([['x-invalid', '1']])))
+	stream.emit('end')
+
+	expect(ended).toBe(false)
+	expect(errors).toHaveLength(1)
+	expect(errors[0].message).toContain('before HEADERS')
+})
+
 it('fails sibling H3 requests when the shared connection closes', () => {
 	const qc = new QuicConnection('127.0.0.1', 443)
 	const conn = new Connection(null)

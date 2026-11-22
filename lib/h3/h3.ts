@@ -212,6 +212,7 @@ class H3Client {
 		let respFailed = false
 		let headersEmitted = false
 		let informationalHeaders = false
+		let invalidFinalHeaders = false
 		let ended = false
 		let fatal = false
 		let pausedByConsumer = false
@@ -232,7 +233,12 @@ class H3Client {
 		const emitHeaders = (): boolean => {
 			if (headersEmitted) return true
 			const status = parseInt(respHeaders[':status'] || '0', 10)
-			if (!status) return false
+			if (!status) {
+				// A field section after a 1xx must be the final HEADERS; without :status it is
+				// malformed, not a legitimate 1xx-only response.
+				if (informationalHeaders) invalidFinalHeaders = true
+				return false
+			}
 			// 1xx HEADERS are informational: keep parsing so the final HEADERS are not dropped.
 			if (status >= 100 && status < 200) {
 				informationalHeaders = true
@@ -250,7 +256,7 @@ class H3Client {
 				handlers.onError(error)
 				return
 			}
-			if (emitHeaders() || informationalHeaders) {
+			if (emitHeaders() || (informationalHeaders && !invalidFinalHeaders)) {
 				// A 1xx-only stream has no final response; client.ts rejects it as EBADRESP.
 				handlers.onEnd()
 				return
@@ -274,9 +280,10 @@ class H3Client {
 		// Draining is separate from QUIC delivery so a paused consumer leaves already-decoded
 		// frames buffered here and already-received STREAM bytes buffered on the QuicStream.
 		const drainFrames = (): void => {
-			if (pausedByConsumer || respFailed || ended) return
+			if (pausedByConsumer || respFailed || cancelled || ended) return
 			try {
 				while (true) {
+					if (pausedByConsumer || respFailed || cancelled || ended) return
 					if (respFrameBuf.length === 0) break
 					let off = 0
 					const t = peekVarint(respFrameBuf, off)
@@ -290,11 +297,10 @@ class H3Client {
 					const payload = respFrameBuf.subarray(off, off + frameLen)
 					respFrameBuf = respFrameBuf.subarray(off + frameLen)
 					if (t.value === FRAME.HEADERS) {
-						// Each HEADERS frame is a complete field section; don't carry 1xx fields
-						// into the final response.
-						for (const key of Object.keys(respHeaders)) delete respHeaders[key]
-						// Prefer dynamic-table-aware decode when the peer's table has entries;
-						// fall back to static-only decoder for the static-only path (RIC=0, Base=0).
+						// Decode every section so QPACK table state stays in sync, but only a
+						// not-yet-emitted section may populate respHeaders. Trailer HEADERS must
+						// not mutate the object already handed to onHeaders.
+						const section: Record<string, string> = {}
 						const maxEntries = Math.floor(
 							(this.peerQpackMaxTableCapacity || this.peerDynamicTable.capacity) / 32
 						)
@@ -302,11 +308,21 @@ class H3Client {
 							this.peerDynamicTable.entries.length > 0 || payload[0] !== 0
 								? qpack.decodeHeadersWithTable(payload, this.peerDynamicTable, maxEntries)
 								: qpack.decodeHeaders(payload)
-						for (const [n, v] of decoded) respHeaders[n] = v
-						emitHeaders()
-					} else if (t.value === FRAME.DATA && handlers.onData(Buffer.from(payload)) === false) {
-						setPaused(true)
-						return
+						for (const [n, v] of decoded) section[n] = v
+						if (!headersEmitted) {
+							for (const key of Object.keys(respHeaders)) delete respHeaders[key]
+							Object.assign(respHeaders, section)
+							emitHeaders()
+						}
+						// onHeaders may cancel from inside emitHeaders.
+						if (cancelled || ended) return
+					} else if (t.value === FRAME.DATA) {
+						if (handlers.onData(Buffer.from(payload)) === false) {
+							setPaused(true)
+							return
+						}
+						// onData may cancel from inside the callback.
+						if (cancelled || ended) return
 					}
 				}
 			} catch (e) {
