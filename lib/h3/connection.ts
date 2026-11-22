@@ -1590,10 +1590,18 @@ class QuicConnection extends EventEmitter {
 			// A cancel is only replayed while unacked; keeping it forever bloats every PTO.
 			if (key.startsWith('cancel:')) this.flowControlFrames.delete(key)
 		}
-		if (!info.size) return
+		if (!info.size) {
+			// Control ACKs free no cwnd bytes, but a prior PTO may already have freed capacity;
+			// queued DATA must not wait for the next sized ACK.
+			this._drainSendQueue()
+			return
+		}
 		this.cc.bytesInFlight = Math.max(0, this.cc.bytesInFlight - info.size)
 		// Only grow cwnd for packets sent after the last recovery start (RFC 9002 §7.3.1).
-		if (info.time < this.cc.recoveryStart) return
+		if (info.time < this.cc.recoveryStart) {
+			this._drainSendQueue()
+			return
+		}
 		if (this.cc.cwnd < this.cc.ssthresh) {
 			// Slow start
 			this.cc.cwnd += info.size

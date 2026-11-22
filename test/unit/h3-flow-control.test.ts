@@ -202,6 +202,29 @@ it('does not charge flow-control packets to the congestion window', () => {
 	expect(conn.cc.bytesInFlight).toBe(0)
 })
 
+it('drains queued stream data when a control packet is acknowledged', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	const secret = () => crypto.randomBytes(32)
+	const epochKeys = () => keys.deriveKeysFromSecret(secret(), 'sha256', 16, 12)
+	conn.appKeys = { client: epochKeys(), server: epochKeys() } as unknown as typeof conn.appKeys
+	conn._sendDatagram = (() => {}) as unknown as typeof conn._sendDatagram
+	conn.cc.bytesInFlight = 0
+	conn.cc.cwnd = 1000
+	conn.appSendQueue.push({ packet: Buffer.from([0x01]), size: 10, pn: 4242 })
+
+	try {
+		conn._grantFlowControl('max_data:0', Buffer.from([0x01]))
+		const control = [...conn.sentPackets.oneRtt.entries()].find(([, info]) => info.size === 0)!
+		conn._onPacketAcked('oneRtt', control[0], control[1])
+
+		expect(conn.appSendQueue).toHaveLength(0)
+		expect(conn.cc.bytesInFlight).toBe(10)
+		expect(conn.sentPackets.oneRtt.has(4242)).toBe(true)
+	} finally {
+		conn.close()
+	}
+})
+
 it('does not halve cwnd when PTO declares a control packet lost', () => {
 	const conn = new QuicConnection('127.0.0.1', 443)
 	const secret = () => crypto.randomBytes(32)
