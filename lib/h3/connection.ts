@@ -1880,6 +1880,9 @@ class QuicStream extends EventEmitter {
 			// Credit before the event: a consumer may cancel synchronously from this callback.
 			this.conn._onBytesConsumed(this, slice.length)
 			this.emit('data', slice)
+			// A listener may cancel mid-emit; that ends the stream immediately, so no FIN/end
+			// from this chunk may be delivered afterwards.
+			if (this.cancelled) return
 			// A listener may pause us mid-emit; the next loop iteration will stop, and the rest
 			// of the already-received bytes stay buffered without granting more credit.
 			if (chunk.fin) {

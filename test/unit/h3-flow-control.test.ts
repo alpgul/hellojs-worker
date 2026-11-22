@@ -175,6 +175,21 @@ it('charges only unique discarded bytes when a cancelled stream has overlapping 
 	expect(conn.recvConsumed - before).toBe(100)
 })
 
+it('does not emit end after a synchronous cancel from a data listener', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	const stream = conn.openBidiStream()
+	let ended = false
+	stream.on('data', () => stream.cancel(0x0c))
+	stream.on('end', () => {
+		ended = true
+	})
+
+	stream._onData(0, Buffer.from('ok'), true)
+
+	expect(ended).toBe(false)
+	expect(stream.fin).toBe(false)
+})
+
 it('reports a peer RESET_STREAM once and cancels the whole bidi stream', () => {
 	const conn = new QuicConnection('127.0.0.1', 443)
 	const stream = conn.openBidiStream()
