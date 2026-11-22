@@ -67,6 +67,11 @@ function getPoolConfig(): PoolConfig {
 const entries = new Map<string, Entry[]>()
 const byConn = new WeakMap<Connection, Entry>()
 
+// Cumulative reuse counters. clearPool() drops sockets but never resets these, so a caller can
+// tell "a connection was opened" from "an existing one was handed out" across DO invocations.
+let created = 0
+let hits = 0
+
 // Structural shape of the proxy option — kept local so this module does not depend on client.ts.
 interface ProxyLike {
 	url?: string | null
@@ -158,6 +163,7 @@ function take(key: string): Connection | null {
 	for (const entry of bucket) {
 		if (!usable(entry)) continue
 		entry.active += 1
+		hits += 1
 		if (entry.idleTimer) {
 			clearTimeout(entry.idleTimer)
 			entry.idleTimer = null
@@ -171,6 +177,11 @@ function pooledCount(): number {
 	let n = 0
 	for (const bucket of entries.values()) n += bucket.length
 	return n
+}
+
+/** Observe hand-outs and handshakes without changing how the pool behaves. */
+function poolStats(): { pooled: number; created: number; hits: number } {
+	return { pooled: pooledCount(), created, hits }
 }
 
 /**
@@ -190,6 +201,7 @@ function register(conn: Connection, key: string): boolean {
 	bucket.push(entry)
 	entries.set(key, bucket)
 	byConn.set(conn, entry)
+	created += 1
 
 	const session = conn.alpn === 'h2' ? conn.h2Session : null
 	// GOAWAY means the peer is winding the session down: stop handing out new streams but let
@@ -248,5 +260,17 @@ function clearPool(reason = 'pool-cleared'): void {
 	entries.clear()
 }
 
-export { setPoolConfig, getPoolConfig, poolKey, take, register, release, isPooled, poolEvict, clearPool, pooledCount }
+export {
+	setPoolConfig,
+	getPoolConfig,
+	poolKey,
+	take,
+	register,
+	release,
+	isPooled,
+	poolEvict,
+	clearPool,
+	pooledCount,
+	poolStats
+}
 export type { Entry }
