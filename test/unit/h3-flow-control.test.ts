@@ -301,6 +301,36 @@ it('uses a lost data packet for PTO congestion response ahead of older control p
 	}
 })
 
+it('retransmits the lost STREAM frame on PTO', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	const secret = () => crypto.randomBytes(32)
+	const epochKeys = () => keys.deriveKeysFromSecret(secret(), 'sha256', 16, 12)
+	conn.appKeys = { client: epochKeys(), server: epochKeys() } as unknown as typeof conn.appKeys
+	conn._sendDatagram = (() => {}) as unknown as typeof conn._sendDatagram
+	const stream = conn.openBidiStream()
+
+	try {
+		conn.sendStreamData(stream.id, 0, Buffer.from('hello'), true)
+		const originalPn = [...conn.sentPackets.oneRtt.keys()][0]!
+		const original = conn.sentPackets.oneRtt.get(originalPn)!
+		expect(original.streamFrame).toEqual({
+			streamId: stream.id,
+			offset: 0,
+			data: Buffer.from('hello'),
+			fin: true
+		})
+
+		conn._onPtoFire()
+
+		expect(conn.sentPackets.oneRtt.has(originalPn)).toBe(false)
+		const retransmitted = [...conn.sentPackets.oneRtt.values()].filter((i) => i.streamFrame)
+		expect(retransmitted).toHaveLength(1)
+		expect(retransmitted[0].streamFrame).toEqual(original.streamFrame)
+	} finally {
+		conn.close()
+	}
+})
+
 it('drains queued stream data after PTO frees congestion capacity', () => {
 	const conn = new QuicConnection('127.0.0.1', 443)
 	const secret = () => crypto.randomBytes(32)

@@ -15,8 +15,9 @@
 //   - X25519 (group 0x001d) — MLKEM-hybrid omitted from h3 path for now (most h3 servers accept X25519-only)
 //
 // What's NOT implemented (MVP scope):
-//   - Loss detection / retransmission. A PTO probe re-sends handshake CRYPTO or elicits an
-//     ACK, but lost stream data is never retransmitted.
+//   - Full loss recovery. A PTO probe re-sends handshake CRYPTO, retransmits the selected
+//     1-RTT STREAM frame, and replays flow-control grants; there is no time-based loss
+//     detection, reordering, or retransmission of more than the selected packet.
 //   - Connection migration and 0-RTT. 1-RTT TLS PSK resumption is supported (NewSessionTicket +
 //     pre_shared_key); early data is deliberately not offered.
 //   - Stateless reset.
@@ -67,14 +68,23 @@ interface EpochMap<T> {
 type RetryPacket = Extract<pkt.ParsedPacket, { kind: 'retry' }>
 type NcidFrame = Extract<pkt.QuicFrame, { type: 'new_connection_id' }>
 
+interface StreamFrameInfo {
+	streamId: number
+	offset: number
+	data: Buffer
+	fin: boolean
+}
+
 // A packet we put on the wire and keep until it is acked. `payload` is what a handshake
-// retransmission needs; `size` is what congestion control accounts for on 1-RTT.
+// retransmission needs; `streamFrame` is what a 1-RTT loss retransmission needs; `size` is
+// what congestion control accounts for on 1-RTT.
 interface SentPacket {
 	time: number
 	payload?: Buffer
 	size?: number
 	includesCrypto: boolean
 	flowControlKeys?: string[]
+	streamFrame?: StreamFrameInfo
 }
 
 interface DstCidEntry {
@@ -88,6 +98,7 @@ interface QueuedPacket {
 	packet: Buffer
 	size: number
 	pn: number
+	streamFrame?: StreamFrameInfo
 }
 
 interface PendingPathChallenge {
@@ -841,10 +852,20 @@ class QuicConnection extends EventEmitter {
 				if (info.size) {
 					this.cc.bytesInFlight = Math.max(0, this.cc.bytesInFlight - info.size)
 					this._onCongestionEvent(info.time)
-					// Loss frees capacity; queued DATA must not wait for another ACK to appear.
-					this._drainSendQueue()
 				}
 				if (!this.appKeys) return
+				// A lost DATA packet is gone from the wire; resend its STREAM frame at the same
+				// offset. Flow-control was already reserved when it was first written.
+				if (info.streamFrame) {
+					this.sendStreamData(
+						info.streamFrame.streamId,
+						info.streamFrame.offset,
+						info.streamFrame.data,
+						info.streamFrame.fin
+					)
+				}
+				// Loss frees capacity; queued DATA must not wait for another ACK to appear.
+				this._drainSendQueue()
 				// MAX frames are idempotent, so replaying the latest grants with the PING is safe
 				// and prevents a lost grant from wedging a paused-then-resumed response.
 				const keys = [...this.flowControlFrames.keys()]
@@ -1575,6 +1596,7 @@ class QuicConnection extends EventEmitter {
 
 	sendStreamData(streamId: number, offset: number, data: Buffer, fin: boolean): void {
 		if (!this.appKeys) throw new Error('1-RTT keys not ready')
+		const streamFrame: StreamFrameInfo = { streamId, offset, data, fin }
 		const frame = pkt.encodeStreamFrame(streamId, offset, data, fin)
 		const packet = pkt.buildOneRtt({
 			dstCid: this.dstCid,
@@ -1586,19 +1608,19 @@ class QuicConnection extends EventEmitter {
 			keyPhase: this.currentPhase
 		})
 		const pn = this.pn.oneRtt++
-		this._send1Rtt(packet, pn)
+		this._send1Rtt(packet, pn, streamFrame)
 	}
 
 	// 1-RTT send wrapped by NewReno. Stream data only — standalone ACKs / PTO probes
 	// bypass this and call _sendDatagram directly so they can flow when cwnd is exhausted.
-	_send1Rtt(packet: Buffer, pn: number): void {
+	_send1Rtt(packet: Buffer, pn: number, streamFrame?: StreamFrameInfo): void {
 		const size = packet.length
 		if (this.cc.bytesInFlight + size > this.cc.cwnd) {
-			this.appSendQueue.push({ packet, size, pn })
+			this.appSendQueue.push({ packet, size, pn, streamFrame })
 			return
 		}
 		this.cc.bytesInFlight += size
-		this.sentPackets.oneRtt.set(pn, { time: Date.now(), size, includesCrypto: false })
+		this.sentPackets.oneRtt.set(pn, { time: Date.now(), size, includesCrypto: false, streamFrame })
 		this._sendDatagram(packet)
 		this._rearmPto()
 	}
@@ -1647,7 +1669,12 @@ class QuicConnection extends EventEmitter {
 			if (this.cc.bytesInFlight + next.size > this.cc.cwnd) return
 			this.appSendQueue.shift()
 			this.cc.bytesInFlight += next.size
-			this.sentPackets.oneRtt.set(next.pn, { time: Date.now(), size: next.size, includesCrypto: false })
+			this.sentPackets.oneRtt.set(next.pn, {
+				time: Date.now(),
+				size: next.size,
+				includesCrypto: false,
+				streamFrame: next.streamFrame
+			})
 			this._sendDatagram(next.packet)
 		}
 		this._rearmPto()
