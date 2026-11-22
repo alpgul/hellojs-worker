@@ -6,6 +6,7 @@ import { EventEmitter } from 'node:events'
 
 import { expect, it } from 'vitest'
 
+import { Connection } from '../../lib/connect.ts'
 import { QuicConnection } from '../../lib/h3/connection.ts'
 import { encodeFrame, FRAME, H3Client } from '../../lib/h3/h3.ts'
 import * as pkt from '../../lib/h3/packet.ts'
@@ -312,6 +313,51 @@ it('cancels a stream when a fatal H3 error arrives after headers', () => {
 	expect(stream.cancelCalls).toBe(1)
 })
 
+it('reports a protocol error when an H3 stream ends before HEADERS', () => {
+	const { h3, stream } = fakeH3()
+	const errors: Error[] = []
+	let ended = false
+	h3.requestStream(
+		{ method: 'GET', path: '/', host: 'example.com' },
+		{
+			onHeaders: () => {},
+			onData: () => true,
+			onEnd: () => {
+				ended = true
+			},
+			onError: (e) => errors.push(e)
+		}
+	)
+
+	stream.emit('end')
+	expect(ended).toBe(false)
+	expect(errors).toHaveLength(1)
+	expect(errors[0].message).toContain('before HEADERS')
+})
+
+it('fails sibling H3 requests when the shared connection closes', () => {
+	const qc = new QuicConnection('127.0.0.1', 443)
+	const conn = new Connection(null)
+	conn.alpn = 'h3'
+	conn.quicConn = qc
+	conn.h3Client = new H3Client(qc)
+	const errors: Error[] = []
+	for (let i = 0; i < 2; i++) {
+		conn.h3Client.requestStream(
+			{ method: 'GET', path: `/${i}`, host: 'example.com' },
+			{
+				onHeaders: () => {},
+				onData: () => true,
+				onEnd: () => {},
+				onError: (e) => errors.push(e)
+			}
+		)
+	}
+
+	conn.close('test')
+	expect(errors).toHaveLength(2)
+})
+
 it('streams response bodies past the former 16 MB buffered cap', () => {
 	const { h3, stream } = fakeH3()
 	let total = 0
@@ -332,6 +378,7 @@ it('streams response bodies past the former 16 MB buffered cap', () => {
 		}
 	)
 	const mb = Buffer.alloc(1024 * 1024, 0x5a)
+	stream.emit('data', encodeFrame(FRAME.HEADERS, qpack.encodeHeaders([[':status', '200']])))
 	for (let i = 0; i < 18; i++) stream.emit('data', encodeFrame(FRAME.DATA, mb))
 	stream.emit('end')
 

@@ -54,15 +54,7 @@ export type RequestBodyValue = BodyInit
 
 /** Methods registered with IANA (RFC 9110 §9, RFC 5789). */
 export type RegisteredHttpMethod =
-	| 'GET'
-	| 'HEAD'
-	| 'POST'
-	| 'PUT'
-	| 'DELETE'
-	| 'CONNECT'
-	| 'OPTIONS'
-	| 'TRACE'
-	| 'PATCH'
+	'GET' | 'HEAD' | 'POST' | 'PUT' | 'DELETE' | 'CONNECT' | 'OPTIONS' | 'TRACE' | 'PATCH'
 
 /**
  * The method may be given in either case; `request()` uppercases it before use. The type
@@ -752,20 +744,28 @@ function performH3(
 					})
 					return
 				}
-				stream?.end()
+				if (!stream) {
+					close()
+					if (!resolved) {
+						resolved = true
+						reject(new HellojsError('h3 response ended before headers', 'EBADRESP'))
+					}
+					return
+				}
+				stream.end()
 			},
 			onError: (e) => {
 				if (stream) {
 					stream.fail(new HellojsError(e.message, 'EH3STREAM', e))
 					return
 				}
-				// No response was resolved: the QUIC session's state is untrustworthy.
-				try {
-					conn.close('h3-stream-error')
-				} catch {
-					/* already closed */
+				// H3 parse/stream errors are request-scoped. Release this slot without tearing
+				// down a pooled QUIC session that sibling requests are still using.
+				close()
+				if (!resolved) {
+					resolved = true
+					reject(new HellojsError(e.message, 'EH3STREAM', e))
 				}
-				if (!resolved) reject(new HellojsError(e.message, 'EH3STREAM', e))
 			}
 		}
 		const handle = conn.h3Client!.requestStream({ method, path, host, headers, body }, handlers)
@@ -890,7 +890,14 @@ function performH2(
 		})
 		req.on('end', () => {
 			if (!buffering) {
-				stream?.end()
+				if (!stream) {
+					if (settled) return
+					settled = true
+					if (!release()) conn.close('h2-response-complete')
+					reject(new HellojsError('h2 response ended before headers', 'EBADRESP'))
+					return
+				}
+				stream.end()
 				return
 			}
 			if (!release()) conn.close('h2-response-complete')

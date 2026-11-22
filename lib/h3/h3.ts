@@ -228,12 +228,13 @@ class H3Client {
 			}
 		}
 
-		const emitHeaders = () => {
-			if (headersEmitted) return
+		const emitHeaders = (): boolean => {
+			if (headersEmitted) return true
 			const status = parseInt(respHeaders[':status'] || '0', 10)
-			if (!status) return
+			if (!status) return false
 			headersEmitted = true
 			handlers.onHeaders(status, respHeaders)
+			return true
 		}
 		const finish = (error?: Error) => {
 			if (ended) return
@@ -241,9 +242,12 @@ class H3Client {
 			if (error) {
 				fatal = true
 				handlers.onError(error)
-			} else {
-				emitHeaders()
+			} else if (emitHeaders()) {
 				handlers.onEnd()
+			} else {
+				const err = new Error('h3 response ended before HEADERS') as NodeJS.ErrnoException
+				err.code = 'EH3PARSE'
+				handlers.onError(err)
 			}
 		}
 

@@ -83,6 +83,14 @@ class Connection {
 	close(reason = 'closed'): void {
 		if (this.closed) return
 		this.closed = true
+		// h2 fails its streams in H2Session._fatalError; h3 needs the same fan-out so sibling
+		// requests on a pooled QUIC session do not hang after the connection is torn down.
+		if (this.quicConn) {
+			const failure = new Error(`QUIC connection closed: ${reason}`)
+			for (const stream of this.quicConn.streams.values()) {
+				if (stream.listenerCount('error') > 0) stream.emit('error', failure)
+			}
+		}
 		try {
 			this.quicConn?.close()
 		} catch {}
