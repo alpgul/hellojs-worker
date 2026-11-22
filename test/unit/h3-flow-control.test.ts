@@ -113,6 +113,66 @@ it('keeps queued chunks buffered when a data listener pauses mid-flush', () => {
 	expect(stream._pendingBytes).toBe(1)
 })
 
+it('stops queued and later writes when a stream is cancelled', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	conn.peerMaxData = 1024
+	const sent: Buffer[] = []
+	conn.sendStreamData = (_id, _offset, data) => sent.push(data)
+
+	const stream = conn.openBidiStream()
+	stream.sendLimit = 512
+	stream.send(Buffer.alloc(600))
+	expect(stream.sendQueue).toHaveLength(1)
+
+	stream.cancel(0x0c)
+	expect(stream.sendQueue).toEqual([])
+	conn._onPeerMaxStreamData(stream.id, 2048)
+	stream.send(Buffer.from('late'))
+	expect(sent).toEqual([])
+})
+
+it('charges discarded bytes to connection flow control after cancel', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	conn.recvLimit = 100
+	const frames = captureFrames(conn)
+	const stream = conn.openBidiStream()
+
+	stream.cancel(0x0c)
+	stream._onData(0, Buffer.alloc(64), false)
+
+	expect(maxDataGrants(frames).at(-1)).toBeGreaterThan(100)
+	expect(conn.recvConsumed).toBe(64)
+})
+
+it('replays cancel frames on PTO', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	conn.appKeys = {} as unknown as typeof conn.appKeys
+	captureFrames(conn)
+	const stream = conn.openBidiStream()
+
+	stream.cancel(0x0c)
+	const replayed = [...conn.flowControlFrames.values()].flatMap((frame) => pkt.decodeFrames(frame))
+	expect(replayed).toContainEqual({ type: 'reset_stream', streamId: stream.id, errorCode: 0x0c, finalSize: 0 })
+	expect(replayed).toContainEqual({ type: 'stop_sending', streamId: stream.id, errorCode: 0x0c })
+})
+
+it('dispatches peer RESET_STREAM and STOP_SENDING to the stream', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	const stream = conn.openBidiStream()
+	const errors: Error[] = []
+	stream.on('error', (e: Error) => errors.push(e))
+
+	conn._handleFrame('oneRtt', { type: 'reset_stream', streamId: stream.id, errorCode: 0x0c, finalSize: 0 })
+	expect(stream.cancelled).toBe(true)
+	expect(errors).toHaveLength(1)
+
+	errors.length = 0
+	stream.cancelled = false
+	conn._handleFrame('oneRtt', { type: 'stop_sending', streamId: stream.id, errorCode: 0x0c })
+	expect(stream.cancelled).toBe(true)
+	expect(errors).toHaveLength(1)
+})
+
 it('rejects STREAM data past the connection receive window', () => {
 	const conn = new QuicConnection('127.0.0.1', 443)
 	conn.recvLimit = 64 * 1024
@@ -227,6 +287,29 @@ it('cancels one H3 request without closing the QUIC session', () => {
 	handle.cancel()
 	expect(stream.cancelCalls).toBe(1)
 	expect(ended).toBe(false)
+})
+
+it('cancels a stream when a fatal H3 error arrives after headers', () => {
+	const { h3, stream } = fakeH3()
+	let handle: ReturnType<H3Client['requestStream']> | null = null
+	const errors: Error[] = []
+	handle = h3.requestStream(
+		{ method: 'GET', path: '/', host: 'example.com' },
+		{
+			onHeaders: () => {},
+			onData: () => true,
+			onEnd: () => {},
+			onError: (e) => {
+				errors.push(e)
+				handle!.cancel()
+			}
+		}
+	)
+	stream.emit('data', responseBytes([]))
+	stream.emit('error', new Error('peer reset'))
+
+	expect(errors).toHaveLength(1)
+	expect(stream.cancelCalls).toBe(1)
 })
 
 it('streams response bodies past the former 16 MB buffered cap', () => {

@@ -716,6 +716,17 @@ class QuicConnection extends EventEmitter {
 			if (s) s._onData(f.offset, f.data, f.fin)
 			return
 		}
+		if (f.type === 'reset_stream' || f.type === 'stop_sending') {
+			// Both frames end this request only; siblings on the pooled session keep running.
+			const s = this.streams.get(f.streamId)
+			if (!s) return
+			s.cancel(f.errorCode)
+			if (s.listenerCount('error') > 0) {
+				const kind = f.type === 'reset_stream' ? 'RESET_STREAM' : 'STOP_SENDING'
+				s.emit('error', new Error(`QUIC ${kind} on stream ${s.id}: ${f.errorCode}`))
+			}
+			return
+		}
 		if (f.type === 'connection_close') {
 			log.error(`[h3] connection_close error=${f.errorCode} reason="${f.reason}"`)
 			this.emit('error', new Error(`QUIC connection_close: ${f.errorCode} ${f.reason}`))
@@ -1467,6 +1478,13 @@ class QuicConnection extends EventEmitter {
 		this._grantConnectionCredit()
 	}
 
+	/** Discarded bytes still free connection credit, otherwise sibling streams stall. */
+	_onBytesDiscarded(bytes: number): void {
+		if (bytes <= 0) return
+		this.recvConsumed += bytes
+		this._grantConnectionCredit()
+	}
+
 	_grantStreamCredit(stream: QuicStream): void {
 		// A paused consumer must not grant more credit: that is the whole backpressure contract.
 		if (stream.paused || this._closed) return
@@ -1664,6 +1682,7 @@ class QuicStream extends EventEmitter {
 	}
 
 	send(data: Buffer, fin = false): void {
+		if (this.cancelled) return
 		if (!this.conn._canSend(this, data.length)) {
 			this.sendQueue.push({ data, fin })
 			if (!this.blocked) {
@@ -1682,6 +1701,7 @@ class QuicStream extends EventEmitter {
 	}
 
 	_write(data: Buffer, fin: boolean): void {
+		if (this.cancelled) return
 		if (data.length === 0 && !fin) return
 		this.conn.sendStreamData(this.id, this.sendOffset, data, fin)
 		this.conn._reserveSend(data.length)
@@ -1690,6 +1710,7 @@ class QuicStream extends EventEmitter {
 	}
 
 	_flushSend(): void {
+		if (this.cancelled) return
 		while (this.sendQueue.length && this.conn._canSend(this, this.sendQueue[0].data.length)) {
 			const { data, fin } = this.sendQueue.shift()!
 			this._write(data, fin)
@@ -1710,12 +1731,20 @@ class QuicStream extends EventEmitter {
 	cancel(errorCode = 0x0c): void {
 		if (this.cancelled) return
 		this.cancelled = true
+		this.conn._onBytesDiscarded(this._pendingBytes || 0)
 		this.pending = []
 		this._pendingBytes = 0
+		this.sendQueue = []
+		this.blocked = false
 		this.paused = false
 		if (this.conn.appKeys && !this.conn._closed) {
-			this.conn._sendFlowControlFrame(pkt.encodeResetStreamFrame(this.id, errorCode, this.sendOffset))
-			this.conn._sendFlowControlFrame(pkt.encodeStopSendingFrame(this.id, errorCode))
+			this.conn._grantFlowControl(
+				`cancel:${this.id}`,
+				Buffer.concat([
+					pkt.encodeResetStreamFrame(this.id, errorCode, this.sendOffset),
+					pkt.encodeStopSendingFrame(this.id, errorCode)
+				])
+			)
 		}
 	}
 
@@ -1731,7 +1760,18 @@ class QuicStream extends EventEmitter {
 	}
 
 	_onData(offset: number, data: Buffer, fin: boolean): void {
-		if (this.cancelled) return
+		if (this.cancelled) {
+			// In-flight STREAM frames still count against connection credit even though the
+			// application discarded them; without this, sibling streams stall at MAX_DATA.
+			const end = offset + data.length
+			if (end <= this.highestOffset) return
+			const fresh = end - this.highestOffset
+			const charged = Math.min(fresh, Math.max(0, this.conn.recvLimit - this.conn.recvReceived))
+			this.conn.recvReceived += charged
+			this.highestOffset = end
+			this.conn._onBytesDiscarded(charged)
+			return
+		}
 		const end = offset + data.length
 		const flowControlError = (scope: string) => {
 			if (!this._flowControlErrored) {

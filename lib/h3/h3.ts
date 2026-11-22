@@ -212,12 +212,15 @@ class H3Client {
 		let respFailed = false
 		let headersEmitted = false
 		let ended = false
+		let fatal = false
 		let pausedByConsumer = false
 		let cancelled = false
 
 		const handle: H3StreamHandle = {
 			cancel: () => {
-				if (cancelled || ended) return
+				// A fatal H3/QUIC error sets `ended` before handlers run; that error path must
+				// still emit RESET_STREAM/STOP_SENDING through the caller's onCancel hook.
+				if (cancelled || (ended && !fatal)) return
 				cancelled = true
 				ended = true
 				// H3_REQUEST_CANCELLED (0x0c): stop this stream only.
@@ -235,8 +238,10 @@ class H3Client {
 		const finish = (error?: Error) => {
 			if (ended) return
 			ended = true
-			if (error) handlers.onError(error)
-			else {
+			if (error) {
+				fatal = true
+				handlers.onError(error)
+			} else {
 				emitHeaders()
 				handlers.onEnd()
 			}
