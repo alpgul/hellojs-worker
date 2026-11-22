@@ -81,6 +81,12 @@ describe('alt-svc cache', () => {
 		expect(selectAltSvc(ORIGIN, 'example.com', 443)).toMatchObject({ hint: 'h3', port: 443 })
 	})
 
+	it('keeps a cached entry when a later field value is entirely malformed', () => {
+		rememberAltSvc('h3=":443"; ma=3600', ORIGIN)
+		rememberAltSvc('h3="not-an-authority"; ma=60', ORIGIN)
+		expect(selectAltSvc(ORIGIN, 'example.com', 443)).toMatchObject({ hint: 'h3', port: 443 })
+	})
+
 	it('replaces all prior alternatives instead of merging them', () => {
 		rememberAltSvc('h3=":443"; ma=3600, h2=":443"', ORIGIN)
 		rememberAltSvc('h2=":443"; ma=3600', ORIGIN)

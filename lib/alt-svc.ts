@@ -147,7 +147,7 @@ function parseAltSvc(value: string, origin: URL): AltEntry[] {
 
 /**
  * Learn an Alt-Svc field value for `origin`. RFC 7838 §3/§4 replace ALL alternatives for the
- * origin with the freshly received set; `clear` (or an all-malformed value) empties it.
+ * origin with the freshly received set; `clear` empties it and malformed values are ignored.
  */
 export function rememberAltSvc(value: string | string[] | undefined, origin: string | URL): void {
 	if (value == null) return
@@ -168,10 +168,13 @@ export function rememberAltSvc(value: string | string[] | undefined, origin: str
 		}
 		fresh.push(...parseAltSvc(raw, originUrl))
 	}
-	if (cleared || fresh.length === 0) {
+	if (cleared) {
 		cache.delete(key)
 		return
 	}
+	// An all-malformed field value is not a received replacement set (RFC 7838 §3.1):
+	// keep the last valid alternatives rather than wiping the cache on one bad header.
+	if (fresh.length === 0) return
 	cache.set(key, fresh)
 }
 
