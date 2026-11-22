@@ -202,6 +202,32 @@ it('does not charge flow-control packets to the congestion window', () => {
 	expect(conn.cc.bytesInFlight).toBe(0)
 })
 
+it('keeps the newest MAX replay when an older flow-control packet is acknowledged', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	const secret = () => crypto.randomBytes(32)
+	const epochKeys = () => keys.deriveKeysFromSecret(secret(), 'sha256', 16, 12)
+	conn.appKeys = { client: epochKeys(), server: epochKeys() } as unknown as typeof conn.appKeys
+	conn._sendDatagram = (() => {}) as unknown as typeof conn._sendDatagram
+
+	try {
+		conn._grantFlowControl('connection', Buffer.from([0x01]))
+		const oldKey = [...conn.flowControlFrames.keys()][0]!
+		const oldPn = [...conn.sentPackets.oneRtt.keys()][0]!
+
+		conn._grantFlowControl('connection', Buffer.from([0x02]))
+		const newKey = [...conn.flowControlFrames.keys()][0]!
+		expect(newKey).not.toBe(oldKey)
+
+		const oldInfo = conn.sentPackets.oneRtt.get(oldPn)!
+		conn._onPacketAcked('oneRtt', oldPn, oldInfo)
+
+		expect(conn.flowControlFrames.has(newKey)).toBe(true)
+		expect(conn.flowControlFrames.size).toBe(1)
+	} finally {
+		conn.close()
+	}
+})
+
 it('drains queued stream data when a control packet is acknowledged', () => {
 	const conn = new QuicConnection('127.0.0.1', 443)
 	const secret = () => crypto.randomBytes(32)

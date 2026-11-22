@@ -202,8 +202,10 @@ class QuicConnection extends EventEmitter {
 	declare recvConsumed: number
 	/** Cumulative bytes accepted from the peer across all streams (for the connection window). */
 	declare recvReceived: number
-	/** Latest MAX_* frame per bucket, replayed on PTO because MAX frames are idempotent. */
+	/** Latest control frame per bucket, replayed on PTO because these frames are idempotent. */
 	declare flowControlFrames: Map<string, Buffer>
+	/** Monotonic suffix so a stale ACK cannot delete a newer frame in the same bucket. */
+	declare flowControlGeneration: number
 
 	// Send-side flow control: the peer's advertised limits plus what we have sent so far.
 	declare peerMaxData: number
@@ -313,6 +315,7 @@ class QuicConnection extends EventEmitter {
 		this.recvConsumed = 0
 		this.recvReceived = 0
 		this.flowControlFrames = new Map()
+		this.flowControlGeneration = 0
 
 		// Send-side limits are what the PEER grants us. Until its transport parameters (or a
 		// MAX_* frame) arrive, the RFC default is zero — our own receive-window constants must
@@ -1504,7 +1507,14 @@ class QuicConnection extends EventEmitter {
 		this._rearmPto()
 	}
 
-	_grantFlowControl(key: string, frame: Buffer): void {
+	_grantFlowControl(bucket: string, frame: Buffer): void {
+		// Supersede older frames in this bucket. Every send gets a unique key so an ACK of an
+		// older packet can only delete the exact replay it carried, never a newer frame.
+		const prefix = `${bucket}:`
+		for (const key of this.flowControlFrames.keys()) {
+			if (key.startsWith(prefix)) this.flowControlFrames.delete(key)
+		}
+		const key = `${prefix}${++this.flowControlGeneration}`
 		this.flowControlFrames.set(key, frame)
 		this._sendFlowControlFrame(frame, [key])
 	}
@@ -1706,8 +1716,6 @@ class QuicStream extends EventEmitter {
 	/** Send side stopped: DATA/STOP_SENDING no longer leave this stream. */
 	declare sendCancelled: boolean
 	declare stopSendingSent: boolean
-	/** Generation of the latest cancel frame set; stale ACKs must not delete newer replays. */
-	declare cancelGeneration: number
 	declare _flowControlErrored: boolean
 
 	// Send flow control: peer grants are pushed in via MAX_*; blocked writes wait here.
@@ -1733,7 +1741,6 @@ class QuicStream extends EventEmitter {
 		this.cancelled = false
 		this.sendCancelled = false
 		this.stopSendingSent = false
-		this.cancelGeneration = 0
 		this._flowControlErrored = false
 
 		// A new stream starts with whatever credit the peer's transport parameters grant us;
@@ -1807,16 +1814,9 @@ class QuicStream extends EventEmitter {
 		this.blocked = false
 		if (includeStopSending) this.stopSendingSent = true
 		if (this.conn.appKeys && !this.conn._closed) {
-			const prefix = `cancel:${this.id}:`
-			// A newer cancel frame set supersedes older ones: keep only the latest replay key
-			// so an ACK of the older packet cannot drop the still-unacked newer frames.
-			for (const key of this.conn.flowControlFrames.keys()) {
-				if (key.startsWith(prefix)) this.conn.flowControlFrames.delete(key)
-			}
-			this.cancelGeneration++
 			const frames = [pkt.encodeResetStreamFrame(this.id, errorCode, this.sendOffset)]
 			if (includeStopSending) frames.push(pkt.encodeStopSendingFrame(this.id, errorCode))
-			this.conn._grantFlowControl(`${prefix}${this.cancelGeneration}`, Buffer.concat(frames))
+			this.conn._grantFlowControl(`cancel:${this.id}`, Buffer.concat(frames))
 		}
 	}
 
