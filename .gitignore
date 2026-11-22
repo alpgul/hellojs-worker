@@ -4,6 +4,7 @@ node_modules/
 package-lock.json.bak
 
 # Captures, scratch, generated keys
+test/bench/.out/
 ssl.keys
 response*.json
 chrome-response-*.json

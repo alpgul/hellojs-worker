@@ -20,11 +20,11 @@
 // Env: WARM_REPS (30), CONCURRENT (50), REMOTE_TARGET, REMOTE_WARM_REPS (10),
 // REMOTE_CONCURRENT (8).
 
-import { execSync, spawn } from 'node:child_process'
-import * as fs from 'node:fs'
+import { spawn } from 'node:child_process'
 import * as http2 from 'node:http2'
-import * as os from 'node:os'
 import * as path from 'node:path'
+
+import { generateCert } from './helpers.ts'
 
 const WARM_REPS = Number(process.env.WARM_REPS ?? 30)
 const CONCURRENT = Number(process.env.CONCURRENT ?? 50)
@@ -51,17 +51,6 @@ interface WorkerResult {
 	error?: string
 }
 
-function genCert(): { key: Buffer; cert: Buffer } {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bench-'))
-	const k = path.join(dir, 'k'), c = path.join(dir, 'c')
-	try {
-		execSync(`openssl req -x509 -nodes -newkey rsa:2048 -keyout ${k} -out ${c} -days 1 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null`)
-		return { key: fs.readFileSync(k), cert: fs.readFileSync(c) }
-	} finally {
-		fs.rmSync(dir, { recursive: true, force: true })
-	}
-}
-
 const WORKER = path.join(import.meta.dirname, 'bench-worker.ts')
 
 function runWorker(client: string, target: string, port: number | null, opts: RunOptions = {}): Promise<WorkerResult> {
@@ -73,7 +62,7 @@ function runWorker(client: string, target: string, port: number | null, opts: Ru
 			BENCH_TARGET: target,
 			BENCH_PORT: String(port ?? ''),
 			BENCH_WARM_REPS: String(opts.warmReps ?? WARM_REPS),
-			BENCH_CONCURRENT: String(opts.concurrent ?? CONCURRENT),
+			BENCH_CONCURRENT: String(opts.concurrent ?? CONCURRENT)
 		}
 		const child = spawn(process.execPath, [WORKER], { env, stdio: ['ignore', 'pipe', 'pipe'] })
 		let out = ''
@@ -92,14 +81,17 @@ function runWorker(client: string, target: string, port: number | null, opts: Ru
 			} else if (code !== 0) {
 				// Skip Node warnings/banners and blank lines so the captured error is the actual
 				// failure cause, not a deprecation notice.
-				const firstErrorLine = err.trim().split('\n').find((l) => {
-					const t = l.trim()
-					if (!t) return false
-					if (/^\(node:\d+\)/.test(t)) return false // (node:1234) Warning: ...
-					if (/^Node\.js v/i.test(t)) return false // version footer
-					if (/^(\(Use|Use) `node --trace-/i.test(t)) return false // trace hints
-					return true
-				})
+				const firstErrorLine = err
+					.trim()
+					.split('\n')
+					.find((l) => {
+						const t = l.trim()
+						if (!t) return false
+						if (/^\(node:\d+\)/.test(t)) return false // (node:1234) Warning: ...
+						if (/^Node\.js v/i.test(t)) return false // version footer
+						if (/^(\(Use|Use) `node --trace-/i.test(t)) return false // trace hints
+						return true
+					})
 				resolve({ client, error: (firstErrorLine ?? `exit ${code}`).slice(0, 80) })
 			} else {
 				try {
@@ -125,20 +117,24 @@ function fmt(n: number | undefined): string {
 
 function printTable(rows: WorkerResult[], scenario: string): void {
 	console.log(`\n--- ${scenario} ---`)
-	console.log(`${pad('client', 14)} ${pad('cold', 10)} ${pad('p50/warm', 10)} ${pad('p99/warm', 10)} ${pad('conc', 10)} ${pad('rss Δ', 10)}`)
+	console.log(
+		`${pad('client', 14)} ${pad('cold', 10)} ${pad('p50/warm', 10)} ${pad('p99/warm', 10)} ${pad('conc', 10)} ${pad('rss Δ', 10)}`
+	)
 	console.log('-'.repeat(70))
 	for (const r of rows) {
 		if (r.error) {
 			console.log(`${pad(r.client, 14)} ERROR: ${r.error.slice(0, 50)}`)
 		} else {
-			console.log(`${pad(r.client, 14)} ${pad(fmt(r.coldMs), 10)} ${pad(fmt(r.warmP50), 10)} ${pad(fmt(r.warmP99), 10)} ${pad(fmt(r.concWallMs), 10)} ${pad(fmt(r.rssDeltaMB) + ' MB', 10)}`)
+			console.log(
+				`${pad(r.client, 14)} ${pad(fmt(r.coldMs), 10)} ${pad(fmt(r.warmP50), 10)} ${pad(fmt(r.warmP99), 10)} ${pad(fmt(r.concWallMs), 10)} ${pad(fmt(r.rssDeltaMB) + ' MB', 10)}`
+			)
 		}
 	}
 }
 
 async function runLocalScenario(clients: string[]): Promise<WorkerResult[]> {
 	console.log('## Scenario 1: local h2 server (loopback, fixed-size response)')
-	const { key, cert } = genCert()
+	const { key, cert } = generateCert()
 	// allowHTTP1: without it Node's h2 server answers every HTTP/1.1 client with 403, and the
 	// h1 rows would measure error pages instead of responses.
 	const server = http2.createSecureServer({ key, cert, allowHTTP1: true })
@@ -165,10 +161,14 @@ async function runLocalScenario(clients: string[]): Promise<WorkerResult[]> {
 }
 
 async function runRemoteScenario(clients: string[]): Promise<WorkerResult[]> {
-	console.log(`\n\n## Scenario 2: ${REMOTE_TARGET} (real internet, warm=${REMOTE_WARM_REPS} conc=${REMOTE_CONCURRENT})`)
+	console.log(
+		`\n\n## Scenario 2: ${REMOTE_TARGET} (real internet, warm=${REMOTE_WARM_REPS} conc=${REMOTE_CONCURRENT})`
+	)
 	const results: WorkerResult[] = []
 	for (const c of clients) {
-		results.push(await runWorker(c, REMOTE_TARGET, 443, { warmReps: REMOTE_WARM_REPS, concurrent: REMOTE_CONCURRENT }))
+		results.push(
+			await runWorker(c, REMOTE_TARGET, 443, { warmReps: REMOTE_WARM_REPS, concurrent: REMOTE_CONCURRENT })
+		)
 		// Cooldown between clients so the target's per-IP rate limit cools off.
 		await new Promise((r) => setTimeout(r, 3000))
 	}
