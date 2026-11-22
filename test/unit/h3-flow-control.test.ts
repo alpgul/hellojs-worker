@@ -157,11 +157,35 @@ it('tracks cancel frames for PTO and stops replaying them once acknowledged', ()
 
 	stream.cancel(0x0c)
 	expect(conn.sentPackets.oneRtt.size).toBe(1)
-	expect(conn.flowControlFrames.has(`cancel:${stream.id}`)).toBe(true)
+	const cancelKey = [...conn.flowControlFrames.keys()].find((key) => key.startsWith(`cancel:${stream.id}:`))
+	expect(cancelKey).toBeDefined()
 	const pn = [...conn.sentPackets.oneRtt.keys()][0]
 	const info = conn.sentPackets.oneRtt.get(pn)!
 	conn._onPacketAcked('oneRtt', pn, info)
-	expect(conn.flowControlFrames.has(`cancel:${stream.id}`)).toBe(false)
+	expect(conn.flowControlFrames.has(cancelKey!)).toBe(false)
+})
+
+it('keeps the newer cancel replay when an older cancel packet is acknowledged', () => {
+	const conn = new QuicConnection('127.0.0.1', 443)
+	const secret = () => crypto.randomBytes(32)
+	const epochKeys = () => keys.deriveKeysFromSecret(secret(), 'sha256', 16, 12)
+	conn.appKeys = { client: epochKeys(), server: epochKeys() } as unknown as typeof conn.appKeys
+	conn._sendDatagram = (() => {}) as unknown as typeof conn._sendDatagram
+	const stream = conn.openBidiStream()
+
+	// Peer STOP_SENDING sends RESET-only first; a local cancel must supersede it.
+	stream._resetSend(0x0c, false)
+	stream.cancel(0x0c)
+
+	const cancelKeys = [...conn.flowControlFrames.keys()].filter((key) => key.startsWith(`cancel:${stream.id}:`))
+	expect(cancelKeys).toHaveLength(1)
+	const liveKey = cancelKeys[0]
+	const stale = [...conn.sentPackets.oneRtt.entries()].find(([, info]) =>
+		info.flowControlKeys?.some((key) => key !== liveKey)
+	)
+	expect(stale).toBeDefined()
+	conn._onPacketAcked('oneRtt', stale![0], stale![1])
+	expect(conn.flowControlFrames.has(liveKey)).toBe(true)
 })
 
 it('charges only unique discarded bytes when a cancelled stream has overlapping frames', () => {
