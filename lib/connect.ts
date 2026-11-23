@@ -56,6 +56,9 @@ class Connection {
 	declare alpn: Alpn | null
 	declare h2Session: H2Session | null
 	declare h2Transport: TLSTransport | null
+	// A transport 'error' can land after connect() resolves but before the request attaches
+	// its listener. Retain it so performH1 can reject instead of waiting on a dead socket.
+	declare transportError: Error | null
 	// Populated for h3 connections.
 	declare h3Client: H3Client | null
 	declare quicConn: QuicConnection | null
@@ -72,6 +75,7 @@ class Connection {
 		this.alpn = null
 		this.h2Session = null
 		this.h2Transport = null
+		this.transportError = null
 		this.h3Client = null
 		this.quicConn = null
 		this.closed = false
@@ -224,7 +228,33 @@ function createTLS(
 			removeAbort()
 		}
 		const fail = (err: unknown) => {
-			if (settled) return
+			if (settled) {
+				// An error after 'ready' (e.g. a fatal TLS alert on a pooled connection) can no
+				// longer reject connect(). Deliver it to the active h1 request BEFORE close()
+				// detaches listeners — with a pooled proxy hop close() destroys the transport
+				// without an error, and performH1 has no 'close' listener to unblock it.
+				const e = err instanceof Error ? err : new Error(String(err))
+				conn.transportError = e
+				if (conn.h2Session) {
+					// A socket error (ECONNRESET) is not a TLS alert, so _handleAlert never
+					// fans out to streams. Fail them BEFORE close() marks the session
+					// destroyed — a later _fatalError would then be a no-op.
+					// _fatalError destroys the transport synchronously; preserve a pooled
+					// HTTPS-proxy hop before that happens.
+					if (conn.proxyHop && conn.h2Transport) conn.h2Transport.keepUnderlyingAlive = true
+					conn.h2Session._fatalError(e)
+				} else if (conn.h2Transport) {
+					try {
+						// TLSTransport._destroy() checks this flag synchronously. Set it before
+						// destroy(e) so a fatal alert on a pooled HTTPS-proxy destination does not
+						// kill the reusable connection to the proxy; close() releases it afterwards.
+						if (conn.proxyHop) conn.h2Transport.keepUnderlyingAlive = true
+						conn.h2Transport.destroy(e)
+					} catch {}
+				}
+				conn.close('tls-error')
+				return
+			}
 			settled = true
 			clearAllTimers()
 			try {
@@ -247,6 +277,14 @@ function createTLS(
 				tls.socket?.once('end', peerGone)
 				tls.socket?.once('close', peerGone)
 				tls.h2Transport?.once('end', peerGone)
+				// A TLS fatal alert destroys the Duplex *with* an error. The per-request listener
+				// is removed when that request finishes; keep one for the pooled connection so a
+				// later alert cannot surface as an unhandled 'error' that kills the process.
+				// Retain (not discard) the error: it may land between connect() resolving and
+				// performH1 attaching its listener, and a destroyed Duplex replays no error.
+				tls.h2Transport?.on('error', (e: Error) => {
+					conn.transportError = e
+				})
 			}
 			if (opts.proxyPoolKey && tls.proxyHop) {
 				conn.proxyHop = tls.proxyHop

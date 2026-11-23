@@ -784,6 +784,19 @@ function performH2(
 	{ method, url, host, body, userHeaders, opts, profileObj, registerCancel, release }: RequestContext
 ): Promise<Response> {
 	return new Promise((resolve, reject) => {
+		// prepareBody() is async and connect() may resolve with an already-fatal socket. h2 has
+		// no per-request listener to replay that error, so fail here before opening a stream
+		// that would wait forever for a response from a dead session.
+		if (conn.transportError) {
+			const err = conn.transportError
+			if (isReadable(body)) {
+				body.on('error', () => {})
+				body.destroy()
+			}
+			conn.close('h2-transport-error')
+			reject(err)
+			return
+		}
 		const headers = buildH2Headers({
 			method,
 			host,
@@ -989,6 +1002,21 @@ function performH1(
 	{ method, url, host, body, userHeaders, opts, profileObj, h1PoolKey }: RequestContext
 ): Promise<Response> {
 	const transport = conn.h2Transport! // misnomer: this is the raw TLS Duplex
+	// A fatal TLS error can land after connect() resolved but before this request installed
+	// its 'error' listener. Node does not replay it on a destroyed Duplex, so check the
+	// error retained by connect() before writing to a socket that is already gone.
+	if (conn.transportError) {
+		const err = conn.transportError
+		// prepareBody has already adapted a web upload into a Readable. Keep an error
+		// observer attached while destroying it, or a late adapter error becomes an
+		// unhandled 'error' (and a live upload is left uncancelled).
+		if (isReadable(body)) {
+			body.on('error', () => {})
+			body.destroy()
+		}
+		conn.close('h1-transport-error')
+		return Promise.reject(err)
+	}
 	const requestLine = `${method} ${url.pathname + url.search} HTTP/1.1\r\n`
 	const headerBlock = buildH1Headers({ host, userHeaders, profile: profileObj })
 	const head = Buffer.from(requestLine + headerBlock + '\r\n\r\n', 'utf8')
@@ -1016,6 +1044,9 @@ function performH1(
 		let streamingStarted = false
 		let buffering = false
 		let streamDone = false
+		// A pooled socket must never have a request body still in flight: a chunked upload
+		// without its terminating chunk would corrupt the next request on that connection.
+		let uploadDone = !isReadable(body)
 		const buffered: Buffer[] = []
 		let stream: ProgressiveStream | null = null
 		// Incremental framing state for the streaming chunked parser.
@@ -1031,6 +1062,7 @@ function performH1(
 		function cleanup() {
 			transport.removeListener('data', onData)
 			transport.removeListener('end', onEnd)
+			transport.removeListener('error', onError)
 		}
 		function done(fn: () => void) {
 			if (settled) return
@@ -1038,8 +1070,25 @@ function performH1(
 			cleanup()
 			fn()
 		}
+		// A failure must also stop a streaming upload: the source may be paused waiting for a
+		// 'drain' that will never arrive now that the transport is gone.
+		let onBodyData: ((chunk: Buffer | string) => void) | null = null
+		let onBodyEnd: (() => void) | null = null
+		let onBodyError: ((e: Error) => void) | null = null
+		function stopBody() {
+			if (!streamBody) return
+			if (onBodyData) streamBody.removeListener('data', onBodyData)
+			if (onBodyEnd) streamBody.removeListener('end', onBodyEnd)
+			if (onBodyError) streamBody.removeListener('error', onBodyError)
+			// A destruction error can already be queued when the listener above comes off;
+			// keep a silent observer so it cannot become an uncaught 'error'.
+			streamBody.on('error', () => {})
+			streamBody.destroy()
+		}
+
 		function fail(msg: string, code: ErrorCode | string) {
 			done(() => {
+				stopBody()
 				try {
 					conn.close('h1-error')
 				} catch {}
@@ -1049,7 +1098,10 @@ function performH1(
 
 		// Successful completion: park a reusable socket in the pool, otherwise tear it down.
 		function finishH1(reason: string) {
-			if (!h1PoolKey || !reusable) {
+			if (!h1PoolKey || !reusable || !uploadDone) {
+				// An early response can arrive while the upload is still streaming. Stop it and
+				// retire the socket instead of handing a half-framed request to the pool.
+				if (!uploadDone) stopBody()
 				conn.close(reason)
 				return
 			}
@@ -1074,7 +1126,7 @@ function performH1(
 					k.toLowerCase() === 'transfer-encoding' && String(userHeaders[k]).toLowerCase().includes('chunked')
 			)
 			const CRLF = Buffer.from('\r\n', 'utf8')
-			streamBody.on('data', (c: Buffer | string) => {
+			onBodyData = (c: Buffer | string) => {
 				const data = Buffer.isBuffer(c) ? c : Buffer.from(c)
 				const frame = chunked
 					? Buffer.concat([Buffer.from(data.length.toString(16), 'utf8'), CRLF, data, CRLF])
@@ -1083,18 +1135,31 @@ function performH1(
 					streamBody.pause()
 					transport.once('drain', () => streamBody.resume())
 				}
-			})
-			streamBody.on('end', () => {
+			}
+			onBodyEnd = () => {
 				if (chunked) transport.write('0\r\n\r\n', 'utf8')
-			})
-			streamBody.on('error', (e: Error) =>
-				done(() => {
+				uploadDone = true
+			}
+			onBodyError = (e: Error) => {
+				// Report the failure on an active response. failStream() owns cleanup in that case.
+				if (!streamDone && (stream || buffering)) {
+					failStream(e.message, 'EBODYSTREAM')
+					return
+				}
+				// An unfinished upload leaves the request mis-framed. finishH1() already keeps
+				// such a socket out of the pool, but close it here too for paths that settled
+				// without reaching finishH1. A completed upload cannot poison a pooled socket.
+				if (!uploadDone) {
+					stopBody()
 					try {
 						conn.close('h1-body-error')
 					} catch {}
-					reject(new HellojsError(e.message, 'EBODYSTREAM', e))
-				})
-			)
+				}
+				if (!settled) done(() => reject(new HellojsError(e.message, 'EBODYSTREAM', e)))
+			}
+			streamBody.on('data', onBodyData)
+			streamBody.on('end', onBodyEnd)
+			streamBody.on('error', onBodyError)
 		} else if (body) {
 			transport.write(body)
 		}
@@ -1242,6 +1307,7 @@ function performH1(
 			streamDone = true
 			settled = true
 			cleanup()
+			stopBody()
 			try {
 				conn.close('h1-stream-error')
 			} catch {
@@ -1393,8 +1459,17 @@ function performH1(
 			failStream('connection closed before response complete', 'EBADRESP')
 		}
 
+		// A fatal TLS alert after the h1 handshake destroys the Duplex with an error. Without
+		// this listener the request waits for response bytes that will never arrive. Once headers
+		// have been handed to a ProgressiveStream the promise is already resolved, so the error
+		// belongs on that stream instead (fail() would be a no-op and leave the body hanging).
+		const onError = (e: Error & { code?: string }) => {
+			if (stream || buffering) failStream(e.message, e.code || 'ECONNRESET')
+			else fail(e.message, e.code || 'ECONNRESET')
+		}
 		transport.on('data', onData)
 		transport.once('end', onEnd)
+		transport.on('error', onError)
 		try {
 			transport.resume()
 		} catch {}
@@ -1547,13 +1622,18 @@ async function performWithRetry(opts: NormalizedRequestOptions): Promise<Respons
 	// HTTP token, so compare case-insensitively on the raw string.
 	const upper = (opts.method || 'GET').toUpperCase() as HttpMethod
 	const retriable = methods.includes(upper)
+	// A stream body may already have been consumed when a retry is considered. Replaying it
+	// would silently truncate the next attempt, on h1 or h2.
+	const oneShotBody =
+		opts.body != null &&
+		(isReadable(opts.body) || typeof (opts.body as { getReader?: unknown }).getReader === 'function')
 	let lastErr: HellojsError | undefined
 	for (let attempt = 0; attempt <= limit; attempt++) {
 		try {
 			const res = await performRequest(opts)
 			// A retryable status is already visible at the header stage. Cancel the unread
 			// body to release the stream/socket before the next attempt.
-			if (retriable && attempt < limit && statusCodes.includes(res.status)) {
+			if (retriable && attempt < limit && !oneShotBody && statusCodes.includes(res.status)) {
 				if (res.body) {
 					try {
 						await res.body.cancel()
@@ -1573,7 +1653,7 @@ async function performWithRetry(opts: NormalizedRequestOptions): Promise<Respons
 			// Normalize: every error leaving this function is a HellojsError with a stable .code.
 			lastErr = wrapError(e)
 			const transient = ['ETIMEDOUT', 'ECONNRESET', 'EH2STREAM', 'EH3STREAM'].includes(lastErr.code)
-			if (!retriable || !transient || attempt === limit) throw lastErr
+			if (!retriable || !transient || oneShotBody || attempt === limit) throw lastErr
 			await retryDelay(baseDelay * Math.pow(2, attempt), opts.signal)
 		}
 	}

@@ -636,7 +636,7 @@ The profile defines:
 - Signature algorithms (8 entries, exact order)
 - Supported groups: GREASE, X25519MLKEM768, X25519, P-256, P-384
 - Key share: hybrid X25519MLKEM768 (1216 B) + X25519 (32 B) + GREASE
-- ALPS extension type 0x44CD (v1) advertising h2
+- ALPS extension type 0x44CD (v1) advertising h2; when a server negotiates it in EncryptedExtensions, hellojs sends the matching client EncryptedExtensions (CEE, draft-vvv-tls-alps-01) before Finished
 - compress_certificate: brotli only
 - HTTP/2 SETTINGS values + insertion order
 - HTTP/2 WINDOW_UPDATE +15663105 on stream 0
@@ -848,13 +848,13 @@ executes the library tests is the runtime the library is written for.
 
 ### Server compatibility
 
-| Server                | Result                                        |
-| --------------------- | --------------------------------------------- |
-| `cloudflare-quic.com` | ✅                                            |
-| `www.cloudflare.com`  | ✅                                            |
-| `quic.aiortc.org`     | ✅                                            |
-| `www.google.com`      | timeout (likely MTU/firewall on test network) |
-| `cloud.google.com`    | timeout                                       |
+| Server                | Result        |
+| --------------------- | ------------- |
+| `cloudflare-quic.com` | ✅            |
+| `www.cloudflare.com`  | ✅            |
+| `quic.aiortc.org`     | ✅            |
+| `www.google.com`      | ✅ (ALPS CEE) |
+| `cloud.google.com`    | ✅ (ALPS CEE) |
 
 ---
 

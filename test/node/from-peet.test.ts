@@ -183,6 +183,22 @@ it('fromPeet: ALPS extension type detected (44CD = v1)', () => {
 	expect(p.tls.alpsProtocols).toStrictEqual(['h2'])
 })
 
+it('fromPeet: keeps legacy and current ALPS codepoints distinct when both are captured', () => {
+	const capture = structuredClone(SAMPLE) as unknown as PeetJson
+	const exts = capture.tls!.extensions!
+	const current = exts.findIndex((e) => e.name === 'application_settings (17613)')
+	expect(current).toBeGreaterThanOrEqual(0)
+	exts.splice(current, 0, { ...exts[current]!, name: 'application_settings (17513)' })
+
+	const p = fromPeet(capture)
+	const alpsIds = (p.tls.extensionOrder ?? [])
+		.filter((e) => !e.grease && (e.id === 17513 || e.id === 17613))
+		.map((e) => e.id)
+	expect(alpsIds).toStrictEqual([17513, 17613])
+	// The first (legacy) ALPS label supplies the shared override.
+	expect(p.tls.alpsExtensionType).toBe(17513)
+})
+
 it('fromPeet: cert compression algorithms parsed', () => {
 	const p = fromPeet(SAMPLE)
 	expect(p.tls.certCompressionAlgorithms).toStrictEqual([2])

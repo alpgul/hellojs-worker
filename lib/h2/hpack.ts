@@ -205,9 +205,14 @@ function findInTables(
 // can hand us numbers (a content-length, a priority weight) directly.
 function encode(
 	headers: Array<[name: string | number, value: string | number | boolean | null | undefined]>,
-	table: DynamicTable
+	table: DynamicTable,
+	// RFC 7541 §6.3: every change to the encoder's table size must be signalled, in order, at
+	// the very start of the next header block. A reduction followed by an increase needs both
+	// updates so the peer's smaller limit is still honoured for the update in between.
+	sizeUpdates: number[] = []
 ): Buffer {
 	const out: Buffer[] = []
+	for (const size of sizeUpdates) out.push(encodeInt(size, 5, 0x20)) // 001xxxxx
 	for (const [name, value] of headers) {
 		const n = String(name).toLowerCase()
 		const v = String(value)

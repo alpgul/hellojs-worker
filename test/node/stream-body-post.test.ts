@@ -15,17 +15,19 @@
 import { execSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as http2 from 'node:http2'
-import * as http from 'node:http'
 import * as https from 'node:https'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { Readable } from 'node:stream'
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import request from '../../index.ts'
-import type { FetchInit } from '../../index.ts'
 import { listenOnLoopback } from '../helpers/tcp.ts'
+
+import type { FetchInit } from '../../index.ts'
+import type * as http from 'node:http'
+import type { TLSSocket } from 'node:tls'
 
 function genServerCert(): { key: Buffer; cert: Buffer } {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hjsb-'))
@@ -53,6 +55,7 @@ let h1: https.Server | null = null
 let h2Base = ''
 let h1Base = ''
 let tmpFile = ''
+const h1Sockets = new Set<TLSSocket>()
 
 // Reassemble the incoming body, then echo method + total bytes (+ the text for small payloads).
 function echoBody(readable: NodeJS.ReadableStream, respond: (r: Received) => void): void {
@@ -116,8 +119,18 @@ beforeAll(async () => {
 			})
 			return
 		}
+		if (req.url === '/early') {
+			// A keep-alive early response: the request body is still chunked and unfinished.
+			res.writeHead(413, { 'content-length': '0' })
+			res.end()
+			return
+		}
 		res.writeHead(404)
 		res.end()
+	})
+	h1.on('secureConnection', (socket) => {
+		h1Sockets.add(socket)
+		socket.on('close', () => h1Sockets.delete(socket))
 	})
 	h1Base = `https://127.0.0.1:${await listenOnLoopback(h1)}`
 })
@@ -251,4 +264,35 @@ describe('POST with a Readable body — HTTP/1.1 chunked', () => {
 		expect(res.length).toBe(TOTAL)
 		expect(res.chunked).toBe(true)
 	}, 60_000)
+
+	it('closes the connection when the upload errors after an early response', async () => {
+		request.clearPool()
+		let failUpload!: () => void
+		const gate = new Promise<void>((resolve) => {
+			failUpload = resolve
+		})
+		const body = Readable.from(
+			(async function* (): AsyncGenerator<Buffer> {
+				yield Buffer.from('partial')
+				await gate
+				throw new Error('late upload failure')
+			})()
+		)
+		const res = await request(`${h1Base}/early`, {
+			...base(),
+			method: 'POST',
+			body: web(body)
+		})
+		expect(res.status).toBe(413)
+		await res.text()
+		const [socket] = [...h1Sockets]
+		expect(socket).toBeDefined()
+		// The response completed before the upload ended, so the socket must be retired now —
+		// never released to the pool where another request could check it out.
+		await vi.waitFor(() => expect(socket!.destroyed).toBe(true), { timeout: 1000 })
+
+		failUpload()
+		expect(socket!.destroyed).toBe(true)
+		request.clearPool()
+	})
 })

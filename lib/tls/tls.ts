@@ -32,6 +32,7 @@ import {
 	CreateRawExtension,
 	pickGreaseTriple
 } from '../extensions/index.ts'
+import * as h2Frame from '../h2/frame.ts'
 import { H2Session } from '../h2/session.ts'
 import { assertProxyConnectHeaders } from '../headers.ts'
 import logFactory from '../models/log.ts'
@@ -228,6 +229,12 @@ class TLSTransport extends Duplex {
 		this.tls = tls
 		this._ended = false
 		this.keepUnderlyingAlive = false
+		// A fatal TLS alert destroys this Duplex *with* an error, and Node throws if an
+		// 'error' has no listener. Most sessions add their own (h2: H2Session; h1: connect.ts
+		// retains it for late requests), but an idle pooled HTTPS-proxy hop has neither: the
+		// inner session detached its listeners when it was parked. Keep a baseline observer
+		// so destroy(err) can never become an uncaught exception; other listeners still fire.
+		this.on('error', () => {})
 	}
 
 	// Plaintext app bytes -> encrypt with the negotiated record-layer -> write to raw TCP.
@@ -384,6 +391,15 @@ class TLS extends EventEmitter {
 
 	declare handshakeComplete: boolean
 	declare handshakeKeysReady: boolean
+	// ALPS (draft-vvv-tls-alps-01) negotiation. `offeredAlpsTypes` mirrors the codepoints the
+	// ClientHello actually carried; `negotiatedAlpsType` is set from the server's
+	// EncryptedExtensions. A negotiated ALPS obliges the client to answer with its own
+	// EncryptedExtensions (CEE) before Finished — Google rejects the handshake otherwise.
+	declare offeredAlpsTypes: number[]
+	declare negotiatedAlpsType: number | null
+	// SETTINGS frames carried inside the server's ALPS blob (draft-vvv-tls-alps-01 §4). Kept
+	// until after certificate authentication, then applied before h2 opens any stream.
+	declare alpsServerSettings: h2Frame.SettingsPair[]
 	// The TLS 1.2 state machine, installed by _enterTls12 when the server picks 1.2.
 	declare tls12: TLS12Handshake | null
 	// Stapled OCSP response, written by the TLS 1.2 handshake for the caller to inspect.
@@ -477,6 +493,9 @@ class TLS extends EventEmitter {
 
 		this.handshakeComplete = false
 		this.handshakeKeysReady = false // gates _parseRecords from decrypting before key schedule done
+		this.offeredAlpsTypes = []
+		this.negotiatedAlpsType = null
+		this.alpsServerSettings = []
 
 		// MLKEM state (set by connect() before socket open when the profile offers TLS 1.3).
 		this.mlkemPk = null
@@ -991,8 +1010,22 @@ class TLS extends EventEmitter {
 			err.code = 'ETLS_ALERT'
 			err.alertLevel = level
 			err.alertDescription = desc
+			// Fail live streams FIRST: emit('error') reaches connect(), whose already-settled
+			// handler closes the connection (and h2Session.close() would make _fatalError a
+			// no-op). A fatal alert after Finished cannot reject connect() any more, so the
+			// stream-level failure is the only path that unblocks a waiting request().
+			if (this.h2Session) {
+				// `closed` is also set by GOAWAY while streams are still draining. Let
+				// _fatalError's `destroyed` guard decide; it must still fail those streams.
+				this.h2Session._fatalError(err)
+			} else if (this.h2Transport) {
+				// h1 has no session fan-out. TLSTransport carries a baseline no-op listener
+				// (so an idle pooled HTTPS-proxy hop cannot throw), and connect.ts adds a
+				// retaining one at ready-http1 so a request starting after the alert still
+				// sees the failure. Both receive this destroy(err).
+				this.h2Transport.destroy(err)
+			}
 			this.emit('error', err)
-			if (this.h2Transport) this.h2Transport.destroy(err)
 			this.socket?.destroy()
 		} else {
 			// Warning. TLS 1.3 only really uses close_notify (desc=0) and user_canceled (90).
@@ -1205,8 +1238,31 @@ class TLS extends EventEmitter {
 					const protoLen = ed[q++]
 					this.alpn = ed.subarray(q, q + protoLen).toString('ascii')
 				}
+			} else if (this.offeredAlpsTypes.includes(et)) {
+				// The server negotiated ALPS. It expects a client EncryptedExtensions carrying
+				// the application settings before our Finished; see _sendClientEncryptedExtensions.
+				this.negotiatedAlpsType = et
+				this.alpsServerSettings = this._parseAlpsSettings(ed)
 			}
 		}
+	}
+
+	// The ALPS payload is a sequence of HTTP/2 frames (draft-vvv-tls-alps-01 / Chromium's
+	// AlpsDecoder), not a bare SETTINGS list. Google currently puts an ACCEPT_CH frame there;
+	// other servers may send SETTINGS. Only SETTINGS affect our flow-control state — we never
+	// ACK settings learned this way (the frame was already acknowledged inside the handshake).
+	_parseAlpsSettings(data: Buffer): h2Frame.SettingsPair[] {
+		const pairs: h2Frame.SettingsPair[] = []
+		let off = 0
+		while (off + 9 <= data.length) {
+			const f = h2Frame.parse(data.subarray(off))
+			if (!f) break
+			off += f.consumed
+			if (f.type === h2Frame.TYPE.SETTINGS && !(f.flags & h2Frame.FLAG.ACK)) {
+				pairs.push(...h2Frame.parseSettings(f.payload))
+			}
+		}
+		return pairs
 	}
 
 	_validateServerFinished(body: Buffer): void {
@@ -1232,7 +1288,43 @@ class TLS extends EventEmitter {
 		}
 	}
 
+	// draft-vvv-tls-alps-01 §4.1: when the server negotiates ALPS in its EncryptedExtensions the
+	// client MUST reply with a client EncryptedExtensions (CEE) after the server Finished and
+	// before its own Finished, protected with the client handshake keys at sequence number 0.
+	// Chrome 147 sends an empty settings blob here (its HTTP/2 SETTINGS still go on the wire as
+	// a normal frame once h2 starts), so we mirror that byte-for-byte.
+	_sendClientEncryptedExtensions(): void {
+		const settings = Buffer.alloc(0)
+		const ext = Buffer.alloc(4 + settings.length)
+		ext.writeUInt16BE(this.negotiatedAlpsType!, 0)
+		ext.writeUInt16BE(settings.length, 2)
+		settings.copy(ext, 4)
+
+		const extLen = Buffer.alloc(2)
+		extLen.writeUInt16BE(ext.length, 0)
+		const body = Buffer.concat([extLen, ext])
+		const len = Buffer.alloc(3)
+		len.writeUIntBE(body.length, 0, 3)
+		const cee = Buffer.concat([Buffer.from([MESSAGE_TYPES.ENCRYPTED_EXTENSIONS]), len, body])
+
+		// The CEE is part of the Client Handshake Context, so the Finished MAC and the
+		// resumption master secret both cover it.
+		this.transcript.push(cee)
+		const record = this.encrypt(
+			this.clientHandshakeKey,
+			this.clientHandshakeIV,
+			cee,
+			MESSAGE_TYPES.HANDSHAKE,
+			0 // first client handshake record
+		)
+		this.socket!.write(record)
+	}
+
 	_sendClientFinished() {
+		// ALPS CEE goes after the server Finished but before the client Finished. It changes
+		// both the transcript hash and the record sequence number of the Finished below.
+		if (this.negotiatedAlpsType !== null) this._sendClientEncryptedExtensions()
+
 		// IMPORTANT: The Server Finished message is now part of the transcript for this calculation.
 		const transcriptHash = HASH_FNS[this.cipher!.hash](...this.transcript)
 
@@ -1280,7 +1372,7 @@ class TLS extends EventEmitter {
 			this.clientHandshakeIV,
 			finishedMessage,
 			MESSAGE_TYPES.HANDSHAKE,
-			0 // Sequence number
+			this.negotiatedAlpsType === null ? 0 : 1 // CEE consumed sequence number 0 when negotiated
 		)
 		// this.clientSeq++; // Increment for the next message (application data)
 
@@ -1296,7 +1388,7 @@ class TLS extends EventEmitter {
 			// It writes the preface + Chrome 147 SETTINGS + WINDOW_UPDATE through our TLS
 			// Duplex (which encrypts on the way out), and parses inbound frames from the
 			// decrypted byte stream we push.
-			this.h2Session = new H2Session(this.h2Transport, this.profile)
+			this.h2Session = new H2Session(this.h2Transport, this.profile, this.alpsServerSettings)
 			this.h2Session.on('error', (err) => log.error('[h2] session error', err))
 			this.h2Session.on('close', () => log.notify('[h2] session closed'))
 			this.emit('ready')
@@ -1981,6 +2073,21 @@ class TLS extends EventEmitter {
 		// server_name are the builders that can legitimately return null (no key_share
 		// constructed; an IP-literal proxy host, which RFC 6066 forbids in SNI).
 		const skipSni = this.proxyTunnel && net.isIP(this.sniHost) !== 0
+		// A peet capture can contain BOTH the current (17613) and legacy (17513) ALPS ids. The
+		// shared alpsExtensionType override describes one codepoint, so applying it to every ALPS
+		// builder would emit that id twice (duplicate-extension rejection) or silently rewrite a
+		// legacy-only capture to the Chrome default. Use the override only when it is the sole
+		// ALPS id actually listed by the profile; otherwise each builder keeps its own codepoint.
+		const alpsIds = new Set([17613, 17513, 17517])
+		const override = ptls.alpsExtensionType
+		const explicitOrder = Array.isArray(ptls.extensionOrder) && ptls.extensionOrder.length > 0
+		const listedAlps = explicitOrder
+			? new Set(
+					(ptls.extensionOrder ?? []).flatMap((e) => (e.grease ? [] : [e.id])).filter((id) => alpsIds.has(id))
+				)
+			: new Set(override != null && alpsIds.has(override) ? [override] : [17613])
+		const alpsTypeFor = (ownId: number): number =>
+			listedAlps.size === 1 && listedAlps.has(override ?? -1) ? (override as number) : ownId
 		const EXT_BUILDERS: Record<number, () => Buffer | null> = {
 			0: () => (skipSni ? null : CreateSNIExtension(this.sniHost)), // server_name
 			5: () => CreateStatusRequestExtension(ptls.statusRequest), // status_request
@@ -2006,8 +2113,9 @@ class TLS extends EventEmitter {
 							: { sigalgs: ptls.signatureAlgorithms || [] }
 				),
 			51: () => keyShareExtension, // key_share (null when TLS 1.2-only)
-			17613: () => CreateApplicationSettingsExtension(ptls.alpsProtocols, ptls.alpsExtensionType || 0x44cd), // ALPS v1
-			17517: () => CreateApplicationSettingsExtension(ptls.alpsProtocols, ptls.alpsExtensionType || 0x446d), // ALPS v2
+			17613: () => CreateApplicationSettingsExtension(ptls.alpsProtocols, alpsTypeFor(17613)), // ALPS v1
+			17513: () => CreateApplicationSettingsExtension(ptls.alpsProtocols, alpsTypeFor(17513)), // legacy ALPS (0x4469)
+			17517: () => CreateApplicationSettingsExtension(ptls.alpsProtocols, alpsTypeFor(17517)), // ALPS v2
 			65037: () => CreateEncryptedClientHelloExtension(), // ECH GREASE
 			65281: () => CreateRenegotationExtension(), // renegotiation_info
 			// Chrome 150+ ClientHello extensions. Bodies are static/opaque and are
@@ -2064,6 +2172,10 @@ class TLS extends EventEmitter {
 			middleIds = LEGACY_CHROME_IDS.slice()
 		}
 
+		// Filled from the built extension bytes below: a server reply may only trigger a CEE
+		// for a codepoint we actually offered.
+		this.offeredAlpsTypes = []
+
 		// TLS-1.2-only profiles build no key_share. The legacy fallback above still lists id 51,
 		// and EXT_BUILDERS[51] would return null at runtime (the ! is TypeScript-only), which
 		// makes Buffer.concat throw. Drop it here so only buildable extensions reach the wire.
@@ -2082,6 +2194,15 @@ class TLS extends EventEmitter {
 				continue
 			}
 			namedExts[String(id)] = ext
+		}
+
+		// Read ALPS codepoints from the extension bytes, not from the profile's builder IDs:
+		// 17613 (0x44cd) is current, 17513 (0x4469) is the legacy codepoint BoringSSL still
+		// recognises, and a parrot profile can carry either verbatim in rawExtensionBodies.
+		for (const ext of Object.values(namedExts)) {
+			if (ext.length < 2) continue
+			const type = ext.readUInt16BE(0)
+			if (type === 0x44cd || type === 0x4469 || type === 0x446d) this.offeredAlpsTypes.push(type)
 		}
 
 		// Add cookie ext on CH2 if HRR provided one (RFC 8446 §4.2.2 — verbatim echo).

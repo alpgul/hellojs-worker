@@ -20,3 +20,7 @@ export const QUIC_HOST = 'cloudflare-quic.com'
 export const TLS12_HOST = 'httpbin.org'
 // Parrot captures: peetprint exists only in this API's response.
 export const PEET_HOST = 'tls.peet.ws'
+// ALPS (0x44cd) negotiation: both frontends reply with application_settings in
+// EncryptedExtensions and require the client EncryptedExtensions flight from draft-vvv-tls-alps-01.
+export const ALPS_HOST = 'www.google.com'
+export const ALPS_HOST_ALT = 'cloud.google.com'
