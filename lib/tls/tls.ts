@@ -357,6 +357,9 @@ class TLS extends EventEmitter {
 	declare clientRandom: Buffer | null
 	declare serverRandom: Buffer | null
 	declare serverCertChain: Buffer[]
+	// Set only after a verified Certificate + CertificateVerify pair on a full TLS 1.3 handshake.
+	// PSK resumption has its own, verified-ancestry path at Finished instead.
+	declare serverAuthenticated: boolean
 
 	// Our half of the key exchange. The MLKEM secret key is opaque outside ./mlkem.ts.
 	declare clientPrivateKey: crypto.KeyObject
@@ -470,6 +473,7 @@ class TLS extends EventEmitter {
 
 		this.serverSeq = 0
 		this.clientSeq = 0
+		this.serverAuthenticated = false
 
 		this.handshakeComplete = false
 		this.handshakeKeysReady = false // gates _parseRecords from decrypting before key schedule done
@@ -1073,6 +1077,18 @@ class TLS extends EventEmitter {
 					break
 				}
 				case MESSAGE_TYPES.FINISHED: {
+					// A valid Finished MAC only proves possession of the handshake traffic secret.
+					// On a full handshake it does not prove the peer owns a trusted certificate for
+					// the target host: skipping Certificate/CertificateVerify must not reach the
+					// key schedule. PSK resumption is allowed only with verified ancestry.
+					if (
+						this.verifyTLS &&
+						!this.serverAuthenticated &&
+						!(this.pskAccepted && this.pskTicket?.verified === true)
+					) {
+						this._certFail('ECERTVALIDATION', 'Server certificate authentication missing before Finished')
+						return
+					}
 					this._validateServerFinished(body)
 					this.transcript.push(full)
 					this._deriveApplicationKeys()
@@ -1096,11 +1112,12 @@ class TLS extends EventEmitter {
 	_ingestServerCertificate(body: Buffer): boolean {
 		try {
 			const certs = parseCertificateList(body)
-			this.serverCertChain = certs
 			if (this.verifyTLS) {
 				const r = validateChain(certs, this.sniHost)
 				if (!r.ok) return this._certFail('ECERTVALIDATION', `certificate validation failed: ${r.reason}`)
 			}
+			// Only a validated chain may become the leaf used by CertificateVerify.
+			this.serverCertChain = certs
 			return true
 		} catch (e) {
 			return this._certFail('ECERTPARSE', `Certificate parse failed: ${errMsg(e)}`)
@@ -1148,6 +1165,7 @@ class TLS extends EventEmitter {
 					`CertificateVerify signature invalid (scheme 0x${scheme.toString(16)})`
 				)
 			}
+			this.serverAuthenticated = true
 			return true
 		} catch (e) {
 			return this._certFail('ECERTVERIFY', `CertificateVerify failed: ${errMsg(e)}`)
@@ -1157,8 +1175,9 @@ class TLS extends EventEmitter {
 	_certFail(code: string, message: string): false {
 		const e: TLSError = new Error(message)
 		e.code = code
-		this.emit('error', e)
+		// Destroy first: a throwing 'error' listener must not leave the socket open.
 		this.socket?.destroy()
+		this.emit('error', e)
 		return false
 	}
 
@@ -1326,6 +1345,7 @@ class TLS extends EventEmitter {
 				ageAdd,
 				receivedAt: Date.now(),
 				alpn: this.alpn || '',
+				sniHost: this.sniHost,
 				verified
 			})
 			log.debug(`[resume] stored session ticket for ${this.host}:${this.port} (${ticketLen}B, ${lifetime}s)`)
@@ -2133,7 +2153,8 @@ class TLS extends EventEmitter {
 		let pskTicket: SessionTicket | null = null
 		if (this.resume) {
 			const offeredAlpn = ptls.alpn || ['h2', 'http/1.1']
-			pskTicket = this.pskTicket ?? getSessionTicket(this.host, this.port, offeredAlpn, this.verifyTLS)
+			pskTicket =
+				this.pskTicket ?? getSessionTicket(this.host, this.port, offeredAlpn, this.verifyTLS, this.sniHost)
 			// After an HRR the negotiated suite is known: a PSK with a different hash would
 			// corrupt the binder transcript, so drop it and run a full handshake.
 			if (pskTicket && this.cipher && this.cipher.hash !== pskTicket.hash) pskTicket = null

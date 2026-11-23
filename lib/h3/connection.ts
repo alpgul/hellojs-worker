@@ -33,6 +33,7 @@ import {
 	CreateSNIExtension
 } from '../extensions/index.ts'
 import logFactory from '../models/log.ts'
+import { parseCertificateList, validateChain, verifyCertVerify } from '../tls/cert-validate.ts'
 import { getSessionTicket, pskBinder, storeSessionTicket } from '../tls/session-tickets.ts'
 import { CIPHERS, HASHES, MESSAGE_TYPES } from '../utils/config.ts'
 import * as HKDF from '../utils/hkdf.ts'
@@ -246,6 +247,10 @@ class QuicConnection extends EventEmitter {
 	declare resumptionMasterSecret: Buffer | null
 	declare pskTicket: SessionTicket | null
 	declare pskAccepted: boolean
+	declare verifyTLS: boolean
+	declare serverCertChain: Buffer[]
+	// Set only after a verified Certificate + CertificateVerify pair on a full QUIC handshake.
+	declare serverAuthenticated: boolean
 	declare alpn: string | null
 	declare handshakeComplete: boolean
 
@@ -263,12 +268,13 @@ class QuicConnection extends EventEmitter {
 	declare _pendingPathChallenge: PendingPathChallenge | null
 	declare _closed: boolean
 
-	constructor(host: string, port = 443, sniHost?: string) {
+	constructor(host: string, port = 443, sniHost?: string, verifyTLS = true) {
 		super()
 		this.host = host
 		this.port = port
 		// Alt-Svc can move the dial target while SNI/certificate identity stays on the origin.
 		this.sniHost = sniHost || host
+		this.verifyTLS = verifyTLS
 
 		this.socket = null
 		this.serverAddr = null
@@ -355,6 +361,8 @@ class QuicConnection extends EventEmitter {
 		this.resumptionMasterSecret = null
 		this.pskTicket = null
 		this.pskAccepted = false
+		this.serverCertChain = []
+		this.serverAuthenticated = false
 		this.alpn = null
 		this.handshakeComplete = false
 
@@ -467,10 +475,10 @@ class QuicConnection extends EventEmitter {
 
 		// --- TLS 1.3 PSK resumption (RFC 8446 §4.2.11) ---
 		// Offer an h3-scoped ticket from a previous QUIC handshake. pre_shared_key must be the
-		// last ClientHello extension. needVerified=false: QUIC does not validate certificate
-		// chains, so its tickets never carry a verified lineage; the ALPN-scoped store keeps
-		// them out of TCP h2/h1 handshakes that do verify.
-		this.pskTicket = getSessionTicket(this.host, this.port, ['h3'], false)
+		// last ClientHello extension. A resumed server may omit Certificate/CertificateVerify,
+		// so a verification-required request may only use a ticket with verified ancestry for
+		// this exact SNI — Alt-Svc origins can share a dial host but not a certificate identity.
+		this.pskTicket = getSessionTicket(this.host, this.port, ['h3'], this.verifyTLS, this.sniHost)
 		let pskPrefix: Buffer | null = null
 		let pskBindersLen = 0
 		if (this.pskTicket) {
@@ -908,6 +916,7 @@ class QuicConnection extends EventEmitter {
 	}
 
 	_processCryptoBuffer(epoch: Epoch): void {
+		if (this._closed) return
 		// TLS handshake messages: 4-byte header (type + 3-byte length) + body.
 		const buf = this.cryptoBufIn[epoch]
 		let off = 0
@@ -919,12 +928,77 @@ class QuicConnection extends EventEmitter {
 			const body = buf.subarray(off + 4, off + 4 + len)
 			off += 4 + len
 			this._onTlsHandshakeMessage(epoch, type, body, full)
+			if (this._closed) {
+				// A failed authentication closes the connection. Dropping the rest of this
+				// buffer keeps a following CertificateVerify/Finished/NewSessionTicket from
+				// mutating handshake state or caching a ticket after the rejection.
+				this.cryptoOffsetIn[epoch] += buf.length
+				this.cryptoBufIn[epoch] = buf.subarray(buf.length)
+				return
+			}
 		}
 		this.cryptoOffsetIn[epoch] += off
 		this.cryptoBufIn[epoch] = buf.subarray(off)
 	}
 
+	_certFail(code: 'ECERTVALIDATION' | 'ECERTPARSE' | 'ECERTVERIFY', message: string): false {
+		const err = new Error(message) as Error & { code?: string }
+		err.code = code
+		// Close first: an unhandled or throwing 'error' listener must not leave the
+		// connection open, and callers outside `try` must not reclassify this failure.
+		this.close()
+		this.emit('error', err)
+		return false
+	}
+
+	// Parse + validate the server Certificate message (RFC 8446 §4.4.2). Called only under
+	// verifyTLS. The h3 ClientHello does not advertise compress_certificate, so a compressed
+	// Certificate is rejected rather than silently skipping authentication.
+	_ingestServerCertificate(body: Buffer, compressed: boolean): boolean {
+		let outcome: { certs: Buffer[] } | { code: 'ECERTVALIDATION' | 'ECERTPARSE'; reason: string }
+		try {
+			if (compressed) throw new Error('compressed Certificate not advertised on the QUIC path')
+			const certs = parseCertificateList(body)
+			const r = validateChain(certs, this.sniHost)
+			outcome = r.ok
+				? { certs }
+				: { code: 'ECERTVALIDATION', reason: `certificate validation failed: ${r.reason}` }
+		} catch (e) {
+			outcome = { code: 'ECERTPARSE', reason: `Certificate parse failed: ${(e as Error).message}` }
+		}
+		// _certFail is outside the try: a throwing 'error' listener must not turn a validation
+		// failure into a parse failure or emit twice.
+		if ('code' in outcome) return this._certFail(outcome.code, outcome.reason)
+		// Only a validated chain may become the leaf used by CertificateVerify.
+		this.serverCertChain = outcome.certs
+		return true
+	}
+
+	// Verify the TLS 1.3 CertificateVerify signature (RFC 8446 §4.4.3) over the transcript
+	// through the Certificate message, then mark the full handshake as authenticated.
+	_verifyCertificateVerify(body: Buffer): boolean {
+		let ok = false
+		let scheme: number
+		let reason = ''
+		try {
+			if (!this.serverCertChain.length) throw new Error('CertificateVerify with no preceding certificate')
+			scheme = (body[0] << 8) | body[1]
+			const sigLen = (body[2] << 8) | body[3]
+			const signature = body.subarray(4, 4 + sigLen)
+			const transcriptHash = HASH_FNS[this.cipher.hash](...this.transcript)
+			ok = verifyCertVerify({ scheme, signature, leaf: this.serverCertChain[0], transcriptHash })
+			if (!ok) reason = `CertificateVerify signature invalid (scheme 0x${scheme.toString(16)})`
+		} catch (e) {
+			reason = `CertificateVerify failed: ${(e as Error).message}`
+		}
+		// Deliberately outside the try, so a throwing listener cannot re-emit or recode.
+		if (!ok) return this._certFail('ECERTVERIFY', reason)
+		this.serverAuthenticated = true
+		return true
+	}
+
 	_onTlsHandshakeMessage(epoch: Epoch, type: number, body: Buffer, full: Buffer): void {
+		if (this._closed) return
 		if (type === MESSAGE_TYPES.SERVER_HELLO) {
 			this.transcript.push(full)
 			this._processServerHello(body)
@@ -935,15 +1009,29 @@ class QuicConnection extends EventEmitter {
 			this._processEncryptedExtensions(body)
 			return
 		}
-		if (
-			type === MESSAGE_TYPES.SERVER_CERTIFICATE ||
-			type === 0x19 /*CompressedCertificate*/ ||
-			type === MESSAGE_TYPES.SERVER_CERTIFICATE_VERIFY
-		) {
+		if (type === MESSAGE_TYPES.SERVER_CERTIFICATE || type === 0x19 /*CompressedCertificate*/) {
+			if (this.verifyTLS && !this._ingestServerCertificate(body, type === 0x19)) return
+			this.transcript.push(full)
+			return
+		}
+		if (type === MESSAGE_TYPES.SERVER_CERTIFICATE_VERIFY) {
+			// Verify before hashing: the signature covers the transcript through Certificate.
+			if (this.verifyTLS && !this._verifyCertificateVerify(body)) return
 			this.transcript.push(full)
 			return
 		}
 		if (type === MESSAGE_TYPES.FINISHED) {
+			// A valid Finished MAC only proves possession of the handshake traffic secret; it is
+			// not server identity verification. Full handshakes must have authenticated the
+			// certificate, and resumptions must carry verified ancestry.
+			if (
+				this.verifyTLS &&
+				!this.serverAuthenticated &&
+				!(this.pskAccepted && this.pskTicket?.verified === true)
+			) {
+				this._certFail('ECERTVALIDATION', 'Server certificate authentication missing before Finished')
+				return
+			}
 			this._validateServerFinished(body)
 			this.transcript.push(full)
 			this._deriveApplicationKeys()
@@ -991,9 +1079,10 @@ class QuicConnection extends EventEmitter {
 				ageAdd,
 				receivedAt: Date.now(),
 				alpn: this.alpn || 'h3',
-				// QUIC never validates a certificate chain, so this ticket cannot seed a
-				// later handshake that requires verification. ALPN scoping keeps it h3-only.
-				verified: false
+				sniHost: this.sniHost,
+				// Carry the authentication ancestry forward, like the TCP TLS path: a resumed
+				// handshake may omit Certificate/CertificateVerify. ALPN scoping keeps h3-only.
+				verified: this.pskAccepted ? this.pskTicket?.verified === true : this.serverAuthenticated
 			})
 			log.debug(`[resume] QUIC stored session ticket for ${this.host}:${this.port} (${ticketLen}B, ${lifetime}s)`)
 		} catch (e) {

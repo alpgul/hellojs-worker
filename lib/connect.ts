@@ -123,9 +123,15 @@ class Connection {
 	}
 }
 
-function createH3(host: string, port: number, signal?: AbortSignal | null, sniHost?: string): Promise<Connection> {
+function createH3(
+	host: string,
+	port: number,
+	signal?: AbortSignal | null,
+	sniHost?: string,
+	verifyTLS = true
+): Promise<Connection> {
 	return new Promise((resolve, reject) => {
-		const qc = new QuicConnection(host, port, sniHost)
+		const qc = new QuicConnection(host, port, sniHost, verifyTLS)
 		const conn = new Connection(null)
 		conn.quicConn = qc
 		let settled = false
@@ -316,7 +322,7 @@ async function connectOnce({
 		if (proxy) {
 			throw new HellojsError('HTTP/3 is not supported through a proxy', 'EBADOPTS')
 		}
-		return createH3(host, port, signal, sniHost)
+		return createH3(host, port, signal, sniHost, verifyTLS)
 	}
 
 	let key: string | null = null
