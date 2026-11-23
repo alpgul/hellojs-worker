@@ -10,6 +10,45 @@ transport that picks h3/h2 automatically.
 npm install @unreleased/hellojs
 ```
 
+## Install from GitHub (pinned to a tag)
+
+You can install straight from the GitHub repository instead of npm. Pin the
+install to a release tag so every checkout gets the same code:
+
+```bash
+npm install github:alpgul/hellojs-worker#v0.7.0
+```
+
+```json
+{
+	"dependencies": {
+		"@unreleased/hellojs": "github:alpgul/hellojs-worker#v0.7.0"
+	}
+}
+```
+
+The package name is unchanged, so every example below uses the same
+`import request from '@unreleased/hellojs'` as the npm install.
+
+Leave off the tag to track the repository's default branch (the latest commit):
+
+```bash
+npm install github:alpgul/hellojs-worker
+```
+
+List the available tags before pinning a different release:
+
+```bash
+git ls-remote --tags https://github.com/alpgul/hellojs-worker.git
+```
+
+yarn/pnpm equivalents:
+
+```bash
+yarn add github:alpgul/hellojs-worker#v0.7.0
+pnpm add github:alpgul/hellojs-worker#v0.7.0
+```
+
 ```js
 import request from '@unreleased/hellojs'
 
@@ -34,6 +73,7 @@ const data = await post.json()
 
 ## Table of contents
 
+- [Install from GitHub (pinned to a tag)](#install-from-github-pinned-to-a-tag)
 - [Why](#why)
 - [Quick start](#quick-start)
 - [Request options](#request-options)
