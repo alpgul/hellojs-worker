@@ -1,0 +1,17 @@
+# Coverage guardrails.
+#
+# The project check fails only when total coverage drops by more than 1% against
+# the base commit, so unrelated PRs stay green while silent decay is caught.
+# The patch check reports coverage of the lines a PR touches. It is
+# informational for now: it flags untested new code without blocking merges.
+coverage:
+  precision: 2
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        target: 70%
+        informational: true
