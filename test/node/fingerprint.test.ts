@@ -42,6 +42,7 @@ function ticket(overrides: Partial<SessionTicket> = {}): SessionTicket {
 		ageAdd: 1234,
 		receivedAt: Date.now(),
 		alpn: 'h2',
+		sniHost: 'tls.peet.ws',
 		verified: true,
 		...overrides
 	}

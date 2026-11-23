@@ -40,7 +40,10 @@ function makeTicket(overrides: Partial<SessionTicket> = {}): SessionTicket {
 		ageAdd: 1234,
 		receivedAt: Date.now(),
 		alpn: 'h3',
-		verified: false,
+		sniHost: HOST,
+		// h3 tickets now carry the ancestry of the handshake that produced them; these PSK
+		// mechanics tests model a ticket issued by a verified handshake.
+		verified: true,
 		...overrides
 	}
 }
@@ -85,6 +88,37 @@ function freshConn(): QuicConnection {
 }
 
 beforeEach(() => clearSessionTickets())
+
+it('does not offer an unverified h3 ticket when verification is required', () => {
+	storeSessionTicket(HOST, PORT, makeTicket({ verified: false }))
+	const conn = freshConn()
+	expect(conn.pskTicket).toBeNull()
+	const ch = parseClientHello(conn.transcript[0])
+	expect(ch.extensions.some((e) => e.type === 0x0029)).toBe(false)
+})
+
+it('still offers an unverified h3 ticket when verification is disabled', () => {
+	storeSessionTicket(HOST, PORT, makeTicket({ verified: false }))
+	const conn = new QuicConnection(HOST, PORT, undefined, false)
+	conn._sendInitial = () => {}
+	conn._sendClientHello()
+	expect(conn.pskTicket).not.toBeNull()
+})
+
+it('does not offer a ticket authenticated for a different SNI on a shared Alt-Svc target', () => {
+	storeSessionTicket(HOST, PORT, makeTicket({ sniHost: HOST }))
+
+	// Same dial host, different certificate identity: no resumption, so a full handshake
+	// will validate the certificate for other.example instead of inheriting HOST's PSK.
+	const other = new QuicConnection(HOST, PORT, 'other.example')
+	other._sendInitial = () => {}
+	other._sendClientHello()
+	expect(other.pskTicket).toBeNull()
+	expect(parseClientHello(other.transcript[0]).extensions.some((e) => e.type === 0x0029)).toBe(false)
+
+	// The matching origin still resumes.
+	expect(freshConn().pskTicket).not.toBeNull()
+})
 
 it('offers a cached h3 ticket as the last ClientHello extension with a valid binder', () => {
 	const ticket = makeTicket()

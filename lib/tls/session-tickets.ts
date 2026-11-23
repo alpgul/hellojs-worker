@@ -2,7 +2,8 @@
 //
 // A server sends NewSessionTicket messages after the handshake; each carries a nonce that,
 // together with the connection's resumption_master_secret, derives a PSK for the next
-// connection. Tickets are per (host, port) and ALPN-scoped, live only in this process, and
+// connection. Tickets are scoped to (host, port, ALPN, authenticated SNI), live only in this
+// process, and
 // expire at the server's ticket_lifetime (capped at the RFC 8446 maximum of 7 days).
 // Failures are never stored — only tickets the server actually issued.
 
@@ -23,6 +24,9 @@ export interface SessionTicket {
 	receivedAt: number
 	// ALPN negotiated on the connection that issued the ticket ('' when none).
 	alpn: string
+	// The SNI/certificate identity authenticated when the ticket was issued. A resumption
+	// inherits that identity, so a PSK can never vouch for a different hostname.
+	sniHost: string
 	// True when the PSK's lineage includes a fully validated certificate chain. A resumed
 	// handshake skips chain validation, so it may only be offered to callers that want
 	// verification when an earlier connection actually verified the origin.
@@ -36,14 +40,16 @@ const tickets = new Map<string, SessionTicket>()
 
 // Keys include the ALPN so an h3 (QUIC) ticket and an h2/h1 (TCP TLS) ticket for the same
 // host:port can coexist. Without this, whichever protocol handshakes last would evict the
-// other's ticket. All protocols share the one store, so clearSessionTickets() empties them all.
-function ticketKey(host: string, port: number, alpn: string): string {
-	return `${host}:${port}:${alpn}`
+// other's ticket. The authenticated SNI is part of the key too: a PSK verified for a.example
+// must not vouch for b.example when both origins share one Alt-Svc dial target. All protocols
+// share the one store, so clearSessionTickets() empties them all.
+function ticketKey(host: string, port: number, alpn: string, sniHost: string): string {
+	return `${host}:${port}:${alpn}:${sniHost}`
 }
 
 function storeSessionTicket(host: string, port: number, ticket: SessionTicket): void {
 	if (ticket.lifetime <= 0) return
-	const key = ticketKey(host, port, ticket.alpn)
+	const key = ticketKey(host, port, ticket.alpn, ticket.sniHost)
 	tickets.delete(key)
 	tickets.set(key, ticket)
 	while (tickets.size > MAX_ENTRIES) {
@@ -59,12 +65,14 @@ function getSessionTicket(
 	host: string,
 	port: number,
 	offeredAlpn: readonly string[],
-	needVerified = true
+	needVerified = true,
+	// Defaults to the dial host for callers without a distinct SNI (the common case).
+	sniHost = host
 ): SessionTicket | null {
 	// Prefer the first protocol the ClientHello advertises, and fall back to a ticket issued
 	// on a connection with no ALPN (the historical behaviour for such tickets).
 	for (const alpn of [...offeredAlpn, '']) {
-		const key = ticketKey(host, port, alpn)
+		const key = ticketKey(host, port, alpn, sniHost)
 		const ticket = tickets.get(key)
 		if (!ticket) continue
 		const ttl = Math.min(ticket.lifetime * 1000, MAX_LIFETIME_MS)

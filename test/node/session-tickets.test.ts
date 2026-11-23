@@ -21,6 +21,7 @@ function ticket(overrides: Partial<Parameters<typeof storeSessionTicket>[2]> = {
 		ageAdd: 0,
 		receivedAt: Date.now(),
 		alpn: 'h2',
+		sniHost: HOST,
 		verified: true,
 		...overrides
 	}
@@ -46,6 +47,13 @@ it('returns a stored ticket for the matching host and ALPN', () => {
 	storeSessionTicket(HOST, PORT, ticket())
 	expect(getSessionTicket(HOST, PORT, ['h2'], true)?.alpn).toBe('h2')
 	expect(getSessionTicket(HOST, PORT, ['h2'], true)?.verified).toBe(true)
+})
+
+it('never serves a verified ticket to a different authenticated SNI', () => {
+	// Alt-Svc can point two origins at one dial host; the PSK was verified for a.example only.
+	storeSessionTicket(HOST, PORT, ticket({ sniHost: 'a.example' }))
+	expect(getSessionTicket(HOST, PORT, ['h2'], true, 'a.example')?.sniHost).toBe('a.example')
+	expect(getSessionTicket(HOST, PORT, ['h2'], true, 'b.example')).toBeNull()
 })
 
 it('expires tickets at ticket_lifetime and ignores lifetime zero', () => {
