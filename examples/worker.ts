@@ -163,7 +163,7 @@ async function timed(run: () => Promise<Response>): Promise<number> {
 }
 
 async function pooledSockets(stub: DurableObjectStub): Promise<number> {
-	const res = await stub.fetch('http://do/__stats')
+	const res = await stub.fetch('https://do/__stats')
 	return ((await res.json()) as { pooledSockets: number }).pooledSockets
 }
 
@@ -183,7 +183,7 @@ async function keepaliveRoute(query: URLSearchParams, env: Env): Promise<Respons
 	if (query.get('reset') === '1') probeQuery.set('reset', '1')
 	if (query.get('keepalive') === 'false') probeQuery.set('keepalive', 'false')
 
-	const res = await stub.fetch(`http://do${KEEPALIVE_DO_PATH}?${probeQuery}`)
+	const res = await stub.fetch(`https://do${KEEPALIVE_DO_PATH}?${probeQuery}`)
 	if (!res.ok) return new Response(await res.text(), { status: res.status })
 	const probe = (await res.json()) as KeepaliveProbe
 	const report: KeepaliveReport = {
@@ -215,7 +215,7 @@ export default {
 
 		if (path === '/run') {
 			const fast = new URL(req.url).searchParams.get('fast') === '1'
-			return stub.fetch(`http://do/__tour${fast ? '?fast=1' : ''}`)
+			return stub.fetch(`https://do/__tour${fast ? '?fast=1' : ''}`)
 		}
 
 		if (path === '/keepalive') return keepaliveRoute(new URL(req.url).searchParams, env)
@@ -255,7 +255,7 @@ export default {
 
 			// Each hellojs mode starts from an empty pool so the two runs are comparable.
 			if (mode !== 'native' && mode !== 'true') {
-				await stub.fetch('http://do/__clear')
+				await stub.fetch('https://do/__clear')
 				const noKeep: number[] = []
 				for (let i = 0; i < n; i++) {
 					noKeep.push(await timed(() => stub.fetch(new Request(url, { headers: doHeaders(null, false) }))))
@@ -269,7 +269,7 @@ export default {
 			}
 
 			if (mode !== 'native' && mode !== 'false') {
-				await stub.fetch('http://do/__clear')
+				await stub.fetch('https://do/__clear')
 				const keep: number[] = []
 				for (let i = 0; i < n; i++) {
 					keep.push(await timed(() => stub.fetch(new Request(url, { headers: doHeaders(null, true) }))))

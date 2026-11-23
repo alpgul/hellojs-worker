@@ -174,7 +174,8 @@ async function smoke(): Promise<void> {
 	t.on('ready', () => {})
 	t.on('error', (_err: Error) => {})
 	// @ts-expect-error resume is not a public TLS option
-	new TLS('example.com', 443, null, { resume: false })
+	const _badTlsOptions: ConstructorParameters<typeof TLS>[3] = { resume: false }
+	void _badTlsOptions
 
 	// Streaming response: the promise resolves at headers; `body` is a web ReadableStream.
 	const streamed = await request('https://example.com')

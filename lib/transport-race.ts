@@ -119,7 +119,7 @@ export function connectWithTransport(
 			if (errors.quic !== undefined && errors.tcp !== undefined) {
 				settled = true
 				cleanup()
-				reject(errors.quic)
+				reject(errors.quic instanceof Error ? errors.quic : new Error(String(errors.quic)))
 			}
 		}
 

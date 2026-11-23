@@ -91,7 +91,8 @@ export function proxySegment(proxy: ProxyLike | null | undefined): string {
 	const headers = proxy?.headers
 		? Object.entries(proxy.headers)
 				.map(([name, value]) => `${name.toLowerCase()}\u0000${String(value)}`)
-				.sort()
+				// Code-unit order keeps this cache-key canonical; localeCompare would depend on the runtime locale.
+				.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
 				.join('&')
 		: ''
 	const url = proxy?.url ?? ''
