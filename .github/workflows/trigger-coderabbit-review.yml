@@ -1,0 +1,52 @@
+name: Trigger CodeRabbit review
+
+# CodeRabbit does not review automatically on repos with fewer than 10 stars.
+# It posts a status comment containing a "Trigger review" task-list checkbox.
+# This workflow ticks that checkbox as soon as the bot posts it, which starts
+# the review through CodeRabbit's normal webhook path.
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  trigger-review:
+    if: >-
+      github.event.issue.pull_request != null &&
+      github.event.comment.user.login == 'coderabbitai[bot]' &&
+      contains(github.event.comment.body, 'Trigger review')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: coderabbit-trigger-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      - name: Tick the Trigger review checkbox
+        uses: actions/github-script@v7
+        with:
+          # GITHUB_TOKEN cannot edit comments owned by another GitHub App
+          # (CodeRabbit): the API returns 403 "Resource not accessible by
+          # integration". A user PAT can, so use the dedicated secret.
+          github-token: ${{ secrets.CODERABBIT_TRIGGER_TOKEN }}
+          script: |
+            const { owner, repo } = context.repo;
+            const comment_id = context.payload.comment.id;
+            const body = context.payload.comment.body;
+
+            // Only untick boxes whose own line also contains "Trigger review".
+            // The status comment has other checkboxes (e.g. Autofix) that must
+            // stay untouched.
+            const updated = body.replace(
+              /\[ \](?=[^\r\n]*Trigger review)/g,
+              '[x]'
+            );
+
+            if (updated === body) {
+              core.info('No unchecked Trigger review checkbox found; nothing to do.');
+              return;
+            }
+
+            await github.rest.issues.updateComment({ owner, repo, comment_id, body: updated });
+            core.info('Trigger review checkbox checked; CodeRabbit should start the review.');
