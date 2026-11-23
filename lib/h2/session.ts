@@ -349,6 +349,8 @@ class H2Session extends EventEmitter {
 	// HPACK tables. Encoder uses ours, decoder uses peer's. Capacities track each SETTINGS.
 	declare localHpackTable: hpack.DynamicTable
 	declare peerHpackTable: hpack.DynamicTable
+	// Encoder table-size changes awaiting the next header block (RFC 7541 §6.3).
+	declare _pendingHpackSizes: number[]
 	declare closed: boolean
 	declare destroyed: boolean
 	// Keepalive PING loop. Residential proxies + NAT boxes routinely blackhole idle TCP
@@ -361,7 +363,7 @@ class H2Session extends EventEmitter {
 	declare _pingOutstanding: { timer: ReturnType<typeof setTimeout> } | null
 	declare _keepaliveTimer: ReturnType<typeof setInterval> | null
 
-	constructor(transport: H2Transport, profile: Profile | null = null) {
+	constructor(transport: H2Transport, profile: Profile | null = null, alpsSettings: frame.SettingsPair[] = []) {
 		super()
 		this.transport = transport
 		this.profile = profile
@@ -384,6 +386,12 @@ class H2Session extends EventEmitter {
 
 		this.localHpackTable = new hpack.DynamicTable(65536)
 		this.peerHpackTable = new hpack.DynamicTable(4096)
+		this._pendingHpackSizes = []
+
+		// ALPS settings are authenticated by the TLS handshake and apply before the first
+		// stream. Do not ACK them or treat them as the wire SETTINGS frame — the real one may
+		// still arrive separately.
+		if (alpsSettings.length) this._applySettings(alpsSettings)
 
 		this.closed = false
 		this.destroyed = false
@@ -495,26 +503,49 @@ class H2Session extends EventEmitter {
 		this.emit('close')
 	}
 
+	// Shared by ALPS settings and wire SETTINGS. Returns the INITIAL_WINDOW_SIZE delta; the
+	// wire caller sends its ACK before pumping blocked uploads.
+	_applySettings(pairs: frame.SettingsPair[]): number {
+		const prevInitial = this.peerSettings[frame.SETTING.INITIAL_WINDOW_SIZE]
+		let encoderCapacity = this.localHpackTable.capacity
+		for (const [id, v] of pairs) {
+			this.peerSettings[id] = v
+			if (id === frame.SETTING.HEADER_TABLE_SIZE) {
+				// Peer decoder capacity for the headers WE encode. RFC 7541 §6.3 requires
+				// every change to be signalled at the head of the next header block; keep
+				// the smallest intervening limit as well as the final one.
+				this.localHpackTable.setCapacity(v)
+				if (v !== encoderCapacity) {
+					const seenMin = this._pendingHpackSizes.length ? Math.min(...this._pendingHpackSizes) : v
+					const min = Math.min(seenMin, v)
+					this._pendingHpackSizes = min === v ? [v] : [min, v]
+				}
+				encoderCapacity = v
+			}
+		}
+		// RFC 7540 §6.9.2: an INITIAL_WINDOW_SIZE change retroactively shifts every open
+		// stream's send window by the same delta (it may go negative; we just stall then).
+		const newInitial = this.peerSettings[frame.SETTING.INITIAL_WINDOW_SIZE]
+		const delta = prevInitial !== undefined && newInitial !== undefined ? newInitial - prevInitial : 0
+		if (delta !== 0) for (const s of this.streams.values()) s.sendWindow += delta
+		return delta
+	}
+
+	// Resume bodies queued behind a short window AFTER the SETTINGS ACK: _pump() emits 'drain'
+	// synchronously and a drain listener may send a request whose HPACK update must not exceed
+	// a limit the peer has not acknowledged yet.
+	_resumeBlockedStreams(delta: number): void {
+		if (delta <= 0) return
+		for (const s of [...this.streams.values()]) if (s._pendingLen > 0) s._pump()
+	}
+
 	_dispatch(f: frame.Frame): void {
 		switch (f.type) {
 			case frame.TYPE.SETTINGS: {
 				if (f.flags & frame.FLAG.ACK) break
-				const prevInitial = this.peerSettings[frame.SETTING.INITIAL_WINDOW_SIZE]
-				for (const [id, v] of frame.parseSettings(f.payload)) {
-					this.peerSettings[id] = v
-					if (id === frame.SETTING.HEADER_TABLE_SIZE) {
-						// Peer is telling us their decoder capacity for the headers WE encode.
-						this.localHpackTable.setCapacity(v)
-					}
-				}
-				// RFC 7540 §6.9.2: an INITIAL_WINDOW_SIZE change retroactively shifts every open
-				// stream's send window by the same delta (it may go negative; we just stall then).
-				const newInitial = this.peerSettings[frame.SETTING.INITIAL_WINDOW_SIZE]
-				if (prevInitial !== undefined && newInitial !== undefined && newInitial !== prevInitial) {
-					const delta = newInitial - prevInitial
-					for (const s of this.streams.values()) s.sendWindow += delta
-				}
+				const windowDelta = this._applySettings(frame.parseSettings(f.payload))
 				this._sendFrame(frame.TYPE.SETTINGS, frame.FLAG.ACK, 0, Buffer.alloc(0))
+				this._resumeBlockedStreams(windowDelta)
 				if (!this._sawSettings) {
 					this._sawSettings = true
 					this.emit('connect')
@@ -645,7 +676,8 @@ class H2Session extends EventEmitter {
 			} else if (Array.isArray(v)) for (const vv of v) list.push([k, vv])
 			else list.push([k, v])
 		}
-		const block = hpack.encode(list, this.localHpackTable)
+		const block = hpack.encode(list, this.localHpackTable, this._pendingHpackSizes)
+		this._pendingHpackSizes.length = 0
 		const endStream = !!opts.endStream
 		// Remembered so the send pump knows a trailing END_STREAM is legal (vs. HEADERS already ended).
 		stream._headersEndStream = endStream

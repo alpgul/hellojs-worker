@@ -111,6 +111,7 @@ const EXTENSION_NAME_TO_ID: Record<string, number> = {
 	psk_key_exchange_modes: 45,
 	key_share: 51,
 	application_settings: 17613, // 0x44cd (ALPS v1)
+	application_settings_old: 17513, // 0x4469 (legacy ALPS codepoint in BoringSSL)
 	application_settings_v2: 17517, // 0x446d (ALPS v2; if ever seen)
 	extensionEncryptedClientHello: 65037, // 0xfe0d
 	extensionRenegotiationInfo: 65281 // 0xff01
@@ -262,6 +263,18 @@ function extensionIdFromLabel(label: string): IdResult {
 	throw new Error(`fromPeet: unknown extension ${JSON.stringify(label)}`)
 }
 
+const ALPS_CODEPOINTS = new Set([17613, 17513, 17517])
+
+// ALPS labels carry their real codepoint in the suffix: peet prints the legacy extension as
+// "application_settings (17513)", which the bare-name map would otherwise resolve to 17613.
+// An explicit suffix must win so a capture containing both ALPS ids stays distinct in
+// extensionOrder (and therefore in the emitted ClientHello).
+function alpsIdFromLabel(label: string): IdResult {
+	const explicit = extractNum(label) ?? extractHex(label)
+	if (explicit != null && ALPS_CODEPOINTS.has(explicit)) return { id: explicit }
+	return extensionIdFromLabel(label)
+}
+
 function fromPeet(json: PeetJson, opts: { name?: string } = {}): Profile {
 	if (!json || !json.tls || !json.http2) {
 		throw new Error('fromPeet: input does not look like a peet.ws response (missing tls / http2)')
@@ -304,7 +317,8 @@ function fromPeet(json: PeetJson, opts: { name?: string } = {}): Profile {
 	// need their own real builder (this map isn't consulted for the well-known IDs above).
 	const rawExtensionBodies: Record<number, Buffer> = {}
 	for (const ext of extensions) {
-		const r = extensionIdFromLabel(ext.name)
+		const base = extensionIdFromLabel(ext.name)
+		const r = !base.grease && ALPS_CODEPOINTS.has(base.id) ? alpsIdFromLabel(ext.name) : base
 		if (r.grease) useGrease = true
 		if (!r.grease && INTERACTIVE_EXT_IDS.has(r.id)) continue // drop PSK / early_data
 		extensionOrder.push(r)
@@ -386,8 +400,14 @@ function fromPeet(json: PeetJson, opts: { name?: string } = {}): Profile {
 	}
 
 	// ALPS — peet shows it under the trailing "(17613)" or as "application_settings".
-	const alpsExt = findExt((id) => id === 17613 || id === 17517)
-	const alpsExtensionType = alpsExt ? (extractNum(alpsExt.name) ?? extractHex(alpsExt.name) ?? 17613) : null
+	// Also accept the legacy 17513 (0x4469) codepoint seen in older Chrome captures.
+	const alpsExt = findExt((id) => ALPS_CODEPOINTS.has(id))
+	const alpsId = alpsExt ? alpsIdFromLabel(alpsExt.name) : null
+	// An explicit "(17513)" / "(0x4469)" suffix wins over the bare-name mapping, which
+	// would otherwise resolve "application_settings (17513)" to the current 17613.
+	const alpsExtensionType = alpsExt
+		? (extractNum(alpsExt.name) ?? extractHex(alpsExt.name) ?? alpsId?.id ?? 17613)
+		: null
 	const alpsProtocols = alpsExt ? [...(alpsExt.protocols || ['h2'])] : null
 
 	// compress_certificate (27)
