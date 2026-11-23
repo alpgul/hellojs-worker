@@ -19,13 +19,13 @@ You can install straight from the GitHub repository instead of npm. Pin the
 install to a release tag so every checkout gets the same code:
 
 ```bash
-npm install github:alpgul/hellojs-worker#v0.7.1
+npm install github:alpgul/hellojs-worker#v0.7.2
 ```
 
 ```json
 {
 	"dependencies": {
-		"@unreleased/hellojs": "github:alpgul/hellojs-worker#v0.7.1"
+		"@unreleased/hellojs": "github:alpgul/hellojs-worker#v0.7.2"
 	}
 }
 ```
@@ -48,8 +48,8 @@ git ls-remote --tags https://github.com/alpgul/hellojs-worker.git
 yarn/pnpm equivalents:
 
 ```bash
-yarn add github:alpgul/hellojs-worker#v0.7.1
-pnpm add github:alpgul/hellojs-worker#v0.7.1
+yarn add github:alpgul/hellojs-worker#v0.7.2
+pnpm add github:alpgul/hellojs-worker#v0.7.2
 ```
 
 ```js
