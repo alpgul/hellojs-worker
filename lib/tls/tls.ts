@@ -538,7 +538,7 @@ class TLS extends EventEmitter {
 				}
 				socks5Connect({
 					proxyHost: proxyUrl.hostname,
-					proxyPort: parseInt(proxyUrl.port || '1080', 10),
+					proxyPort: Number.parseInt(proxyUrl.port || '1080', 10),
 					username: proxyUrl.username ? decodeUserinfo(proxyUrl.username) : null,
 					password: proxyUrl.password ? decodeUserinfo(proxyUrl.password) : null,
 					destHost: this.host,

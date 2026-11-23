@@ -53,7 +53,7 @@ function buildConnectRequest(destHost: string, destPort: number): Buffer {
 	const ipFamily = net.isIP(destHost)
 	if (ipFamily === 4) {
 		atyp = 0x01
-		addr = Buffer.from(destHost.split('.').map((n) => parseInt(n, 10)))
+		addr = Buffer.from(destHost.split('.').map((n) => Number.parseInt(n, 10)))
 	} else if (ipFamily === 6) {
 		atyp = 0x04
 		const parts = destHost.split(':')

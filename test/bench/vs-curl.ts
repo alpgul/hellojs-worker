@@ -149,7 +149,7 @@ async function detectCurl(bin: string): Promise<CurlInfo> {
 	const r = await runProcess(bin, ['-V'])
 	if (r.code !== 0) throw new Error(`cannot run ${bin} -V: ${trim(r.stderr) || `exit ${r.code}`}`)
 	const version = r.stdout.match(/^curl (\S+)/m)?.[1] ?? 'unknown'
-	const features = r.stdout.match(/^Features:\s*(.*)$/m)?.[1] ?? ''
+	const features = r.stdout.match(/^Features:(.*)$/m)?.[1]?.trim() ?? ''
 	const [major = 0] = version.split('.').map((part) => Number.parseInt(part, 10))
 	const hasH3 = /\bHTTP3\b/.test(features)
 	// --http3-only landed in curl 8.0; older h3 builds only have --http3 (which may fall back).

@@ -232,7 +232,7 @@ class H3Client {
 
 		const emitHeaders = (): boolean => {
 			if (headersEmitted) return true
-			const status = parseInt(respHeaders[':status'] || '0', 10)
+			const status = Number.parseInt(respHeaders[':status'] || '0', 10)
 			if (!status) {
 				// A field section after a 1xx must be the final HEADERS; without :status it is
 				// malformed, not a legitimate 1xx-only response.

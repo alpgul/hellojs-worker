@@ -406,7 +406,7 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 	const url = buildUrl(opts)
 	const method = (opts.method || 'GET').toUpperCase()
 	const host = url.hostname
-	const port = url.port ? parseInt(url.port, 10) : 443
+	const port = url.port ? Number.parseInt(url.port, 10) : 443
 	const _reqId = opts._reqId || (opts._reqId = nextRequestId())
 	const _t0 = Date.now()
 	observability.safeEmit('request:start', {
@@ -823,7 +823,7 @@ function performH2(
 		let stream: ProgressiveStream | null = null
 
 		req.on('response', (h: H1Headers) => {
-			const status = parseInt(String(h[':status'] ?? 0), 10)
+			const status = Number.parseInt(String(h[':status'] ?? 0), 10)
 			// 1xx informational responses (100 Continue, 103 Early Hints) are not final.
 			// Keep waiting for the real HEADERS instead of resolving a clamped 200.
 			if (status >= 100 && status < 200) return
@@ -1109,7 +1109,7 @@ function performH1(
 				fail('bad status line', 'EBADRESP')
 				return 'error'
 			}
-			const st = parseInt(m[2], 10)
+			const st = Number.parseInt(m[2], 10)
 			// 1xx informational responses carry no body; discard the interim head and parse the
 			// next one from the stream (RFC 7230 3.3.3 rule 1 — e.g. 100 Continue, 103 Early Hints).
 			if (st >= 100 && st < 200) {
@@ -1146,7 +1146,7 @@ function performH1(
 					return 'error'
 				}
 				mode = 'length'
-				contentLength = parseInt(s, 10)
+				contentLength = Number.parseInt(s, 10)
 			} else {
 				mode = 'eof' // body delimited by connection close
 			}
