@@ -202,19 +202,16 @@ if [[ ! "$PR_URL" =~ ^https:// ]]; then
   exit 1
 fi
 
-# Disabled on purpose: git pp stops at PR creation so a human reviews, merges and
-# deletes the head branch. Uncomment this block only if that policy changes.
-# PR_NUMBER="${PR_URL##*/}"
-# if [[ ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
-#   echo "error: could not determine PR number from $PR_URL" >&2
-#   exit 1
-# fi
-#
-# echo "Enabling rebase auto-merge for PR #$PR_NUMBER..."
-# gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --rebase
-#
-# git fetch "$REMOTE" "$BASE" --quiet
-# git reset --hard "$REMOTE/$BASE" --quiet
+# Auto-merge stays disabled: a human reviews and merges the PR. The commits are already
+# on the pushed head branch, so return the local base to the remote tip for a clean start.
+# Re-check cleanliness here: the AI step above is slow enough for someone to edit files.
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "warning: working tree changed during PR creation; skipping base reset" >&2
+else
+  git fetch "$REMOTE" "$BASE" --quiet
+  git reset --hard "$REMOTE/$BASE" --quiet
+  echo "Local $BASE reset to $REMOTE/$BASE"
+fi
 
 echo "PR created: $PR_URL"
 echo "Head branch: $BRANCH"
