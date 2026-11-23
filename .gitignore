@@ -2,6 +2,7 @@ node_modules/
 .wrangler/
 .sonarlint/*
 package-lock.json.bak
+coverage/
 
 # Captures, scratch, generated keys
 test/bench/.out/

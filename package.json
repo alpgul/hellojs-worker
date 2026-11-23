@@ -90,6 +90,7 @@
     "@cloudflare/workers-types": "^5.20261123.1",
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.19.2",
+    "@vitest/coverage-v8": "^5.1.1",
     "axios": "^1.21.1",
     "eslint": "^10.15.0",
     "eslint-config-prettier": "^10.1.8",

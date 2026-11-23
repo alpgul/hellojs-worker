@@ -1,6 +1,7 @@
 # @unreleased/hellojs
 
 [![Quality gate status](https://sonarcloud.io/api/project_badges/measure?project=alpgul_hellojs-worker&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=alpgul_hellojs-worker)
+[![codecov](https://codecov.io/gh/alpgul/hellojs-worker/graph/badge.svg)](https://codecov.io/gh/alpgul/hellojs-worker)
 
 A Node.js HTTP client whose on-the-wire TLS handshake, HTTP/2 setup, and
 HTTP/3 (QUIC) flight produces **the same JA4 / Akamai / peetprint
