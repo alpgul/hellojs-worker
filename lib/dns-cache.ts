@@ -6,8 +6,9 @@
 // connections inside one process without pinning an IP for longer than DNS-based load balancing
 // can tolerate. Failures are never cached.
 //
-// node:dns is resolved lazily: on workerd it is absent, dnsCacheAvailable() answers false, and
-// the TLS/QUIC layers keep connecting by hostname exactly as before.
+// node:dns is resolved lazily and optionally: workerd implements it over DNS-over-HTTPS, where
+// every lookup is a subrequest (hence the cache below), while a runtime that lacks the module
+// keeps connecting by hostname exactly as before.
 
 import * as net from 'node:net'
 

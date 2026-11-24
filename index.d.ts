@@ -11,15 +11,7 @@ import type { Duplex } from 'node:stream'
 
 /** Methods registered with IANA (RFC 9110 §9, RFC 5789). */
 export type RegisteredHttpMethod =
-	| 'GET'
-	| 'HEAD'
-	| 'POST'
-	| 'PUT'
-	| 'DELETE'
-	| 'CONNECT'
-	| 'OPTIONS'
-	| 'TRACE'
-	| 'PATCH'
+	'GET' | 'HEAD' | 'POST' | 'PUT' | 'DELETE' | 'CONNECT' | 'OPTIONS' | 'TRACE' | 'PATCH'
 
 /**
  * The method may be given in either case; `request()` uppercases it before use. The type
@@ -257,6 +249,21 @@ export interface RequestOptions {
 /** Fetch-style init accepted as the second argument. */
 export type FetchInit = RequestOptions
 
+/** One slot of the process-wide proxy pool, as reported by `request.getProxyList()`. */
+export interface ProxyPoolEntry {
+	/** Normalised proxy URL — the pool's identity for this proxy. */
+	url: string
+	/** Requests this proxy carried to a response. */
+	success: number
+	/** Requests whose connection through this proxy failed before the response. */
+	fail: number
+	/** Ranking score in `0..1` (Wilson lower bound). `0.5` while the slot has no history. */
+	score: number
+	lastOutcome: 'ok' | 'fail' | null
+	/** Derived, never probed: a slot stays live until its most recent request failed. */
+	live: boolean
+}
+
 export interface PoolConfig {
 	maxSockets: number
 	maxPerOrigin: number
@@ -285,6 +292,9 @@ export type HellojsErrorCode =
 	| 'ECONNRESET'
 	| 'ENOTFOUND'
 	| 'EPROXY'
+	| 'ENOPROXY'
+	| 'EPROXYFAILED'
+	| 'ECFIPBLOCKED'
 	| 'EUDPUNAVAILABLE'
 	| 'ETLS_ALERT'
 	| 'ETLS_HANDSHAKE'
@@ -385,6 +395,22 @@ export interface RequestFn extends Invokable, Shortcuts {
 	/** Close and forget every pooled h2/h3/h1 connection (test/shutdown helper). */
 	clearPool(reason?: string): void
 
+	/**
+	 * Replace the process-wide proxy pool. Hosts that resolve only to Cloudflare-owned addresses
+	 * are dialled through this pool when the request does not name a proxy of its own.
+	 * Process-wide on Node; per-isolate on Workers.
+	 */
+	setProxyPool(proxies?: ProxyOptions[]): void
+
+	/** Add one proxy, keeping the tally of a URL that is already in the pool. */
+	addProxy(proxy: ProxyOptions): void
+
+	/** Remove a proxy by URL. Returns whether anything was removed. */
+	removeProxy(url: string): boolean
+
+	/** The pool as the caller sees it, best score first. */
+	getProxyList(): ProxyPoolEntry[]
+
 	/** Request lifecycle events — see [Observability](README.md#observability). */
 	observability: Observability
 
@@ -400,11 +426,7 @@ export default request
 
 /** Lifecycle events the library emits — see README → Observability. */
 export type ObservabilityEvent =
-	| 'request:start'
-	| 'request:headersSent'
-	| 'request:firstByte'
-	| 'request:end'
-	| 'request:error'
+	'request:start' | 'request:headersSent' | 'request:firstByte' | 'request:end' | 'request:error'
 
 export interface ProfileRegistry {
 	get(name?: ProfileName): unknown
@@ -428,6 +450,10 @@ export function setTrustedRoots(pems: string[]): void
 export function clearSessionTickets(): void
 export function setPoolConfig(config?: Partial<PoolConfig>): void
 export function clearPool(reason?: string): void
+export function setProxyPool(proxies?: ProxyOptions[]): void
+export function addProxy(proxy: ProxyOptions): void
+export function removeProxy(url: string): boolean
+export function getProxyList(): ProxyPoolEntry[]
 
 export interface TLSOptions {
 	verifyTLS?: boolean

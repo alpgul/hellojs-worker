@@ -553,6 +553,64 @@ await request('https://example.com', { proxy: { url: 'socks5://proxy:1080' } }) 
 `socks5h://` is accepted as an alias. We always do remote DNS resolution (the proxy
 resolves the hostname), not client-side, regardless of the scheme.
 
+### Automatic routing for Cloudflare-owned hosts
+
+A Worker cannot open an outbound TCP socket to Cloudflare's own IP ranges. A host whose
+A/AAAA records all fall inside those ranges is therefore unreachable on the direct path,
+no matter how many times the request is retried — the platform refuses the connection.
+
+hellojs resolves the name, tests the addresses against the published ranges, and — when
+`proxy` is omitted — sends the request through a proxy pool instead. The decision is made
+before any socket is opened, so a hopeless direct dial is never attempted and nothing is
+raced:
+
+```js
+import request from 'hellojs'
+
+request.setProxyPool([
+	{ url: 'http://203.0.113.10:8080' },
+	{ url: 'http://203.0.113.11:8080', authorization: 'Basic dXNlcjpwYXNz' }
+])
+
+await request('https://cf-fronted.example') // every address is Cloudflare-owned → pool
+await request('https://example.com') // outside the ranges → direct, as before
+```
+
+`proxy` decides who is in charge:
+
+| `proxy`   | Behaviour                                                                          |
+| --------- | ---------------------------------------------------------------------------------- |
+| `{ url }` | Used exactly as given. The pool is never consulted, and the choice is not changed. |
+| `null`    | Direct, even when the host is Cloudflare-owned.                                    |
+| omitted   | Direct, unless every resolved address is Cloudflare-owned — then the pool.         |
+
+One automatic reroute is allowed on the route above: a Cloudflare-blocked direct dial
+picks a proxy, and a failed proxy picks a different one. The CONNECT tunnel is
+transparent, so the TLS fingerprint is the profile's own, end to end.
+
+```js
+request.addProxy({ url: 'http://203.0.113.12:8080' })
+request.getProxyList() // [{ url, success, fail, score, lastOutcome, live }]
+request.removeProxy('http://203.0.113.12:8080')
+```
+
+Selection is weighted by the Wilson lower bound of each proxy's success ratio, so a proxy
+with more evidence is picked more often without ever absorbing the whole pool's traffic —
+and a proxy that loses its first requests is still reachable through the weight floor. A
+`403` from an origin counts against that host only, not against the proxy everywhere.
+`live` is derived, never probed: a slot stays live until its most recent request failed.
+
+The pool is in memory and process-wide. On Node that means the whole process; on Workers
+the module scope is per-isolate, so `setProxyPool()` at module scope is the portable way to
+populate it (every isolate rebuilds the same list), while a runtime `addProxy()` reaches
+only the isolate that served the call. Applications that need one shared, mutable pool keep
+it in a Durable Object and call `setProxyPool()` there.
+
+With an empty pool the direct path is untouched and the runtime's own refusal surfaces as
+`ENOPROXY`. When the pool is tried and cannot deliver, the request rejects with
+`EPROXYFAILED`; a Cloudflare-owned target that no route can reach rejects with
+`ECFIPBLOCKED`.
+
 ---
 
 ## Observability hooks
@@ -1361,15 +1419,15 @@ try {
 }
 ```
 
-| Category    | Codes                                                                                                                                           | Meaning                                                                                                          |
-| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `usage`     | `EBADOPTS`, `EBADARG`, `EHEADERFIXED`                                                                                                           | Caller passed bad options (programmer error)                                                                     |
-| `transport` | `ECONNREFUSED`, `ECONNRESET`, `ENOTFOUND`, `EPROXY`, `EUDPUNAVAILABLE`, `ETOOMANYREDIRECTS`                                                     | TCP / DNS / proxy issues, no UDP provider, or a redirect chain exceeding the 20-hop Fetch limit                  |
-| `tls`       | `ETLS_ALERT`, `ETLS_HANDSHAKE`, `ETLS_CERT_VERIFY`, `ETLS_VERSION`, `ECERTPARSE`, `ECERTVALIDATION`, `ECERTVERIFY`, `ETLSPSK`, `ETLS12`, `EHRR` | Handshake, record-layer or certificate problem                                                                   |
-| `protocol`  | `EH2STREAM`, `EH2GOAWAY`, `EH2COMPRESS`, `EH2KEEPALIVE`, `EH3STREAM`, `EH3CONN`, `EH3PARSE`, `EPROTO`                                           | h2 / h3 / QUIC protocol-level failure                                                                            |
-| `http`      | `EHTTP`, `EBADRESP`, `EDECOMPRESS`                                                                                                              | HTTP policy error (e.g. `redirect: 'error'`), parser failure, or content-encoding error                          |
-| `body`      | `EBODYSTREAM`                                                                                                                                   | Request body stream errored mid-upload                                                                           |
-| `timeout`   | `ETIMEDOUT`                                                                                                                                     | A fixed connect / handshake phase budget was exceeded (`signal` aborts are reported through the signal's reason) |
+| Category    | Codes                                                                                                                                           | Meaning                                                                                                                              |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `usage`     | `EBADOPTS`, `EBADARG`, `EHEADERFIXED`                                                                                                           | Caller passed bad options (programmer error)                                                                                         |
+| `transport` | `ECONNREFUSED`, `ECONNRESET`, `ENOTFOUND`, `EPROXY`, `ENOPROXY`, `EPROXYFAILED`, `ECFIPBLOCKED`, `EUDPUNAVAILABLE`, `ETOOMANYREDIRECTS`         | TCP / DNS / proxy issues, no route to a Cloudflare-owned host, no UDP provider, or a redirect chain exceeding the 20-hop Fetch limit |
+| `tls`       | `ETLS_ALERT`, `ETLS_HANDSHAKE`, `ETLS_CERT_VERIFY`, `ETLS_VERSION`, `ECERTPARSE`, `ECERTVALIDATION`, `ECERTVERIFY`, `ETLSPSK`, `ETLS12`, `EHRR` | Handshake, record-layer or certificate problem                                                                                       |
+| `protocol`  | `EH2STREAM`, `EH2GOAWAY`, `EH2COMPRESS`, `EH2KEEPALIVE`, `EH3STREAM`, `EH3CONN`, `EH3PARSE`, `EPROTO`                                           | h2 / h3 / QUIC protocol-level failure                                                                                                |
+| `http`      | `EHTTP`, `EBADRESP`, `EDECOMPRESS`                                                                                                              | HTTP policy error (e.g. `redirect: 'error'`), parser failure, or content-encoding error                                              |
+| `body`      | `EBODYSTREAM`                                                                                                                                   | Request body stream errored mid-upload                                                                                               |
+| `timeout`   | `ETIMEDOUT`                                                                                                                                     | A fixed connect / handshake phase budget was exceeded (`signal` aborts are reported through the signal's reason)                     |
 
 Retries (when `opts.retry.limit > 0` is set and the method is in
 `opts.retry.methods`) automatically retry these codes:
@@ -1561,6 +1619,9 @@ cold-connect gains and ~45% of the concurrent-throughput gains came from.
 - **OCSP:** stapled responses are parsed + verified. We don't fetch OCSP responses
   out-of-band when the server doesn't staple.
 - **HTTP/2:** Server push not supported (we set `ENABLE_PUSH=0`).
+- **Cloudflare-owned targets:** a Worker refuses outbound TCP to Cloudflare's IP ranges, so a
+  host behind Cloudflare is reachable only through a proxy. The pool routes those requests, but
+  it ships empty — supplying proxies is the caller's job.
 - **HTTP/3:** see [HTTP/3 → What's not implemented](#whats-not-implemented).
   Missing: client-initiated key updates, CUBIC/BBR, QPACK encoder dynamic table, full
   connection migration (socket rebind), 0-RTT-Protected packets.
