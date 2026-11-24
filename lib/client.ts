@@ -26,14 +26,19 @@ import {
 	rememberAltSvc,
 	selectAltSvc
 } from './alt-svc.ts'
+import { getCfRanges } from './cf-ranges.ts'
 import { Jar } from './cookies.ts'
+import { resolveHost } from './dns-cache.ts'
 import { HellojsError, wrap as wrapError } from './errors.ts'
 import { udpAvailable } from './h3/udp.ts'
 import { assertProxyConnectHeaders, buildH2Headers, buildH1Headers, mergeProfileHeaders } from './headers.ts'
 import { observability, nextRequestId } from './observability.ts'
 import * as pool from './pool.ts'
 import * as profileRegistry from './profiles/index.ts'
+import { blockedTargetError, isDisallowedTarget, rerouteProxy, resolveAutoProxy } from './proxy-route.ts'
+import { proxyKeyOf, recordProxyOutcome } from './proxy-store.ts'
 import { startProgressiveResponse, type ProgressiveStream } from './response-stream.ts'
+import { planRoute } from './route.ts'
 import { statusTextFor } from './status-text.ts'
 import { summarizeConn } from './tls-summary.ts'
 import { canUseQuic, connectWithTransport, type TransportHint } from './transport-race.ts'
@@ -127,6 +132,12 @@ type NormalizedRequestOptions = Omit<RequestOptions, 'headers'> & {
 	_reqId?: number
 	_redirected?: boolean
 	_redirectCount?: number
+	/** Internal: the caller left `proxy` undefined, so this request may use/replace the pool. */
+	_autoProxy?: boolean
+	/** Internal: generation of the auto-selected pool slot, for stale-outcome protection. */
+	_proxyGeneration?: number
+	/** Internal: whether this hop already recorded a proxy outcome. */
+	_proxyOutcomeBooked?: boolean
 }
 
 // `HeaderMap` is intentionally richer than the cross-runtime `HeadersInit`. Only the internals
@@ -425,6 +436,17 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 					: null
 	})
 	const profile = opts.profile || 'chrome147-mac'
+	// Auto routing: `proxy` omitted means "decide for me". The decision is recomputed per hop so a
+	// redirect to a different host cannot inherit a stale proxy. `opts.proxy` holds the selected
+	// proxy for this hop; `_autoProxy` preserves the caller's "decide for me" intent across hops
+	// and outer retries.
+	const autoRouting = opts.proxy === undefined || opts._autoProxy === true
+	if (autoRouting) {
+		opts._autoProxy = true
+		const routed = await resolveAutoProxy(host, { signal: opts.signal })
+		opts.proxy = routed?.proxy ?? null
+		opts._proxyGeneration = routed?.generation
+	}
 	// Resolve to the actual profile object for header / pseudo-header / priority building.
 	// Tolerate unknown names (caller may have a custom profile registered elsewhere) — the TLS
 	// layer will throw a clearer error if the name truly isn't valid.
@@ -443,8 +465,8 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 	let alt = opts.proxy ? null : selectAltSvc(origin, host, port)
 	// An h3 alternative is useless without a datagram socket; fall back to the normal race.
 	if (alt?.hint === 'h3' && !udpAvailable()) alt = null
-	const dialHost = alt?.host ?? host
-	const dialPort = alt?.port ?? port
+	let dialHost = alt?.host ?? host
+	let dialPort = alt?.port ?? port
 	const identityFor = (targetHost: string, targetPort: number): PoolIdentity => ({
 		originHost: host,
 		originPort: port,
@@ -465,31 +487,85 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 		}
 	}
 	if (!conn) {
-		try {
-			const result = await connectWithTransport(
-				{
-					host: dialHost,
-					port: dialPort,
-					sniHost: host,
-					profile,
-					proxy: opts.proxy,
-					verifyTLS: opts.verifyTLS !== false,
-					signal: opts.signal
-				},
-				alt?.hint ?? null,
-				origin,
-				{ host, port }
-			)
-			conn = result.conn
-			usedAlternative = result.usedAlternative
-			// A failed h3 hint falls back to the origin, so the socket must be pooled under
-			// the origin dial target rather than the dead alternative's key.
-			if (!usedAlternative) identity = identityFor(host, port)
-		} catch (e) {
-			// A cached alternative may have gone away: mark it broken and let the retry use TCP.
-			// An explicit abort says nothing about the endpoint's health.
-			if (alt?.hint === 'h3' && !opts.signal?.aborted) markAltSvcBroken(origin, 'h3')
-			throw e
+		// At most one automatic reroute: a Cloudflare-blocked direct dial picks a proxy, a dead
+		// proxy picks a different one. A caller-supplied proxy is never second-guessed — when the
+		// caller names a proxy, its failure is the answer.
+		const tried = new Set<string>()
+		if (opts.proxy) {
+			try {
+				tried.add(proxyKeyOf(opts.proxy))
+			} catch {}
+		}
+		for (let attempt = 0; ; attempt++) {
+			try {
+				const result = await connectWithTransport(
+					{
+						host: dialHost,
+						port: dialPort,
+						sniHost: host,
+						profile,
+						proxy: opts.proxy,
+						verifyTLS: opts.verifyTLS !== false,
+						signal: opts.signal
+					},
+					alt?.hint ?? null,
+					origin,
+					{ host, port }
+				)
+				conn = result.conn
+				usedAlternative = result.usedAlternative
+				// A failed h3 hint falls back to the origin, so the socket must be pooled under
+				// the origin dial target rather than the dead alternative's key.
+				if (!usedAlternative) identity = identityFor(host, port)
+				break
+			} catch (e) {
+				// A cached alternative may have gone away: mark it broken and let the retry use TCP.
+				// An explicit abort says nothing about the endpoint's health.
+				if (alt?.hint === 'h3' && !opts.signal?.aborted) markAltSvcBroken(origin, 'h3')
+
+				const blocked = isDisallowedTarget(e)
+				// Book the failure here: the proxy that just died is the only one that knows it, and
+				// a reroute would overwrite `opts.proxy` before the retry layer above could see it.
+				if (opts.proxy && !opts.signal?.aborted && opts._autoProxy === true)
+					bookProxyOutcome(opts, host, 'fail')
+				// Only the automatic route reroutes. `proxy: null` means the caller has opted out of
+				// proxies for this request, and a caller-supplied proxy keeps its own verdict.
+				let canReroute =
+					opts._autoProxy === true &&
+					attempt === 0 &&
+					!opts.signal?.aborted &&
+					(blocked || opts.proxy != null)
+				if (canReroute && blocked && opts.proxy == null) {
+					try {
+						const addrs = await resolveHost(host)
+						const ranges = await getCfRanges({ signal: opts.signal })
+						canReroute = planRoute(addrs, ranges) === 'proxy'
+					} catch {
+						canReroute = false
+					}
+				}
+				const next = canReroute ? rerouteProxy(host, tried) : null
+				if (!next) {
+					if (blocked && opts._autoProxy === true) throw blockedTargetError(host, e)
+					// Every route the pool offered has now been tried; surface that instead of the
+					// last proxy's private error. A caller-supplied proxy keeps its own diagnosis.
+					if (opts._autoProxy === true && tried.size > 0) {
+						throw new HellojsError(`every proxy tried for ${host} failed`, 'EPROXYFAILED', e)
+					}
+					throw e
+				}
+
+				// Rerouted to a new proxy: drop any Alt-Svc detour and pool identity built for the
+				// previous route before dialling again.
+				opts.proxy = next.proxy
+				opts._proxyGeneration = next.generation
+				opts._proxyOutcomeBooked = undefined
+				tried.add(proxyKeyOf(next.proxy))
+				alt = null
+				dialHost = host
+				dialPort = port
+				identity = identityFor(host, port)
+			}
 		}
 		if (opts.keepalive !== false && conn.alpn && conn.alpn !== 'http/1.1') {
 			pool.register(conn, keyFor(identity, conn.alpn))
@@ -609,6 +685,9 @@ async function performRequest(opts: NormalizedRequestOptions): Promise<Response>
 		}
 		return await transport
 	} catch (e) {
+		if (!opts.signal?.aborted && opts._autoProxy === true && !opts._proxyOutcomeBooked) {
+			bookProxyOutcome(opts, hostOfUrl(opts.url), 'fail')
+		}
 		// Synchronous setup failures (e.g. a header builder throwing) must not leak the socket.
 		// A pooled socket survives with its slot returned so sibling streams are unaffected;
 		// one-shot sockets close. close() is idempotent.
@@ -662,6 +741,7 @@ function performH3(
 					buffering = true
 					return
 				}
+				bookProxyOutcome(opts, hostOfUrl(opts.url), s === 403 || s === 451 ? 'blocked' : 'ok')
 				stream = startProgressiveResponse({
 					status: s,
 					headers: h,
@@ -851,6 +931,13 @@ function performH2(
 				bufferedHeaders = h
 				return
 			}
+			if (opts.proxy && opts._autoProxy === true)
+				recordProxyOutcome(
+					opts.proxy,
+					hostOfUrl(opts.url),
+					status === 403 || status === 451 ? 'blocked' : 'ok',
+					opts._proxyGeneration
+				)
 			stream = startProgressiveResponse({
 				status,
 				headers: h,
@@ -1367,6 +1454,7 @@ function performH1(
 				buffering = true
 				return
 			}
+			bookProxyOutcome(opts, hostOfUrl(opts.url), status === 403 || status === 451 ? 'blocked' : 'ok')
 			stream = startProgressiveResponse({
 				status,
 				statusText,
@@ -1521,8 +1609,16 @@ function responseMeta(opts: NormalizedRequestOptions): { url: string; redirected
 	}
 }
 
+function bookProxyOutcome(opts: NormalizedRequestOptions, host: string, outcome: 'ok' | 'fail' | 'blocked'): void {
+	if (opts._proxyOutcomeBooked || opts._autoProxy !== true || !opts.proxy) return
+	opts._proxyOutcomeBooked = true
+	recordProxyOutcome(opts.proxy, host, outcome, opts._proxyGeneration)
+}
+
 function handleResponse({ status, statusText, headers, raw, opts, resolve, reject }: HandleResponseInput): void {
 	const res = buildResponse({ status, statusText, headers, body: raw, ...responseMeta(opts) })
+	const hopHost = hostOfUrl(opts.url)
+	bookProxyOutcome(opts, hopHost, status === 403 || status === 451 ? 'blocked' : 'ok')
 
 	if (opts.redirect === 'error' && status >= 300 && status < 400 && headers.location) {
 		return reject(new HellojsError(`redirect not allowed with redirect: 'error' (HTTP ${status})`, 'EHTTP'))
@@ -1544,7 +1640,9 @@ function handleResponse({ status, statusText, headers, raw, opts, resolve, rejec
 			headers: opts.headers,
 			url: target.toString(),
 			_redirectCount: count + 1,
-			_redirected: true
+			_redirected: true,
+			_proxyOutcomeBooked: undefined,
+			_proxyGeneration: undefined
 		}
 		const method = (opts.method || 'GET').toUpperCase()
 		// RFC 9110 §15.4: 303 → GET. Browsers also downgrade a POST to GET on 301/302.
@@ -1610,6 +1708,15 @@ function assertNoLegacyResponseOptions(opts: RequestOptions): void {
 	}
 }
 
+/** Hostname of a request URL, for proxy bookkeeping. Raw string on a parse error. */
+function hostOfUrl(raw: string): string {
+	try {
+		return new URL(raw).hostname
+	} catch {
+		return raw
+	}
+}
+
 async function performWithRetry(opts: NormalizedRequestOptions): Promise<Response> {
 	assertNoLegacyResponseOptions(toPublicOptions(opts))
 	assertProxyOptions(opts.proxy)
@@ -1628,6 +1735,8 @@ async function performWithRetry(opts: NormalizedRequestOptions): Promise<Respons
 		opts.body != null &&
 		(isReadable(opts.body) || typeof (opts.body as { getReader?: unknown }).getReader === 'function')
 	let lastErr: HellojsError | undefined
+	// Pooled proxies are ranked by real traffic only. Outcome is booked per hop inside
+	// `performRequest` so redirects and reroutes attribute to the hop that produced them.
 	for (let attempt = 0; attempt <= limit; attempt++) {
 		try {
 			const res = await performRequest(opts)
@@ -1646,13 +1755,20 @@ async function performWithRetry(opts: NormalizedRequestOptions): Promise<Respons
 			}
 			return res
 		} catch (e) {
+			// The proxy's own connect failures are booked inside `performRequest`, where the losing
+			// proxy is still known. Booking again here would double-count the last one.
 			// Abort is not a retryable transport failure, and fetch rejects with the signal's
 			// reason (a DOMException by default), not a HellojsError.
 			if (opts.signal?.aborted) throw abortReason(opts.signal)
 			if (typeof DOMException !== 'undefined' && e instanceof DOMException && e.name === 'AbortError') throw e
 			// Normalize: every error leaving this function is a HellojsError with a stable .code.
 			lastErr = wrapError(e)
-			const transient = ['ETIMEDOUT', 'ECONNRESET', 'EH2STREAM', 'EH3STREAM'].includes(lastErr.code)
+			const transientCodes = new Set(['ETIMEDOUT', 'ECONNRESET', 'EH2STREAM', 'EH3STREAM'])
+			const causeCode =
+				lastErr.cause instanceof HellojsError
+					? lastErr.cause.code
+					: (lastErr.cause as { code?: string } | undefined)?.code
+			const transient = transientCodes.has(lastErr.code) || transientCodes.has(causeCode ?? '')
 			if (!retriable || !transient || oneShotBody || attempt === limit) throw lastErr
 			await retryDelay(baseDelay * Math.pow(2, attempt), opts.signal)
 		}
@@ -1689,12 +1805,12 @@ function inputToOptions(input: string | URL | Request, init?: FetchInit): Normal
 	assertNoRemovedInitOptions(init)
 	let opts: NormalizedRequestOptions
 	if (typeof input === 'string' || input instanceof URL) {
-		opts = { ...(init ?? {}), url: input.toString() } as unknown as NormalizedRequestOptions
+		opts = { ...init, url: input.toString() } as unknown as NormalizedRequestOptions
 	} else {
 		const headers = headersToRecord(input.headers)
 		opts = {
 			...inputToRequestOptions(input),
-			...(init ?? {}),
+			...init,
 			url: input.url,
 			method: init?.method ?? input.method,
 			headers: init?.headers ? headersToRecord(init.headers) : headers,

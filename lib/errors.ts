@@ -40,6 +40,9 @@ const CODES = Object.freeze({
 	ECONNRESET: { category: CATEGORY.TRANSPORT, msg: 'TCP connection reset' },
 	ENOTFOUND: { category: CATEGORY.TRANSPORT, msg: 'DNS resolution failed' },
 	EPROXY: { category: CATEGORY.TRANSPORT, msg: 'proxy CONNECT failed' },
+	ENOPROXY: { category: CATEGORY.TRANSPORT, msg: 'target is Cloudflare-owned and the proxy pool is empty' },
+	EPROXYFAILED: { category: CATEGORY.TRANSPORT, msg: 'every pooled proxy failed before the response' },
+	ECFIPBLOCKED: { category: CATEGORY.TRANSPORT, msg: 'runtime refuses outbound sockets to Cloudflare IP ranges' },
 	EUDPUNAVAILABLE: { category: CATEGORY.TRANSPORT, msg: 'no UDP provider — HTTP/3 unreachable' },
 	ETOOMANYREDIRECTS: { category: CATEGORY.TRANSPORT, msg: 'redirect count exceeded the 20-hop browser limit' },
 
